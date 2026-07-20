@@ -11,6 +11,7 @@ import pytest
 import photometry_pipeline.guided_backend_execution as backend_execution
 import photometry_pipeline.guided_run_readiness as readiness
 import photometry_pipeline.guided_startup_orchestration as orchestration
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from tests.test_guided_execution_payloads import _accepted_outcome
 from tests.test_guided_startup_transaction import startup_request
 
@@ -32,7 +33,7 @@ def ready_state(startup_request):
         "validation_outcome": _accepted_outcome(),
         "validation_revision": startup_request.current_guided_revision,
         "current_gui_revision": startup_request.current_guided_revision,
-        "authorization_result": startup_request.authorization_result,
+        "startup_authority": startup_request.startup_authority,
         "payload_result": startup_request.payload_result,
         "backend_execution_available": True,
         "startup_orchestration_available": True,
@@ -78,7 +79,7 @@ def test_validation_outcome_marked_stale_requires_revalidation(ready_state):
 
 
 def test_missing_authorization_refuses(ready_state):
-    result = _evaluate(ready_state, authorization_result=None)
+    result = _evaluate(ready_state, startup_authority=None)
     assert result.status == "authorization_missing"
     assert not result.ready
     assert result.user_visible_state == "cannot_run"
@@ -91,21 +92,25 @@ def test_missing_authorization_refuses(ready_state):
 
 def test_unauthorized_authorization_refuses(ready_state):
     authorization = _unchecked(
-        ready_state["authorization_result"],
+        ready_state["startup_authority"].rwd,
         status="refused",
         authorized=False,
         run_authorization=False,
     )
-    result = _evaluate(ready_state, authorization_result=authorization)
+    result = _evaluate(
+        ready_state, startup_authority=GuidedStartupAuthority(rwd=authorization)
+    )
     assert result.status == "authorization_not_accepted"
 
 
 def test_authorization_revision_mismatch_is_stale(ready_state):
     authorization = _unchecked(
-        ready_state["authorization_result"],
+        ready_state["startup_authority"].rwd,
         authorized_gui_revision=ready_state["current_gui_revision"] - 1,
     )
-    result = _evaluate(ready_state, authorization_result=authorization)
+    result = _evaluate(
+        ready_state, startup_authority=GuidedStartupAuthority(rwd=authorization)
+    )
     assert result.status == "authorization_stale"
 
 
@@ -170,21 +175,91 @@ def test_fully_accepted_state_is_ready_but_hidden(ready_state):
     assert result.exposes_internal_cli_to_user is False
 
 
-def test_accepted_npm_validation_is_explicitly_not_available_for_run(ready_state):
-    outcome = _unchecked(
-        ready_state["validation_outcome"],
-        compile_result=SimpleNamespace(
-            request=SimpleNamespace(
-                source=SimpleNamespace(source_format="npm")
-            )
+def _npm_ready_state(intent, npm_payload):
+    """Plain, non-fixture-dependent readiness kwargs for an NPM authority.
+    Deliberately independent of the `ready_state`/`startup_request` RWD
+    fixtures: combining a real RWD authorization build with a fresh real
+    NPM validation in the same test triggers a pre-existing, unrelated
+    test-isolation hazard (a stale/mismatched materialization result),
+    reproduced and confirmed unrelated to this repair -- not something to
+    paper over by depending on it here."""
+    return {
+        "validation_outcome": _accepted_outcome(),
+        "backend_execution_available": True,
+        "startup_orchestration_available": True,
+    }
+
+
+def test_accepted_npm_validation_is_ready_when_authority_and_payload_are_accepted(
+    tmp_path,
+):
+    """Repair regression: a validated, accepted Guided NPM setup is no
+    longer refused as "not available yet" -- readiness truthfully reports
+    ready_hidden using NPM's own accepted authority, matching RWD's
+    existing behavior."""
+    from photometry_pipeline.guided_execution_payloads import (
+        build_guided_execution_startup_mapping_contract,
+    )
+    from photometry_pipeline.guided_npm_startup_bridge import (
+        compile_npm_generic_execution_payloads,
+    )
+    from tests.test_guided_npm_startup_bridge import _npm_pair
+
+    intent, authority = _npm_pair(tmp_path)
+    assert intent.execution_mode == "both"
+    contract = build_guided_execution_startup_mapping_contract()
+    npm_payload = compile_npm_generic_execution_payloads(
+        intent, authority, startup_mapping_contract=contract
+    )
+    assert npm_payload.ok is True
+
+    result = _evaluate(
+        _npm_ready_state(intent, npm_payload),
+        validation_revision=intent.validation_revision,
+        current_gui_revision=intent.validation_revision,
+        startup_authority=GuidedStartupAuthority(
+            npm_intent=intent, npm_authority=authority
         ),
+        payload_result=npm_payload,
     )
 
-    result = _evaluate(ready_state, validation_outcome=outcome)
+    assert result.status == "ready_hidden"
+    assert result.ready is True
+    assert result.user_visible_state == "ready_for_future_run_hidden"
+    assert result.authorization_identity == authority.canonical_authority_identity
 
-    assert result.status == "validated_npm_not_available"
+
+def test_npm_execution_mode_other_than_both_is_not_ready(tmp_path):
+    """Guided Mode exposes no phasic-versus-tonic choice: a genuinely
+    accepted NPM authority whose intent carries phasic/tonic (a valid
+    backend state, just not a Guided one) must not read as ready."""
+    from photometry_pipeline.guided_execution_payloads import (
+        build_guided_execution_startup_mapping_contract,
+    )
+    from photometry_pipeline.guided_npm_startup_bridge import (
+        compile_npm_generic_execution_payloads,
+    )
+    from tests.test_guided_npm_startup_bridge import _npm_pair
+
+    intent, authority = _npm_pair(tmp_path, execution_mode="phasic")
+    contract = build_guided_execution_startup_mapping_contract()
+    npm_payload = compile_npm_generic_execution_payloads(
+        intent, authority, startup_mapping_contract=contract
+    )
+    assert npm_payload.ok is False
+
+    result = _evaluate(
+        _npm_ready_state(intent, npm_payload),
+        validation_revision=intent.validation_revision,
+        current_gui_revision=intent.validation_revision,
+        startup_authority=GuidedStartupAuthority(
+            npm_intent=intent, npm_authority=authority
+        ),
+        payload_result=npm_payload,
+    )
+
+    assert result.status in ("payload_missing", "payload_not_ready")
     assert result.ready is False
-    assert result.user_visible_state == "cannot_run"
 
 
 def test_user_summaries_exclude_internal_terms():

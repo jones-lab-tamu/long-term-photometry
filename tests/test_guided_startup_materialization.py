@@ -308,7 +308,7 @@ def test_materialize_never_writes_posthoc_strategy_map_even_when_flag_enabled(al
     request, plan, allocated = allocated_case
 
     object.__setattr__(
-        request.authorization_result.production_intent.correction,
+        request.startup_authority.rwd.production_intent.correction,
         "applied_dff_orchestration_enabled",
         True
     )
@@ -344,10 +344,10 @@ def test_current_native_materialization_never_writes_posthoc_artifact(
     )
 
     request, plan, allocated = allocated_case
-    correction = request.authorization_result.production_intent.correction
+    correction = request.startup_authority.rwd.production_intent.correction
     included = tuple(f"ROI{index + 1}" for index in range(len(selected)))
     object.__setattr__(
-        request.authorization_result.production_intent.roi_scope,
+        request.startup_authority.rwd.production_intent.roi_scope,
         "included_roi_ids", included,
     )
     entries = tuple(
@@ -425,14 +425,14 @@ def test_native_materialization_never_calls_old_orchestration(
     )
 
     request, plan, allocated = allocated_case
-    correction = request.authorization_result.production_intent.correction
+    correction = request.startup_authority.rwd.production_intent.correction
     included = tuple(f"ROI{index + 1}" for index in range(len(selected)))
     object.__setattr__(
-        request.authorization_result.production_intent.roi_scope,
+        request.startup_authority.rwd.production_intent.roi_scope,
         "included_roi_ids", included,
     )
     object.__setattr__(
-        request.authorization_result.production_intent.execution_profile,
+        request.startup_authority.rwd.production_intent.execution_profile,
         "execution_mode", execution_mode,
     )
     entries = tuple(
@@ -510,7 +510,7 @@ def test_materialize_skips_strategy_map_when_orchestration_disabled(allocated_ca
     request, plan, allocated = allocated_case
 
     object.__setattr__(
-        request.authorization_result.production_intent.correction,
+        request.startup_authority.rwd.production_intent.correction,
         "applied_dff_orchestration_enabled",
         False
     )

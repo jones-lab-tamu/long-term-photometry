@@ -478,13 +478,23 @@ def materialize_guided_startup_artifacts(
                 ),
             )
 
-    correction = request.authorization_result.production_intent.correction
-    included_roi_ids = request.authorization_result.production_intent.roi_scope.included_roi_ids
-    native_current = bool(correction.production_strategy_map_version)
+    authority = request.startup_authority
+    included_roi_ids = authority.included_roi_ids
+    per_roi_correction_strategy_map = authority.per_roi_correction_strategy_map
+    # NPM was never part of the RWD legacy (pre-native-correction) era: it
+    # always resolves per-ROI, so it is always native_current -- a
+    # truthful fixed condition, not an invented strategy-map version (see
+    # guided_npm_startup_bridge and plan_guided_startup_transaction's
+    # identical rule).
+    native_current = (
+        True
+        if authority.is_npm
+        else bool(authority.rwd.production_intent.correction.production_strategy_map_version)
+    )
     try:
         native_correction_bytes = (
             serialize_guided_correction_payload(
-                included_roi_ids, correction.per_roi_production_strategy_map
+                included_roi_ids, per_roi_correction_strategy_map
             )
             if native_current else None
         )
@@ -522,10 +532,10 @@ def materialize_guided_startup_artifacts(
     # correction at Pipeline execution time; they no longer receive an
     # applied-dF/F orchestration trigger file.
 
-    feature_event = request.authorization_result.production_intent.feature_event
+    feature_event = authority.feature_event
     if feature_event.per_roi_feature_event_map:
         shapes = build_per_roi_feature_event_backend_shapes(
-            request.authorization_result.production_intent
+            authority.rwd.production_intent if not authority.is_npm else authority.npm_intent
         )
     else:
         shapes = None

@@ -1262,7 +1262,7 @@ def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
     assert window._guided_backend_validation_outcome.status == (
         "validator_accepted"
     )
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_run_readiness_label.text() == (
         "Guided validation succeeded, but Guided Run execution is unavailable "
@@ -1537,7 +1537,7 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     # only if authorization was genuinely accepted. No test-only shortcut
     # (_set_ready(), an injected transaction, or a second manual
     # authorize_guided_run() call) is used here.
-    authorization_result = window._guided_run_authorization_result
+    authorization_result = window._guided_startup_authority.rwd
     assert isinstance(authorization_result, GuidedRunAuthorizationResult)
     assert authorization_result.status == "authorized", (
         authorization_result.blocking_issues
@@ -1761,7 +1761,7 @@ def test_roi_preflight_accepts_timestamp_time_column_gui_end_to_end(
         {issue.detail_code for issue in outcome.blocking_issues},
     )
 
-    authorization_result = window._guided_run_authorization_result
+    authorization_result = window._guided_startup_authority.rwd
     assert isinstance(authorization_result, GuidedRunAuthorizationResult)
     authorization_categories = {
         issue.category for issue in authorization_result.blocking_issues
@@ -1838,7 +1838,7 @@ def test_real_validate_reaches_authorization_and_enables_run_in_source_launch_en
     outcome = window._guided_backend_validation_outcome
     assert outcome.status == "validator_accepted"
 
-    authorization_result = window._guided_run_authorization_result
+    authorization_result = window._guided_startup_authority.rwd
     assert isinstance(authorization_result, GuidedRunAuthorizationResult)
     assert authorization_result.status == "authorized", (
         authorization_result.blocking_issues
@@ -2522,6 +2522,53 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "RunSpec generated" not in preview_text
     assert "config generated" not in preview_text
     assert "output folder created" not in preview_text
+
+
+def test_guided_draft_execution_mode_is_always_both_untouched(window, tmp_path, monkeypatch):
+    """Repair regression: Guided Mode exposes no phasic-versus-tonic choice.
+    An untouched Guided draft must carry execution_mode == "both" without
+    relying on Full Control's _mode_combo default ordering."""
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.execution_intent.execution_mode == "both"
+
+
+def test_guided_draft_execution_mode_independent_of_full_control_mode_combo(
+    window, tmp_path, monkeypatch
+):
+    """Repair regression: changing the hidden Full Control mode widget must
+    not change the Guided draft's execution mode. This is the one
+    permitted manipulation of _mode_combo in an authentic Guided-path
+    test -- it exists only to prove the independence, not to select a
+    Guided mode."""
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+
+    for forced_mode in ("phasic", "tonic", "both"):
+        window._mode_combo.setCurrentText(forced_mode)
+        plan = window._build_guided_new_analysis_draft_plan()
+        assert plan.execution_intent.execution_mode == "both"
+
+
+def test_guided_draft_construction_does_not_mutate_full_control_mode_combo(
+    window, tmp_path, monkeypatch
+):
+    """Repair regression: building a Guided draft must not read or write
+    Full Control's _mode_combo -- Full Control's own mode selection is
+    left exactly as the scientist set it."""
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._mode_combo.setCurrentText("tonic")
+
+    window._build_guided_new_analysis_draft_plan()
+
+    assert window._mode_combo.currentText() == "tonic"
 
 
 def test_new_analysis_run_preview_consumes_valid_loaded_default_profile(

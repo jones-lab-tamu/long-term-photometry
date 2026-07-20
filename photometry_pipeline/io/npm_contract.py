@@ -12,6 +12,15 @@ import pandas as pd
 
 from photometry_pipeline.config import Config
 NPM_OUTPUT_TIME_BASIS = "relative_seconds_since_uv_signal_overlap_origin"
+# The final, recording-wide time basis after Guided authorized
+# cross-session chronology composition (session-local time plus each
+# chunk's frozen actual-elapsed offset) -- distinct from
+# NPM_OUTPUT_TIME_BASIS, which describes only the earlier within-session
+# coordinate system relative to the UV/signal overlap origin.
+NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS = (
+    "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
+    "authorized_within_session_time"
+)
 NPM_PARSER_CONTRACT_SCHEMA_NAME = "npm_normalized_parser_contract"
 NPM_PARSER_CONTRACT_SCHEMA_VERSION = "v1"
 

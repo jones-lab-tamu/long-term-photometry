@@ -40,6 +40,19 @@ from photometry_pipeline.guided_startup_transaction import (
     GuidedStartupTransactionRequest,
     GuidedWrapperEntrypointIdentity,
 )
+from photometry_pipeline.guided_npm_startup_bridge import (
+    GuidedStartupAuthority,
+    compile_npm_generic_execution_payloads,
+)
+from photometry_pipeline.guided_npm_execution_authority import (
+    GuidedNpmExecutionAuthority,
+    build_guided_npm_execution_authority,
+)
+from photometry_pipeline.guided_production_mapping import (
+    GuidedNpmProductionExecutionIntent,
+    GuidedNpmProductionMappingSuccess,
+    map_guided_npm_validation_outcome_to_execution_intent,
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +66,7 @@ class GuidedExecutionRequestBuildIssue:
 class GuidedExecutionRequestBuildResult:
     status: str
     ok: bool
-    authorization_result: GuidedRunAuthorizationResult | None
+    startup_authority: GuidedStartupAuthority | None
     payload_result: GuidedExecutionPayloadDerivationResult | None
     startup_transaction_request: GuidedStartupTransactionRequest | None
     blocking_issues: tuple[GuidedExecutionRequestBuildIssue, ...]
@@ -73,7 +86,7 @@ def _refused(
     return GuidedExecutionRequestBuildResult(
         status=status,
         ok=False,
-        authorization_result=None,
+        startup_authority=None,
         payload_result=None,
         startup_transaction_request=None,
         blocking_issues=(
@@ -190,6 +203,130 @@ def is_successful_completed_run_root(path: Path) -> bool:
     )
 
 
+def _finalize_guided_startup_transaction_request(
+    *,
+    startup_authority: GuidedStartupAuthority,
+    payload_result: GuidedExecutionPayloadDerivationResult,
+    startup_mapping_contract,
+    application_build_identity,
+    root: Path,
+    current_gui_revision: int,
+    current_time_utc: datetime | None,
+    token_factory: Callable[[], str] | None,
+    run_id_factory: Callable[[datetime], str] | None,
+) -> GuidedExecutionRequestBuildResult:
+    """Perform, exactly once, every format-neutral step shared by both the
+    RWD and NPM startup-request entry points: revision/token/run-ID
+    generation, wrapper identity + digest, source/output overlap and
+    safety checks, and GuidedStartupTransactionRequest construction. Ports
+    the identical logic build_guided_startup_request_from_validation used
+    to run inline. Neither entry point duplicates this."""
+    try:
+        source_root_canonical = startup_authority.source_root_canonical
+        output_base_canonical = startup_authority.output_base_canonical
+        source_root = Path(source_root_canonical).resolve(strict=False)
+        output_base = Path(output_base_canonical).resolve(strict=False)
+        now = current_time_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("current_time_utc must be timezone-aware")
+        now = now.astimezone(timezone.utc)
+        run_id = (
+            run_id_factory(now)
+            if run_id_factory is not None
+            else _default_run_id(now)
+        )
+        one_shot_token = (
+            token_factory()
+            if token_factory is not None
+            else secrets.token_urlsafe(32)
+        )
+        planned_run_dir = os.path.join(output_base_canonical, run_id)
+        run_dir = Path(planned_run_dir).resolve(strict=False)
+        wrapper_path = (
+            root / "tools" / "run_full_pipeline_deliverables.py"
+        ).resolve(strict=True)
+        wrapper_digest = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
+        output_exists_or_creatable, output_is_dir_or_creatable = (
+            _output_base_creatability(output_base)
+        )
+        output_is_dir = output_base.is_dir() if output_base.exists() else False
+        overlap = (
+            output_base == source_root
+            or _is_relative_to(output_base, source_root)
+            or _is_relative_to(source_root, output_base)
+        )
+        filesystem_policy = GuidedStartupFilesystemPolicy(
+            output_base_exists_or_creatable=output_exists_or_creatable,
+            output_base_is_directory_or_creatable=output_is_dir_or_creatable,
+            output_base_overlaps_source=overlap,
+            output_base_is_completed_run_root=(
+                is_successful_completed_run_root(output_base)
+                if output_is_dir
+                else False
+            ),
+            output_base_is_guided_diagnostic_cache_root=(
+                detect_guided_diagnostic_cache_candidate(output_base)
+                is not None
+                if output_is_dir
+                else False
+            ),
+            output_base_is_protected_ineligible_root=False,
+            planned_child_directly_under_base=run_dir.parent == output_base,
+            planned_child_already_exists=os.path.lexists(run_dir),
+            overwrite_requested=startup_authority.overwrite,
+            protected_root_context_complete=(
+                startup_authority.protected_root_context_complete
+            ),
+        )
+        request = GuidedStartupTransactionRequest(
+            startup_authority=startup_authority,
+            payload_result=payload_result,
+            startup_mapping_contract=startup_mapping_contract,
+            application_build_identity=application_build_identity,
+            current_guided_revision=current_gui_revision,
+            explicit_user_run_transition=True,
+            output_base_canonical=output_base_canonical,
+            source_root_canonical=source_root_canonical,
+            planned_run_id=run_id,
+            planned_allocated_run_dir=planned_run_dir,
+            wrapper_entrypoint=GuidedWrapperEntrypointIdentity(
+                entrypoint_kind="script_path",
+                entrypoint_value=os.fspath(wrapper_path),
+                trusted_application_root=os.fspath(root),
+                wrapper_identity_digest=wrapper_digest,
+                supported_contract_version=(
+                    "run_full_pipeline_deliverables.v1"
+                ),
+                supports_guided_preallocated_run_dir=True,
+                supports_guided_candidate_manifest=True,
+                trusted_entrypoint=True,
+                python_executable=sys.executable,
+            ),
+            one_shot_consumption_token=one_shot_token,
+            one_shot_token_current=True,
+            one_shot_token_unused=True,
+            current_time_utc_iso=now.isoformat(),
+            filesystem_policy=filesystem_policy,
+        )
+    except Exception:
+        return _refused(
+            "startup_request_invalid",
+            "startup",
+            "Guided startup request could not be constructed.",
+            current_gui_revision,
+        )
+    return GuidedExecutionRequestBuildResult(
+        status="built",
+        ok=True,
+        startup_authority=startup_authority,
+        payload_result=payload_result,
+        startup_transaction_request=request,
+        blocking_issues=(),
+        current_gui_revision=current_gui_revision,
+        request_ready=True,
+    )
+
+
 def build_guided_startup_request_from_validation(
     *,
     validation_context: GuidedBackendValidationGuiContext,
@@ -200,7 +337,8 @@ def build_guided_startup_request_from_validation(
     token_factory: Callable[[], str] | None = None,
     run_id_factory: Callable[[datetime], str] | None = None,
 ) -> GuidedExecutionRequestBuildResult:
-    """Build the exact authorization/payload/startup bundle in memory."""
+    """Build the exact authorization/payload/startup bundle in memory for
+    RWD -- unchanged existing authorization and payload compiler path."""
     if (
         isinstance(current_gui_revision, bool)
         or not isinstance(current_gui_revision, int)
@@ -307,109 +445,162 @@ def build_guided_startup_request_from_validation(
             current_gui_revision,
             extra_issues=_payload_blocking_issues(payload_result),
         )
+    return _finalize_guided_startup_transaction_request(
+        startup_authority=GuidedStartupAuthority(rwd=authorization_result),
+        payload_result=payload_result,
+        startup_mapping_contract=startup_mapping_contract,
+        application_build_identity=build_result.build_identity,
+        root=root,
+        current_gui_revision=current_gui_revision,
+        current_time_utc=current_time_utc,
+        token_factory=token_factory,
+        run_id_factory=run_id_factory,
+    )
 
-    try:
-        intent = authorization_result.production_intent
-        source_root_canonical = intent.input_source.source_root_canonical
-        output_base_canonical = intent.output_policy.output_base_canonical
-        source_root = Path(source_root_canonical).resolve(strict=False)
-        output_base = Path(output_base_canonical).resolve(strict=False)
-        now = current_time_utc or datetime.now(timezone.utc)
-        if now.tzinfo is None:
-            raise ValueError("current_time_utc must be timezone-aware")
-        now = now.astimezone(timezone.utc)
-        run_id = (
-            run_id_factory(now)
-            if run_id_factory is not None
-            else _default_run_id(now)
+
+def build_guided_npm_startup_request_from_validation(
+    *,
+    validation_context: GuidedBackendValidationGuiContext,
+    validation_outcome: GuidedBackendValidationWorkflowOutcome,
+    current_gui_revision: int,
+    project_root: Path | str | None = None,
+    current_time_utc: datetime | None = None,
+    token_factory: Callable[[], str] | None = None,
+    run_id_factory: Callable[[datetime], str] | None = None,
+) -> GuidedExecutionRequestBuildResult:
+    """Build the exact authority/payload/startup bundle in memory for NPM,
+    reusing the identical shared finalizer RWD uses. Consumes the already
+    accepted Guided NPM validation outcome/intent -- never GUI widgets,
+    never worker runtime projections. Does not route through
+    authorize_guided_run/derive_guided_execution_payloads (those remain
+    RWD-specific); NPM's own existing intent-mapping and authority-
+    building functions are used instead."""
+    if (
+        isinstance(current_gui_revision, bool)
+        or not isinstance(current_gui_revision, int)
+        or current_gui_revision < 0
+        or not isinstance(
+            validation_context, GuidedBackendValidationGuiContext
         )
-        one_shot_token = (
-            token_factory()
-            if token_factory is not None
-            else secrets.token_urlsafe(32)
+        or not isinstance(
+            validation_outcome, GuidedBackendValidationWorkflowOutcome
         )
-        planned_run_dir = os.path.join(output_base_canonical, run_id)
-        run_dir = Path(planned_run_dir).resolve(strict=False)
-        wrapper_path = (
-            root / "tools" / "run_full_pipeline_deliverables.py"
-        ).resolve(strict=True)
-        wrapper_digest = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
-        output_exists_or_creatable, output_is_dir_or_creatable = (
-            _output_base_creatability(output_base)
-        )
-        output_is_dir = output_base.is_dir() if output_base.exists() else False
-        overlap = (
-            output_base == source_root
-            or _is_relative_to(output_base, source_root)
-            or _is_relative_to(source_root, output_base)
-        )
-        filesystem_policy = GuidedStartupFilesystemPolicy(
-            output_base_exists_or_creatable=output_exists_or_creatable,
-            output_base_is_directory_or_creatable=output_is_dir_or_creatable,
-            output_base_overlaps_source=overlap,
-            output_base_is_completed_run_root=(
-                is_successful_completed_run_root(output_base)
-                if output_is_dir
-                else False
-            ),
-            output_base_is_guided_diagnostic_cache_root=(
-                detect_guided_diagnostic_cache_candidate(output_base)
-                is not None
-                if output_is_dir
-                else False
-            ),
-            output_base_is_protected_ineligible_root=False,
-            planned_child_directly_under_base=run_dir.parent == output_base,
-            planned_child_already_exists=os.path.lexists(run_dir),
-            overwrite_requested=intent.output_policy.overwrite,
-            protected_root_context_complete=(
-                intent.output_policy.protected_root_context_complete
-            ),
-        )
-        request = GuidedStartupTransactionRequest(
-            authorization_result=authorization_result,
-            payload_result=payload_result,
-            startup_mapping_contract=startup_mapping_contract,
-            application_build_identity=build_result.build_identity,
-            current_guided_revision=current_gui_revision,
-            explicit_user_run_transition=True,
-            output_base_canonical=output_base_canonical,
-            source_root_canonical=source_root_canonical,
-            planned_run_id=run_id,
-            planned_allocated_run_dir=planned_run_dir,
-            wrapper_entrypoint=GuidedWrapperEntrypointIdentity(
-                entrypoint_kind="script_path",
-                entrypoint_value=os.fspath(wrapper_path),
-                trusted_application_root=os.fspath(root),
-                wrapper_identity_digest=wrapper_digest,
-                supported_contract_version=(
-                    "run_full_pipeline_deliverables.v1"
-                ),
-                supports_guided_preallocated_run_dir=True,
-                supports_guided_candidate_manifest=True,
-                trusted_entrypoint=True,
-                python_executable=sys.executable,
-            ),
-            one_shot_consumption_token=one_shot_token,
-            one_shot_token_current=True,
-            one_shot_token_unused=True,
-            current_time_utc_iso=now.isoformat(),
-            filesystem_policy=filesystem_policy,
-        )
-    except Exception:
+    ):
         return _refused(
-            "startup_request_invalid",
-            "startup",
-            "Guided startup request could not be constructed.",
+            "invalid_context",
+            "validation",
+            "Current Guided validation context is invalid.",
+            current_gui_revision
+            if isinstance(current_gui_revision, int)
+            else 0,
+        )
+    if (
+        validation_context.revision != current_gui_revision
+        or validation_outcome.stale is not False
+    ):
+        return _refused(
+            "validation_not_current",
+            "validation",
+            "Guided validation is no longer current.",
             current_gui_revision,
         )
-    return GuidedExecutionRequestBuildResult(
-        status="built",
-        ok=True,
-        authorization_result=authorization_result,
+    if (
+        validation_outcome.status != "validator_accepted"
+        or validation_outcome.accepted_for_backend_validation is not True
+    ):
+        return _refused(
+            "validation_not_accepted",
+            "validation",
+            "Guided validation was not accepted.",
+            current_gui_revision,
+        )
+
+    root = (
+        Path(project_root).resolve()
+        if project_root is not None
+        else Path(__file__).resolve().parent.parent
+    )
+    build_result = resolve_application_build_identity(project_root=root)
+    if build_result.build_identity is None:
+        return _refused(
+            "build_identity_unavailable",
+            "build_identity",
+            "Application build identity is unavailable.",
+            current_gui_revision,
+        )
+    try:
+        mapping_contract = build_guided_production_mapping_contract()
+        mapping_result = map_guided_npm_validation_outcome_to_execution_intent(
+            validation_outcome,
+            expected_validation_revision=current_gui_revision,
+            expected_plan_identity=getattr(
+                validation_outcome, "guided_plan_identity", None
+            ),
+            application_build_identity=build_result.build_identity,
+            mapping_contract=mapping_contract,
+        )
+    except Exception:
+        mapping_result = None
+    if not isinstance(mapping_result, GuidedNpmProductionMappingSuccess):
+        return _refused(
+            "authorization_failed",
+            "authorization",
+            "Guided NPM execution authorization failed.",
+            current_gui_revision,
+        )
+    intent = mapping_result.intent
+    if not isinstance(intent, GuidedNpmProductionExecutionIntent):
+        return _refused(
+            "authorization_failed",
+            "authorization",
+            "Guided NPM execution authorization failed.",
+            current_gui_revision,
+        )
+    try:
+        authority_result = build_guided_npm_execution_authority(intent)
+    except Exception:
+        authority_result = None
+    if not isinstance(authority_result, GuidedNpmExecutionAuthority):
+        return _refused(
+            "authorization_failed",
+            "authorization",
+            "Guided NPM execution authorization failed.",
+            current_gui_revision,
+        )
+    try:
+        startup_mapping_contract = (
+            build_guided_execution_startup_mapping_contract()
+        )
+        payload_result = compile_npm_generic_execution_payloads(
+            intent,
+            authority_result,
+            startup_mapping_contract=startup_mapping_contract,
+        )
+    except Exception:
+        payload_result = None
+    if (
+        not isinstance(
+            payload_result, GuidedExecutionPayloadDerivationResult
+        )
+        or payload_result.ok is not True
+    ):
+        return _refused(
+            "payload_derivation_failed",
+            "payload",
+            "Guided NPM execution payload derivation failed.",
+            current_gui_revision,
+            extra_issues=_payload_blocking_issues(payload_result),
+        )
+    return _finalize_guided_startup_transaction_request(
+        startup_authority=GuidedStartupAuthority(
+            npm_intent=intent, npm_authority=authority_result
+        ),
         payload_result=payload_result,
-        startup_transaction_request=request,
-        blocking_issues=(),
+        startup_mapping_contract=startup_mapping_contract,
+        application_build_identity=build_result.build_identity,
+        root=root,
         current_gui_revision=current_gui_revision,
-        request_ready=True,
+        current_time_utc=current_time_utc,
+        token_factory=token_factory,
+        run_id_factory=run_id_factory,
     )

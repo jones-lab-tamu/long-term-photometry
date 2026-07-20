@@ -15,6 +15,7 @@ import photometry_pipeline.guided_production_mapping as mapping
 import photometry_pipeline.guided_run_authorization as authorization
 import photometry_pipeline.guided_startup_allocation as allocation
 import photometry_pipeline.guided_startup_transaction as startup
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from gui.run_report_parser import classify_completed_run_candidate
 from photometry_pipeline.guided_backend_validation_workflow import (
     GuidedBackendValidationGuiContext,
@@ -144,7 +145,7 @@ def _request_for_paths(
     )
     planned_dir = planned_dir or output_base / run_id
     request = startup.GuidedStartupTransactionRequest(
-        authorization_result=auth,
+        startup_authority=GuidedStartupAuthority(rwd=auth),
         payload_result=derived,
         startup_mapping_contract=contract,
         application_build_identity=auth.production_intent.application_build_identity,

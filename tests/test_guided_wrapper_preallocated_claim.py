@@ -122,6 +122,7 @@ def test_current_native_artifact_mutation_refuses_before_wrapper_claim(prepared_
     assert refused.blocking_issues[0].category == "startup_artifact_hash_mismatch"
 
 
+@pytest.mark.parametrize("base_format", ("rwd", "npm"))
 @pytest.mark.parametrize(
     "changes",
     (
@@ -136,13 +137,36 @@ def test_current_native_artifact_mutation_refuses_before_wrapper_claim(prepared_
         {"validate_only": True},
         {"traces_only": True},
         {"acquisition_mode": "continuous"},
-        {"format": "npm"},
         {"run_type": "tuning_prep"},
     ),
 )
-def test_internal_flag_conflicts_refuse(prepared_case, changes):
+def test_internal_flag_conflicts_refuse(prepared_case, changes, base_format):
+    """Every existing safety check applies identically regardless of
+    format -- an accepted NPM format does not bypass any other Guided
+    preallocated-mode conflict check."""
     with pytest.raises(RuntimeError, match="handoff refused"):
-        _validate(prepared_case, **changes)
+        _validate(prepared_case, format=base_format, **changes)
+
+
+@pytest.mark.parametrize("base_format", ("rwd", "npm"))
+def test_valid_preallocated_directory_validates_for_supported_formats(
+    prepared_case, base_format
+):
+    """An otherwise valid Guided preallocated argument set is accepted
+    for both currently supported formats -- RWD and NPM alike."""
+    validation = _validate(prepared_case, format=base_format)
+    assert validation.accepted
+
+
+@pytest.mark.parametrize(
+    "unsupported_format", ("custom_tabular", "auto", "unknown_format", None, "")
+)
+def test_unsupported_format_refuses(prepared_case, unsupported_format):
+    """Only RWD and NPM are supported Guided preallocated formats --
+    custom_tabular, auto, and any unrecognized or missing format value
+    must still be refused."""
+    with pytest.raises(RuntimeError, match="handoff refused"):
+        _validate(prepared_case, format=unsupported_format)
 
 
 @pytest.mark.parametrize(

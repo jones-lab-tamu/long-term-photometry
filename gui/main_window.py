@@ -2453,7 +2453,7 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_outcome_revision = None
         self._guided_backend_validation_stale_reason = ""
         self._guided_backend_validation_active = False
-        self._guided_run_authorization_result = None
+        self._guided_startup_authority = None
         self._guided_execution_payload_result = None
         self._guided_run_readiness = None
         self._guided_startup_transaction_request = None
@@ -11714,7 +11714,7 @@ class MainWindow(QMainWindow):
         already-recorded execution result (see
         _finish_guided_backend_execution_with_result, which retains the
         result while the authorization it was launched from is consumed)."""
-        self._guided_run_authorization_result = None
+        self._guided_startup_authority = None
         self._guided_execution_payload_result = None
         self._guided_startup_transaction_request = None
         self._guided_validated_plan_identity = None
@@ -11746,7 +11746,7 @@ class MainWindow(QMainWindow):
 
     def _retain_guided_execution_readiness_state(
         self,
-        authorization_result,
+        startup_authority,
         payload_result,
         startup_transaction_request,
         plan_identity=None,
@@ -11755,8 +11755,8 @@ class MainWindow(QMainWindow):
         from photometry_pipeline.guided_execution_payloads import (
             GuidedExecutionPayloadDerivationResult,
         )
-        from photometry_pipeline.guided_run_authorization import (
-            GuidedRunAuthorizationResult,
+        from photometry_pipeline.guided_npm_startup_bridge import (
+            GuidedStartupAuthority,
         )
         from photometry_pipeline.guided_startup_transaction import (
             GuidedStartupTransactionRequest,
@@ -11765,12 +11765,23 @@ class MainWindow(QMainWindow):
         revision = int(
             getattr(self, "_guided_backend_validation_revision", 0)
         )
+        if isinstance(startup_authority, GuidedStartupAuthority):
+            if startup_authority.is_npm:
+                authority_current = (
+                    startup_authority.npm_intent.validation_revision == revision
+                )
+            else:
+                auth = startup_authority.rwd
+                authority_current = (
+                    auth.status == "authorized"
+                    and auth.authorized is True
+                    and auth.run_authorization is True
+                    and auth.authorized_gui_revision == revision
+                )
+        else:
+            authority_current = False
         valid = (
-            isinstance(authorization_result, GuidedRunAuthorizationResult)
-            and authorization_result.status == "authorized"
-            and authorization_result.authorized is True
-            and authorization_result.run_authorization is True
-            and authorization_result.authorized_gui_revision == revision
+            authority_current
             and isinstance(
                 payload_result, GuidedExecutionPayloadDerivationResult
             )
@@ -11781,8 +11792,8 @@ class MainWindow(QMainWindow):
             )
             and startup_transaction_request.current_guided_revision
             == revision
-            and startup_transaction_request.authorization_result
-            is authorization_result
+            and startup_transaction_request.startup_authority
+            is startup_authority
             and startup_transaction_request.payload_result is payload_result
             and isinstance(plan_identity, str)
             and len(plan_identity) == 64
@@ -11790,7 +11801,7 @@ class MainWindow(QMainWindow):
         if not valid:
             self._clear_guided_execution_readiness_state()
             return False
-        self._guided_run_authorization_result = authorization_result
+        self._guided_startup_authority = startup_authority
         self._guided_execution_payload_result = payload_result
         self._guided_startup_transaction_request = (
             startup_transaction_request
@@ -11887,12 +11898,24 @@ class MainWindow(QMainWindow):
         context,
         outcome,
     ):
-        """Delegate startup-request construction to the backend builder."""
+        """Delegate startup-request construction to the backend builder.
+
+        Dispatches to the RWD or NPM entry point of the shared startup
+        builder based on the accepted draft's own format -- both entry
+        points reuse the identical shared finalizer, allocation,
+        materialization, wrapper launch, completion, and Results path.
+        """
         from photometry_pipeline.guided_execution_request_builder import (
+            build_guided_npm_startup_request_from_validation,
             build_guided_startup_request_from_validation,
         )
 
-        result = build_guided_startup_request_from_validation(
+        builder = (
+            build_guided_npm_startup_request_from_validation
+            if context.draft.input_format == "npm"
+            else build_guided_startup_request_from_validation
+        )
+        result = builder(
             validation_context=context,
             validation_outcome=outcome,
             current_gui_revision=int(
@@ -11911,7 +11934,7 @@ class MainWindow(QMainWindow):
         # Successful derivation: no explanation to carry.
         self._clear_guided_execution_derivation_reason()
         return (
-            result.authorization_result,
+            result.startup_authority,
             result.payload_result,
             result.startup_transaction_request,
         )
@@ -11976,12 +11999,7 @@ class MainWindow(QMainWindow):
                 and outcome_revision
                 == int(self._guided_backend_validation_revision)
             ):
-                if context is not None and context.draft.input_format == "npm":
-                    # B2-B proves the normalized NPM setup and backend
-                    # validation request only.  It deliberately does not
-                    # enter the existing RWD authorization family.
-                    state = None
-                else:
+                if context is not None:
                     try:
                         state = self._derive_guided_execution_state_from_validation(
                             context,
@@ -12236,66 +12254,15 @@ class MainWindow(QMainWindow):
                 details.setText("")
 
     def _refresh_guided_run_readiness_display(self) -> None:
-        """Update only the guarded Guided Run affordance and its safe text."""
-        if self._guided_run_target_is_npm():
-            from photometry_pipeline.guided_npm_run_readiness import (
-                evaluate_guided_npm_run_readiness,
-            )
+        """Update only the guarded Guided Run affordance and its safe text.
 
-            npm_result = evaluate_guided_npm_run_readiness(
-                validation_outcome=getattr(
-                    self, "_guided_backend_validation_outcome", None
-                ),
-                validation_revision=getattr(
-                    self, "_guided_backend_validation_outcome_revision", None
-                ),
-                current_gui_revision=int(
-                    getattr(self, "_guided_backend_validation_revision", 0)
-                ),
-                execution_active=getattr(
-                    self, "_guided_backend_execution_active", False
-                ),
-                execution_result_pending=getattr(
-                    self, "_guided_backend_execution_result", None
-                )
-                is not None,
-            )
-            self._guided_npm_run_readiness = npm_result
-            button = getattr(self, "_guided_run_btn", None)
-            label = getattr(self, "_guided_run_readiness_label", None)
-            if button is not None:
-                button.setEnabled(npm_result.ready)
-                button.setToolTip(
-                    "Guided Run is ready to start."
-                    if npm_result.ready
-                    else npm_result.user_summary
-                )
-            if label is not None:
-                label.setText(npm_result.user_summary)
-            # Once no completed result is pending (e.g. a setup change
-            # discarded it), the completed run's output-folder line and its
-            # Open-results-folder button no longer belong to the current
-            # draft setup -- clear both so a stale output path can never be
-            # confused with the newly edited setup. In the NPM branch the
-            # details label is NPM-owned, so clear it directly (this also
-            # drops any stale NPM failure detail, not only a success line).
-            if getattr(self, "_guided_backend_execution_result", None) is None:
-                details = getattr(
-                    self, "_guided_run_execution_details_label", None
-                )
-                if details is not None:
-                    details.setText("")
-                self._clear_guided_npm_completed_output_handoff(
-                    clear_details=False
-                )
-            return
-
-        # Non-NPM format (RWD / custom tabular): a prior NPM completion's
-        # Open-results-folder button and output-folder line must never
-        # remain visible while a different input format is being set up.
-        # Clear the NPM handoff BEFORE the RWD evaluator writes its own
-        # text; `clear_details=True` drops the stale NPM output line only
-        # (it leaves any legitimate RWD message intact).
+        Supported Guided NPM runs now use the identical shared readiness
+        evaluation RWD does (below) -- the former bespoke
+        evaluate_guided_npm_run_readiness branch is no longer reached from
+        here. A stale NPM completed-output handoff (from before this
+        repair, or from a prior bespoke-path run) must still never remain
+        visible while a different/new setup is being prepared.
+        """
         if (
             getattr(self, "_guided_completed_output_format", None) == "npm"
             or getattr(self, "_guided_backend_execution_result", None) is None
@@ -12316,8 +12283,8 @@ class MainWindow(QMainWindow):
             current_gui_revision=int(
                 getattr(self, "_guided_backend_validation_revision", 0)
             ),
-            authorization_result=getattr(
-                self, "_guided_run_authorization_result", None
+            startup_authority=getattr(
+                self, "_guided_startup_authority", None
             ),
             payload_result=getattr(
                 self, "_guided_execution_payload_result", None
@@ -12372,8 +12339,8 @@ class MainWindow(QMainWindow):
         if (
             not isinstance(request, GuidedStartupTransactionRequest)
             or request.current_guided_revision != revision
-            or request.authorization_result
-            is not getattr(self, "_guided_run_authorization_result", None)
+            or request.startup_authority
+            is not getattr(self, "_guided_startup_authority", None)
             or request.payload_result
             is not getattr(self, "_guided_execution_payload_result", None)
         ):
@@ -12381,6 +12348,16 @@ class MainWindow(QMainWindow):
         return request
 
     def _guided_source_snapshot_matches_authorization(self, request) -> bool:
+        """Recheck the accepted candidate/source snapshot at Run click time,
+        for whichever format the accepted authority carries."""
+        authority = getattr(request, "startup_authority", None)
+        if authority is None:
+            return False
+        if authority.is_npm:
+            return self._guided_npm_source_snapshot_matches_authorization(authority)
+        return self._guided_rwd_source_snapshot_matches_authorization(authority)
+
+    def _guided_rwd_source_snapshot_matches_authorization(self, authority) -> bool:
         """Recheck the authorized RWD candidate snapshot at Run click time.
 
         Setup authorization freezes both candidate identities and chronology.
@@ -12395,7 +12372,7 @@ class MainWindow(QMainWindow):
         )
 
         try:
-            authorization = request.authorization_result
+            authorization = authority.rwd
             expected_identity = authorization.candidate_preflight_identity
             production_intent = authorization.production_intent
             live = run_candidate_manifest_execution_preflight(
@@ -12412,11 +12389,97 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _guided_npm_source_snapshot_matches_authorization(self, authority) -> bool:
+        """Recheck the accepted NPM source/settings snapshot at Run click
+        time, without constructing any worker-era artifact (execution
+        request, startup payload, claim, or receipt) and without calling
+        the bespoke worker's own freshness verifier.
+
+        Reruns the same shared validate_current_guided_draft_for_backend
+        the setup check itself uses, against the CURRENT live GUI/
+        filesystem state, then compares the fresh result's identities
+        against the already-accepted intent's own stored identities using
+        only existing identity fields -- no new identity is computed. A
+        merely-accepted fresh validation is not sufficient by itself: it
+        must also resolve to the identical validated request/source/
+        parser/ROI/normalized-recording identities the accepted intent
+        already carries, and the accepted authority itself must still
+        pass its own existing self-consistency check.
+        """
+        from photometry_pipeline.guided_production_mapping import (
+            build_guided_production_mapping_contract,
+            map_guided_npm_validation_outcome_to_execution_intent,
+        )
+        from photometry_pipeline.guided_backend_validation_workflow import (
+            validate_current_guided_draft_for_backend,
+        )
+
+        try:
+            accepted_intent = authority.npm_intent
+            authority.verify_self_consistent()
+            context = self._capture_guided_backend_validation_context()
+            if context.draft.input_format != "npm":
+                return False
+            fresh_outcome = validate_current_guided_draft_for_backend(
+                context.draft,
+                parser_contract=context.parser_contract,
+                additional_protected_roots=context.additional_protected_roots,
+                validator_contract=context.validator_contract,
+                validation_revision=accepted_intent.validation_revision,
+            )
+            if (
+                fresh_outcome.status != "validator_accepted"
+                or fresh_outcome.accepted_for_backend_validation is not True
+                or fresh_outcome.stale is not False
+            ):
+                return False
+            fresh_mapping_result = map_guided_npm_validation_outcome_to_execution_intent(
+                fresh_outcome,
+                expected_validation_revision=accepted_intent.validation_revision,
+                expected_plan_identity=accepted_intent.current_plan_identity,
+                application_build_identity=accepted_intent.application_build_identity,
+                mapping_contract=build_guided_production_mapping_contract(),
+            )
+            from photometry_pipeline.guided_production_mapping import (
+                GuidedNpmProductionExecutionIntent,
+                GuidedNpmProductionMappingSuccess,
+            )
+
+            if not isinstance(
+                fresh_mapping_result, GuidedNpmProductionMappingSuccess
+            ):
+                return False
+            fresh_intent = fresh_mapping_result.intent
+            if not isinstance(fresh_intent, GuidedNpmProductionExecutionIntent):
+                return False
+            return bool(
+                fresh_intent.source_format == "npm"
+                and fresh_intent.source_request_identity
+                == accepted_intent.source_request_identity
+                and fresh_intent.source_snapshot_set_identity
+                == accepted_intent.source_snapshot_set_identity
+                and fresh_intent.source_snapshot_content_identity
+                == accepted_intent.source_snapshot_content_identity
+                and fresh_intent.parser_policy_identity
+                == accepted_intent.parser_policy_identity
+                and fresh_intent.normalized_recording_description_identity
+                == accepted_intent.normalized_recording_description_identity
+                and fresh_intent.physical_to_canonical_roi_mapping_identity
+                == accepted_intent.physical_to_canonical_roi_mapping_identity
+                and fresh_intent.validation_revision
+                == accepted_intent.validation_revision
+                and fresh_intent.canonical_intent_identity
+                == accepted_intent.canonical_intent_identity
+            )
+        except Exception:
+            return False
+
     def _on_guided_run_clicked_backend_guarded(self) -> None:
-        """Recheck readiness and start the Guided backend adapter off the GUI thread."""
-        if self._guided_run_target_is_npm():
-            self._on_guided_npm_run_clicked()
-            return
+        """Recheck readiness and start the Guided backend adapter off the
+        GUI thread. Supported Guided NPM runs use the identical shared
+        startup-request/orchestration path RWD does -- the former
+        diversion into the bespoke NPM worker (_on_guided_npm_run_clicked)
+        is no longer reached from here."""
         self._refresh_guided_run_readiness_display()
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
@@ -12466,14 +12529,25 @@ class MainWindow(QMainWindow):
                 )
             return
         outcome = getattr(self, "_guided_backend_validation_outcome", None)
-        authorization = getattr(self, "_guided_run_authorization_result", None)
+        authority = getattr(self, "_guided_startup_authority", None)
+        if authority is not None and authority.is_npm:
+            authority_current_for_outcome = (
+                authority.npm_intent.source_request_identity
+                == getattr(outcome, "request_identity", None)
+            )
+        elif authority is not None:
+            authority_current_for_outcome = (
+                authority.rwd.stored_request_identity
+                == getattr(outcome, "request_identity", None)
+            )
+        else:
+            authority_current_for_outcome = False
         if (
             not self._is_guided_backend_validation_outcome_current()
             or outcome is None
-            or authorization is None
-            or request.authorization_result is not authorization
-            or authorization.stored_request_identity
-            != getattr(outcome, "request_identity", None)
+            or authority is None
+            or request.startup_authority is not authority
+            or not authority_current_for_outcome
         ):
             if button is not None:
                 button.setEnabled(False)
@@ -12690,6 +12764,26 @@ class MainWindow(QMainWindow):
             )
         return False
 
+    def _guided_completed_run_adapter_format_is_npm(self, run_dir: str) -> bool:
+        """True only when the completed run's own persisted normalized
+        recording provenance truthfully declares adapter_format == "npm".
+        Read from the run directory rather than live GUI state, which is
+        already cleared by the time this is checked (see
+        _clear_guided_execution_authorization_state). Defaults to False
+        (preserving prior RWD-only behavior) whenever this file is
+        absent or unreadable."""
+        from photometry_pipeline.guided_startup_transaction import (
+            GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+        )
+
+        path = os.path.join(run_dir, GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get("adapter_format") == "npm"
+
     def _finish_guided_backend_execution_with_result(self, result) -> None:
         """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
@@ -12747,11 +12841,26 @@ class MainWindow(QMainWindow):
             ):
                 output_dir = str(result.completed_run_candidate_path)
                 self._guided_npm_completed_output_dir = output_dir
-                self._guided_completed_output_format = "rwd"
-                open_btn = getattr(self, "_guided_npm_open_output_btn", None)
-                if open_btn is not None:
-                    open_btn.setVisible(True)
-                    open_btn.setEnabled(True)
+                # A supported Guided NPM run reaches this same shared
+                # completion status as RWD, but must surface only the
+                # ordinary in-app Review/Results loading affordance
+                # (already refreshed above), never this bespoke
+                # open-folder-only shortcut. The persisted format must be
+                # truthful (not hardcoded "rwd"), since
+                # _refresh_guided_run_readiness_display's stale-handoff
+                # cleanup only recognizes a completed NPM state via this
+                # same flag.
+                completed_is_npm = self._guided_completed_run_adapter_format_is_npm(
+                    output_dir
+                )
+                self._guided_completed_output_format = (
+                    "npm" if completed_is_npm else "rwd"
+                )
+                if not completed_is_npm:
+                    open_btn = getattr(self, "_guided_npm_open_output_btn", None)
+                    if open_btn is not None:
+                        open_btn.setVisible(True)
+                        open_btn.setEnabled(True)
                 details_label.setText(
                     f"Results folder: {output_dir}"
                 )
@@ -13562,9 +13671,11 @@ class MainWindow(QMainWindow):
                 else ""
             ),
             approved_missing_sessions=list(getattr(self, "_guided_approved_missing_sessions", [])),
-            execution_intent=GuidedNewAnalysisExecutionIntent(
-                execution_mode=str(self._mode_combo.currentText()).strip().lower()
-            ),
+            # Guided Mode exposes no phasic-versus-tonic choice: it always
+            # produces both analysis components from one Run. This must not
+            # read Full Control's _mode_combo, which Guided never shows and
+            # which a scientist never touches.
+            execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode="both"),
         )
 
     @staticmethod
@@ -27867,11 +27978,9 @@ class MainWindow(QMainWindow):
             "Select which analysis family to run: tonic, phasic, or both."
         )
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
-        self._mode_combo.currentIndexChanged.connect(
-            lambda _index: self._invalidate_guided_backend_validation(
-                "analysis mode changed"
-            )
-        )
+        # Full Control-only widget: Guided never shows or reads this
+        # combo (its execution_mode is always "both"), so it must not
+        # invalidate Guided's own validation/authorization.
         form.addRow("Mode:", self._mode_combo)
 
         self._run_profile_combo = QComboBox()

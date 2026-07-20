@@ -35,6 +35,7 @@ import photometry_pipeline.guided_startup_allocation as allocation
 import photometry_pipeline.guided_startup_materialization as materialization
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import photometry_pipeline.guided_startup_transaction as startup
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from photometry_pipeline.config import Config
 from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.guided_backend_validation_workflow import (
@@ -264,7 +265,7 @@ def _request_for_paths_with_per_roi_feature_map(
     )
     planned_dir = output_base / run_id
     request = startup.GuidedStartupTransactionRequest(
-        authorization_result=auth,
+        startup_authority=GuidedStartupAuthority(rwd=auth),
         payload_result=derived,
         startup_mapping_contract=contract,
         application_build_identity=auth.production_intent.application_build_identity,
@@ -611,7 +612,7 @@ def test_empty_map_materialization_writes_no_per_roi_artifact(tmp_path, monkeypa
     request, plan = _request_for_paths(
         monkeypatch, source_root=source, output_base=output
     )
-    assert request.authorization_result.production_intent.feature_event.per_roi_feature_event_map == ()
+    assert request.startup_authority.rwd.production_intent.feature_event.per_roi_feature_event_map == ()
 
     _allocated, result = _materialize(request, plan)
 
@@ -624,7 +625,7 @@ def test_default_only_map_materialization_writes_no_per_roi_artifact(default_onl
     every included ROI resolved to the default profile. Must not write the
     artifact -- writing here would be the bug this follow-up fixes."""
     request, plan = default_only_case
-    feature_event = request.authorization_result.production_intent.feature_event
+    feature_event = request.startup_authority.rwd.production_intent.feature_event
     assert feature_event.per_roi_feature_event_map != ()
     assert all(
         entry.source == "default" for entry in feature_event.per_roi_feature_event_map

@@ -276,7 +276,7 @@ def test_real_wrapper_phasic_command_excludes_overwrite_and_includes_sessions_pe
     """
     request, _plan = allocation_case
     assert (
-        request.authorization_result.production_intent.acquisition.sessions_per_hour
+        request.startup_authority.rwd.production_intent.acquisition.sessions_per_hour
         == 6
     )
     runner, captured = _real_wrapper_runner_capture_phasic_cmd(monkeypatch)

@@ -11,9 +11,7 @@ from photometry_pipeline.guided_execution_payloads import (
     GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE,
     GuidedExecutionPayloadDerivationResult,
 )
-from photometry_pipeline.guided_run_authorization import (
-    GuidedRunAuthorizationResult,
-)
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 
 
 @dataclass(frozen=True)
@@ -58,10 +56,6 @@ _SUMMARIES = {
         "Guided validation succeeded, but Guided Run execution is unavailable "
         "in this build."
     ),
-    "validated_npm_not_available": (
-        "This NPM recording setup was checked successfully. Running NPM analyses "
-        "is not available yet."
-    ),
     "authorization_not_accepted": (
         "Guided Run could not authorize the validated setup."
     ),
@@ -82,7 +76,7 @@ def _result(
     status: str,
     validation_revision: int | None,
     current_gui_revision: int,
-    authorization: GuidedRunAuthorizationResult | None,
+    authorization: GuidedStartupAuthority | None,
     payload: GuidedExecutionPayloadDerivationResult | None,
     backend_execution_available: bool,
     startup_orchestration_available: bool,
@@ -128,7 +122,7 @@ def _result(
         current_gui_revision=current_gui_revision,
         authorization_identity=(
             authorization.canonical_authorization_identity
-            if isinstance(authorization, GuidedRunAuthorizationResult)
+            if isinstance(authorization, GuidedStartupAuthority)
             else None
         ),
         payload_status=(
@@ -141,7 +135,7 @@ def _result(
     )
 
 
-def _first_subset_current(authorization: GuidedRunAuthorizationResult) -> bool:
+def _rwd_first_subset_current(authorization) -> bool:
     intent = authorization.production_intent
     return bool(
         intent is not None
@@ -158,17 +152,42 @@ def _first_subset_current(authorization: GuidedRunAuthorizationResult) -> bool:
     )
 
 
+def _npm_first_subset_current(intent) -> bool:
+    # NPM has no RWD-only "selection_mode"/"strategy_scope" concepts to
+    # recreate here -- their equivalent guarantees are already proven at
+    # authority-construction time (see guided_npm_startup_bridge).
+    return bool(
+        intent is not None
+        and intent.source_format == "npm"
+        and intent.acquisition_mode == "intermittent"
+        and intent.execution_mode == "both"
+        and intent.run_type == "full"
+        and bool(intent.selected_roi_ids)
+        and intent.output_policy.overwrite is False
+        and intent.output_policy.precreate is False
+    )
+
+
+def _first_subset_current(startup_authority: GuidedStartupAuthority) -> bool:
+    if startup_authority.is_npm:
+        return _npm_first_subset_current(startup_authority.npm_intent)
+    return _rwd_first_subset_current(startup_authority.rwd)
+
+
 def evaluate_guided_run_readiness(
     *,
     validation_outcome: GuidedBackendValidationWorkflowOutcome | None,
     validation_revision: int | None,
     current_gui_revision: int,
-    authorization_result: GuidedRunAuthorizationResult | None = None,
+    startup_authority: GuidedStartupAuthority | None = None,
     payload_result: GuidedExecutionPayloadDerivationResult | None = None,
     backend_execution_available: bool = True,
     startup_orchestration_available: bool = True,
 ) -> GuidedRunReadinessResult:
-    """Inspect supplied state without validation, authorization, writes, or execution."""
+    """Inspect supplied state without validation, authorization, writes, or
+    execution. Pure GUI-display evaluation -- not a second authorization or
+    execution state machine; truthful for both RWD and NPM using each
+    format's own existing accepted authority."""
     status = "ready_hidden"
     if not isinstance(validation_outcome, GuidedBackendValidationWorkflowOutcome):
         status = "no_validation"
@@ -182,33 +201,22 @@ def evaluate_guided_run_readiness(
         or validation_revision != current_gui_revision
     ):
         status = "validation_stale"
-    elif (
-        getattr(
-            getattr(validation_outcome, "compile_result", None),
-            "request",
-            None,
-        ) is not None
-        and getattr(
-            getattr(
-                getattr(validation_outcome.compile_result, "request", None),
-                "source",
-                None,
-            ),
-            "source_format",
-            None,
-        )
-        == "npm"
-    ):
-        status = "validated_npm_not_available"
-    elif not isinstance(authorization_result, GuidedRunAuthorizationResult):
+    elif not isinstance(startup_authority, GuidedStartupAuthority):
         status = "authorization_missing"
     elif (
-        authorization_result.status != "authorized"
-        or authorization_result.authorized is not True
-        or authorization_result.run_authorization is not True
+        not startup_authority.is_npm
+        and (
+            startup_authority.rwd.status != "authorized"
+            or startup_authority.rwd.authorized is not True
+            or startup_authority.rwd.run_authorization is not True
+        )
     ):
         status = "authorization_not_accepted"
-    elif authorization_result.authorized_gui_revision != current_gui_revision:
+    elif (
+        startup_authority.rwd.authorized_gui_revision
+        if not startup_authority.is_npm
+        else startup_authority.npm_intent.validation_revision
+    ) != current_gui_revision:
         status = "authorization_stale"
     elif not isinstance(payload_result, GuidedExecutionPayloadDerivationResult):
         status = "payload_missing"
@@ -222,7 +230,7 @@ def evaluate_guided_run_readiness(
         or payload_result.limiting_issues[0].category
         != "startup_transaction_unavailable"
         or payload_result.blocking_issues
-        or not _first_subset_current(authorization_result)
+        or not _first_subset_current(startup_authority)
     ):
         status = "payload_not_ready"
     elif (
@@ -234,7 +242,7 @@ def evaluate_guided_run_readiness(
         status=status,
         validation_revision=validation_revision,
         current_gui_revision=current_gui_revision,
-        authorization=authorization_result,
+        authorization=startup_authority,
         payload=payload_result,
         backend_execution_available=backend_execution_available,
         startup_orchestration_available=startup_orchestration_available,

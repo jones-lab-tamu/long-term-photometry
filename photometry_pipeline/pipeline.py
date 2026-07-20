@@ -22,6 +22,7 @@ from .io.adapters import (
     iter_continuous_custom_tabular_chunks,
     resolve_continuous_source_metadata,
 )
+from .io.npm_contract import NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
 from .core.baseline_reference_candidate import (
     compute_baseline_reference_candidate,
@@ -1564,10 +1565,7 @@ class Pipeline:
         metadata["guided_npm_within_session_end_sec"] = float(local_time[-1])
         metadata["guided_npm_recording_time_start_sec"] = float(offset + local_time[0])
         metadata["guided_npm_recording_time_end_sec"] = float(offset + local_time[-1])
-        metadata["output_time_basis"] = (
-            "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
-            "authorized_within_session_time"
-        )
+        metadata["output_time_basis"] = NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
         chunk.time_sec = local_time + offset
         chunk.validate(tolerance_frac=self.config.timestamp_cv_max)
         return chunk
@@ -2814,10 +2812,7 @@ class Pipeline:
             run_meta["guided_npm_cross_session_chronology"] = {
                 "authority": "frozen_worker_projection",
                 "within_session_output_time_basis": authorized.output_time_basis,
-                "combined_output_time_basis": (
-                    "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
-                    "authorized_within_session_time"
-                ),
+                "combined_output_time_basis": NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
                 "chronological_positions": authorized.chronological_positions,
                 "ordered_session_paths": authorized.ordered_session_paths,
                 "actual_elapsed_sec_by_chunk": authorized.actual_elapsed_sec_by_chunk,
@@ -3346,10 +3341,7 @@ class Pipeline:
                 {
                     "authority": "frozen_worker_projection",
                     "within_session_output_time_basis": authorized.output_time_basis,
-                    "combined_output_time_basis": (
-                        "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
-                        "authorized_within_session_time"
-                    ),
+                    "combined_output_time_basis": NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
                     "sessions_per_hour_role": "nominal_cadence_only",
                     "sessions": [
                         {

@@ -68,7 +68,7 @@ def _validate_and_authorize(window, monkeypatch):
     outcome = window._guided_backend_validation_outcome
     assert outcome.status == "validator_accepted", outcome.blocking_issues
     assert window._guided_run_btn.isEnabled() is True
-    return window._guided_run_authorization_result.canonical_authorization_identity
+    return window._guided_startup_authority.canonical_authorization_identity
 
 
 def _configure_and_validate(
@@ -109,7 +109,7 @@ def _assert_run_disabled_and_guard_refuses(window, monkeypatch):
     """
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_execution_payload_result is None
     assert window._guided_startup_transaction_request is None
     label_text = window._guided_run_readiness_label.text()
@@ -213,13 +213,24 @@ def test_missing_session_approval_change_invalidates(window, tmp_path, monkeypat
     _assert_run_disabled_and_guard_refuses(window, monkeypatch)
 
 
-def test_analysis_mode_change_invalidates(window, tmp_path, monkeypatch):
-    """Regression check: this dimension was already covered by the manual
-    revision counter before this task; confirm it remains covered by the
-    authoritative identity mechanism too."""
-    _configure_and_validate(window, tmp_path, monkeypatch, analysis_mode="phasic")
+def test_full_control_mode_combo_change_does_not_invalidate(
+    window, tmp_path, monkeypatch
+):
+    """Guided Mode exposes no phasic-versus-tonic choice: Full Control's
+    `_mode_combo` is never shown by the Guided workflow and must not
+    invalidate an accepted Guided authorization. This replaces a retired
+    test that asserted the opposite (now-incorrect) behavior from before
+    the Guided `execution_mode` root-cause repair -- see the equivalent
+    regression in test_guided_gui_run_completed_boundary.py."""
+    identity = _configure_and_validate(window, tmp_path, monkeypatch)
+    request = window._guided_startup_transaction_request
     window._mode_combo.setCurrentText("both")
-    _assert_run_disabled_and_guard_refuses(window, monkeypatch)
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_startup_transaction_request is request
+    assert (
+        window._guided_startup_authority.canonical_authorization_identity
+        == identity
+    )
 
 
 def test_session_schedule_change_invalidates(window, tmp_path, monkeypatch):
@@ -317,7 +328,7 @@ def test_correction_card_selection_restoration_does_not_revive(
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     starts = []
     monkeypatch.setattr(
         window,
@@ -349,7 +360,7 @@ def test_dynamic_fit_mode_combo_restoration_does_not_revive(
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     starts = []
     monkeypatch.setattr(
         window,
@@ -372,7 +383,7 @@ def test_roi_selection_restoration_via_full_control_does_not_revive(
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     starts = []
     monkeypatch.setattr(
         window,
@@ -414,7 +425,7 @@ def test_preview_evidence_replacement_restoration_does_not_revive(
 
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     starts = []
     monkeypatch.setattr(
         window,
@@ -537,7 +548,7 @@ def test_restoring_an_old_visible_value_does_not_revive_validation(
     _ch2_item().setCheckState(Qt.Unchecked)
     _assert_run_disabled_and_guard_refuses(window, monkeypatch)
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_startup_transaction_request is None
 
     # Restore CH2 -- the draft plan's included_roi_ids now exactly matches
@@ -547,7 +558,7 @@ def test_restoring_an_old_visible_value_does_not_revive_validation(
 
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_validated_plan_identity is None
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_startup_transaction_request is None
     starts = []
     monkeypatch.setattr(
@@ -608,7 +619,7 @@ def test_missing_session_approval_not_matching_real_content_fails_closed(
     outcome = window._guided_backend_validation_outcome
     assert outcome.status != "validator_accepted"
     assert window._guided_run_btn.isEnabled() is False
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
 
 
 # ---------------------------------------------------------------------------

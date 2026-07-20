@@ -742,17 +742,23 @@ def test_npm_mapping_performs_no_source_io(tmp_path: Path, monkeypatch):
     _assert_mapped(_map(outcome))
 
 
-def test_npm_readiness_text_and_visible_run_control_remain_disabled(tmp_path: Path):
+def test_npm_readiness_without_authority_stays_disabled_and_truthful(tmp_path: Path):
+    """Repair regression: NPM readiness is no longer permanently hard-coded
+    to "not available yet" (see test_guided_run_readiness.py for the
+    positive accepted-authority case). Without a startup_authority, the
+    real, shared, format-neutral evaluate_guided_run_readiness truthfully
+    reports authorization_missing -- the identical outcome RWD gets in the
+    same state -- not a stale NPM-specific unavailability message."""
     outcome, _request = _accepted_npm(tmp_path)
     result = evaluate_guided_run_readiness(
         validation_outcome=outcome,
         validation_revision=3,
         current_gui_revision=3,
     )
-    assert result.status == "validated_npm_not_available"
+    assert result.status == "authorization_missing"
     assert result.ready is False
     assert result.visible_run_control_enabled is False
     assert result.user_summary == (
-        "This NPM recording setup was checked successfully. Running NPM analyses "
-        "is not available yet."
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
     )

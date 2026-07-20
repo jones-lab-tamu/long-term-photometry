@@ -114,7 +114,14 @@ def compare_requested_and_consumed_normalized_recording(
             f"{consumed.adapter_format!r} does not match the authorized recording's "
             f"adapter_format {requested.adapter_format!r}"
         )
-    if not consumed.parser_policy_satisfied:
+    # parser_policy_satisfied models a per-session column-resolution drift
+    # risk that applies to formats using suffix-based matching that can
+    # differ session to session. NPM's physical-to-canonical ROI mapping is
+    # frozen once at Setup check and never re-resolved per session, so this
+    # risk does not exist for NPM; the field is a structurally inert
+    # placeholder there (see build_npm_consumed_normalized_recording_evidence)
+    # and is never required for a truthful NPM completion.
+    if requested.adapter_format != "npm" and not consumed.parser_policy_satisfied:
         category = consumed.parser_policy_failure_category or "unspecified"
         return (
             f"{consumed.analysis_branch} analysis consumed parser/channel resolution "
@@ -205,21 +212,28 @@ def compare_requested_and_consumed_normalized_recording(
                     f"time basis {con.output_time_basis!r} does not match the "
                     f"authorized time basis {requested.sampling.time_basis!r}"
                 )
-            if not con.resolved_time_column:
-                return (
-                    f"{consumed.analysis_branch} analysis session {position} has no "
-                    "consumed time-column evidence"
-                )
-            if con.resolved_header_row is None:
-                return (
-                    f"{consumed.analysis_branch} analysis session {position} has no "
-                    "consumed header-row evidence"
-                )
-            if not con.resolved_timestamp_unit:
-                return (
-                    f"{consumed.analysis_branch} analysis session {position} has no "
-                    "consumed timestamp-unit evidence"
-                )
+            # Formats whose parser re-resolves a time column/header row/
+            # timestamp unit per session must show that resolution was
+            # observed. NPM execution artifacts do not record a re-resolved
+            # per-session time column/header row/timestamp unit (there is
+            # no per-session ambiguity to resolve for NPM), so these facts
+            # are never established for NPM and must not be required there.
+            if requested.adapter_format != "npm":
+                if not con.resolved_time_column:
+                    return (
+                        f"{consumed.analysis_branch} analysis session {position} has no "
+                        "consumed time-column evidence"
+                    )
+                if con.resolved_header_row is None:
+                    return (
+                        f"{consumed.analysis_branch} analysis session {position} has no "
+                        "consumed header-row evidence"
+                    )
+                if not con.resolved_timestamp_unit:
+                    return (
+                        f"{consumed.analysis_branch} analysis session {position} has no "
+                        "consumed timestamp-unit evidence"
+                    )
         elif req.disposition == SESSION_DISPOSITION_EXCLUDED:
             if con.cache_chunk_id is not None:
                 return (
@@ -276,33 +290,41 @@ def compare_requested_and_consumed_normalized_recording(
             f"the authorized included ROI set (extra={extra_roi}, missing={missing_roi})"
         )
 
-    requested_rois = {
-        item.roi_id: item for item in requested.roi_channels if item.included
-    }
-    for session in consumed.sessions:
-        if session.disposition != SESSION_DISPOSITION_PROCESS:
-            continue
-        consumed_rois = {item.roi_id: item for item in session.roi_resolutions}
-        if set(consumed_rois) != included_roi_ids:
-            return (
-                f"{consumed.analysis_branch} analysis session "
-                f"{session.chronological_position} consumed ROI channel evidence "
-                "does not cover exactly the authorized included ROIs"
-            )
-        for roi_id, requested_roi in requested_rois.items():
-            consumed_roi = consumed_rois[roi_id]
-            if consumed_roi.resolved_signal_source != requested_roi.signal_channel_identity:
+    # Per-session, per-ROI channel-resolution re-verification, for formats
+    # whose parser re-resolves signal/reference channels session by
+    # session. NPM's ROI-to-physical-column mapping is frozen once at
+    # Setup check (see roi_channels above) and is identical for every
+    # session, so per-session re-verification has no NPM equivalent -- the
+    # branch-wide processed_roi_ids check above already establishes that
+    # NPM consumed exactly the authorized included ROIs.
+    if requested.adapter_format != "npm":
+        requested_rois = {
+            item.roi_id: item for item in requested.roi_channels if item.included
+        }
+        for session in consumed.sessions:
+            if session.disposition != SESSION_DISPOSITION_PROCESS:
+                continue
+            consumed_rois = {item.roi_id: item for item in session.roi_resolutions}
+            if set(consumed_rois) != included_roi_ids:
                 return (
                     f"{consumed.analysis_branch} analysis session "
-                    f"{session.chronological_position} ROI {roi_id} consumed signal "
-                    "source does not match the authorized signal channel"
+                    f"{session.chronological_position} consumed ROI channel evidence "
+                    "does not cover exactly the authorized included ROIs"
                 )
-            if consumed_roi.resolved_reference_source != requested_roi.reference_channel_identity:
-                return (
-                    f"{consumed.analysis_branch} analysis session "
-                    f"{session.chronological_position} ROI {roi_id} consumed reference "
-                    "source does not match the authorized reference channel"
-                )
+            for roi_id, requested_roi in requested_rois.items():
+                consumed_roi = consumed_rois[roi_id]
+                if consumed_roi.resolved_signal_source != requested_roi.signal_channel_identity:
+                    return (
+                        f"{consumed.analysis_branch} analysis session "
+                        f"{session.chronological_position} ROI {roi_id} consumed signal "
+                        "source does not match the authorized signal channel"
+                    )
+                if consumed_roi.resolved_reference_source != requested_roi.reference_channel_identity:
+                    return (
+                        f"{consumed.analysis_branch} analysis session "
+                        f"{session.chronological_position} ROI {roi_id} consumed reference "
+                        "source does not match the authorized reference channel"
+                    )
 
     return ""
 
@@ -615,4 +637,189 @@ def build_rwd_consumed_normalized_recording_evidence(
         processed_roi_ids=processed_roi_ids,
         parser_policy_satisfied=parser_policy_satisfied,
         parser_policy_failure_category=parser_policy_failure_category,
+    )
+
+
+# ---------------------------------------------------------------------------
+# NPM-specific consumed-evidence adapter
+# ---------------------------------------------------------------------------
+
+
+def build_npm_consumed_normalized_recording_evidence(
+    *,
+    run_dir: str,
+    analysis_kind: str,
+    requested: NormalizedRecordingDescription,
+) -> NormalizedConsumedRecordingEvidence:
+    """Build one branch's NPM consumed evidence from durable run-directory
+    artifacts only -- never the requested/authorized description's own
+    field values. Reads only the branch's C8 ledger and its trace cache's
+    format-neutral per-chunk ``fs_hz``/``output_time_basis`` attrs and ROI
+    group presence. NPM execution does not record RWD's per-session
+    resolved_time_column/header_row/timestamp_unit or per-ROI
+    resolved_signal_source/reference_source (no rwd_time_col_resolved /
+    roi_map chunk metadata for NPM chunks), so those are left genuinely
+    absent here, never copied from ``requested``. Fails closed on missing
+    or malformed artifacts, mirroring the RWD adapter.
+    """
+    from photometry_pipeline.input_processing_completeness import (
+        read_input_completeness,
+    )
+    from photometry_pipeline.io.hdf5_cache_reader import (
+        CacheReadError,
+        list_cache_rois,
+        load_cache_chunk_attrs,
+        open_phasic_cache,
+        open_tonic_cache,
+    )
+
+    analysis_dir = os.path.join(run_dir, "_analysis", f"{analysis_kind}_out")
+    payload, error = read_input_completeness(analysis_dir)
+    if payload is None:
+        raise NormalizedConsumedEvidenceError(
+            "missing_input_completeness_ledger",
+            f"the {analysis_kind} analysis input-completeness record is {error}",
+        )
+    expected = payload.get("expected")
+    processed = payload.get("processed")
+    if not isinstance(expected, list) or not isinstance(processed, list):
+        raise NormalizedConsumedEvidenceError(
+            "malformed_input_completeness_ledger",
+            f"the {analysis_kind} analysis input-completeness record is malformed",
+        )
+    processed_by_index: dict[int, dict[str, Any]] = {
+        int(record["index"]): record
+        for record in processed
+        if isinstance(record, dict) and isinstance(record.get("index"), int)
+    }
+
+    cache_path = os.path.join(analysis_dir, f"{analysis_kind}_trace_cache.h5")
+    if not os.path.isfile(cache_path):
+        raise NormalizedConsumedEvidenceError(
+            "missing_trace_cache",
+            f"the {analysis_kind} analysis canonical trace cache is missing",
+        )
+    opener = open_phasic_cache if analysis_kind == "phasic" else open_tonic_cache
+    disposition_map = _disposition_map()
+
+    sessions: list[NormalizedConsumedSession] = []
+    try:
+        cache = opener(cache_path)
+    except CacheReadError as exc:
+        raise NormalizedConsumedEvidenceError(
+            "malformed_trace_cache",
+            f"the {analysis_kind} analysis canonical trace cache could not be read: {exc}",
+        ) from exc
+
+    try:
+        try:
+            cache_rois = tuple(sorted(list_cache_rois(cache)))
+        except CacheReadError as exc:
+            raise NormalizedConsumedEvidenceError(
+                "malformed_trace_cache",
+                f"the {analysis_kind} analysis canonical trace cache ROI index is "
+                f"unreadable: {exc}",
+            ) from exc
+
+        for entry in sorted(
+            (entry for entry in expected if isinstance(entry, dict)),
+            key=lambda entry: int(entry.get("index", 0)),
+        ):
+            index = int(entry.get("index", 0))
+            disposition = disposition_map.get(str(entry.get("disposition", "")))
+            if disposition is None:
+                raise NormalizedConsumedEvidenceError(
+                    "unknown_session_disposition",
+                    f"session {index} has an unrecognized disposition "
+                    f"{entry.get('disposition')!r}",
+                )
+            content_digest = entry.get("sha256")
+            size_bytes = entry.get("size_bytes")
+            evidence_availability = (
+                EVIDENCE_OBSERVED
+                if isinstance(content_digest, str) and content_digest
+                else EVIDENCE_UNAVAILABLE
+            )
+
+            cache_chunk_id: int | None = None
+            observed_duration_sec: float | None = None
+            fs_hz: float | None = None
+            output_time_basis: str | None = None
+
+            if disposition == SESSION_DISPOSITION_PROCESS:
+                processed_record = processed_by_index.get(index)
+                if processed_record is None:
+                    raise NormalizedConsumedEvidenceError(
+                        "missing_processed_record",
+                        f"session {index} has disposition 'process' but no processed "
+                        "record",
+                    )
+                cache_chunk_id = int(processed_record["cache_chunk_id"])
+                # fs_hz/output_time_basis are per-chunk, run-wide facts
+                # (identical across every ROI in a chunk) -- one
+                # representative ROI's attrs are sufficient evidence.
+                if cache_rois:
+                    try:
+                        attrs = load_cache_chunk_attrs(cache, cache_rois[0], cache_chunk_id)
+                    except CacheReadError as exc:
+                        raise NormalizedConsumedEvidenceError(
+                            "missing_cache_chunk_evidence",
+                            f"session {index} has no canonical cache chunk evidence: "
+                            f"{exc}",
+                        ) from exc
+                    raw_fs_hz = attrs.get("fs_hz")
+                    fs_hz = float(raw_fs_hz) if raw_fs_hz is not None else None
+                    raw_time_basis = attrs.get("output_time_basis")
+                    output_time_basis = str(raw_time_basis) if raw_time_basis else None
+                    try:
+                        time_sec = cache[
+                            f"roi/{cache_rois[0]}/chunk_{cache_chunk_id}/time_sec"
+                        ][()]
+                        if len(time_sec) > 0:
+                            observed_duration_sec = float(time_sec[-1])
+                    except Exception:
+                        observed_duration_sec = None
+
+            sessions.append(
+                NormalizedConsumedSession(
+                    chronological_position=index,
+                    disposition=disposition,
+                    consumed_source_reference=str(entry.get("source", "")),
+                    evidence_availability=evidence_availability,
+                    content_digest=(
+                        str(content_digest) if evidence_availability == EVIDENCE_OBSERVED else None
+                    ),
+                    size_bytes=(
+                        int(size_bytes)
+                        if isinstance(size_bytes, int) and not isinstance(size_bytes, bool) and size_bytes >= 0
+                        else None
+                    ),
+                    cache_chunk_id=cache_chunk_id,
+                    observed_duration_sec=observed_duration_sec,
+                    fs_hz=fs_hz,
+                    # Never observed for NPM -- see docstring. Never
+                    # populated from `requested`.
+                    resolved_time_column=None,
+                    resolved_header_row=None,
+                    resolved_timestamp_unit=None,
+                    output_time_basis=output_time_basis,
+                    roi_resolutions=(),
+                )
+            )
+
+        processed_roi_ids = cache_rois
+    finally:
+        cache.close()
+
+    return NormalizedConsumedRecordingEvidence(
+        adapter_format="npm",
+        analysis_branch=analysis_kind,
+        sessions=tuple(sessions),
+        processed_roi_ids=processed_roi_ids,
+        # Structurally inert placeholder for NPM -- the comparator's NPM
+        # path never examines this field (see
+        # compare_requested_and_consumed_normalized_recording). Not a
+        # claim that anything was verified.
+        parser_policy_satisfied=True,
+        parser_policy_failure_category=None,
     )

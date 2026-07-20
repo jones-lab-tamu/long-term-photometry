@@ -2399,8 +2399,18 @@ def build_per_roi_feature_event_backend_shapes(
       resolved ROI (both "default" and "override"). Ready to pass directly
       as Pipeline(per_roi_feature_provenance=...).
     """
-    if not isinstance(intent, GuidedProductionExecutionIntent):
-        raise TypeError("intent must be a GuidedProductionExecutionIntent")
+    # Relaxed only as far as required: both intent types carry the
+    # identical shared feature_event.per_roi_feature_event_map type this
+    # function actually reads (GuidedProductionFeatureEvent /
+    # GuidedProductionPerRoiFeatureEvent) -- nothing below reads any
+    # RWD-only or NPM-only field.
+    if not isinstance(
+        intent, (GuidedProductionExecutionIntent, GuidedNpmProductionExecutionIntent)
+    ):
+        raise TypeError(
+            "intent must be a GuidedProductionExecutionIntent or "
+            "GuidedNpmProductionExecutionIntent"
+        )
 
     override_config_fields_by_roi: dict[str, dict[str, Any]] = {}
     effective_config_fields_for_overrides_by_roi: dict[str, dict[str, Any]] = {}

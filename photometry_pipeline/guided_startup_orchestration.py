@@ -264,7 +264,7 @@ def _validate_plan(
         ),
         (
             "--mode",
-            request.authorization_result.production_intent.execution_profile.execution_mode,
+            request.startup_authority.execution_mode,
         ),
         ("--run-type", "full"),
     )
@@ -384,12 +384,19 @@ def _validate_materialization(
     }
     try:
         names = frozenset(item.name for item in run_dir.iterdir())
-        correction = request.authorization_result.production_intent.correction
-        native_current = bool(correction.production_strategy_map_version)
-        positive_legacy = bool(
-            not correction.production_strategy_map_version
-            and not correction.per_roi_production_strategy_map
-        )
+        authority = request.startup_authority
+        if authority.is_npm:
+            # NPM was never part of the RWD legacy (pre-native-correction)
+            # era -- always native, never positive_legacy.
+            native_current = True
+            positive_legacy = False
+        else:
+            correction = authority.rwd.production_intent.correction
+            native_current = bool(correction.production_strategy_map_version)
+            positive_legacy = bool(
+                not correction.production_strategy_map_version
+                and not correction.per_roi_production_strategy_map
+            )
         if (
             not _MATERIALIZED_FILENAMES.issubset(names)
             or names - _MATERIALIZED_FILENAMES - _OPTIONAL_MATERIALIZED_FILENAMES

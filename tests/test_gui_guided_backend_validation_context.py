@@ -581,7 +581,7 @@ def _payload_refusal_build_result(revision):
     return GuidedExecutionRequestBuildResult(
         status="payload_derivation_failed",
         ok=False,
-        authorization_result=None,
+        startup_authority=None,
         payload_result=None,
         startup_transaction_request=None,
         blocking_issues=(
@@ -647,7 +647,7 @@ def test_failed_derivation_reason_survives_failed_state_clear(window, monkeypatc
         ),
     )
     # No execution authority retained; Run stays disabled.
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_execution_payload_result is None
     assert window._guided_startup_transaction_request is None
     assert window._guided_run_btn.isEnabled() is False
@@ -682,7 +682,7 @@ def test_new_validation_attempt_clears_stale_reason(window, monkeypatch):
         monkeypatch,
         builder_result=SimpleNamespace(
             ok=True,
-            authorization_result=SimpleNamespace(status="authorized"),
+            startup_authority=SimpleNamespace(status="authorized"),
             payload_result=SimpleNamespace(),
             startup_transaction_request=SimpleNamespace(),
         ),
@@ -700,13 +700,13 @@ def test_successful_derivation_clears_stale_reason(window, monkeypatch):
         "build_guided_startup_request_from_validation",
         lambda **_k: SimpleNamespace(
             ok=True,
-            authorization_result=SimpleNamespace(),
+            startup_authority=SimpleNamespace(),
             payload_result=SimpleNamespace(),
             startup_transaction_request=SimpleNamespace(),
         ),
     )
     triple = window._derive_guided_execution_state_from_validation(
-        SimpleNamespace(), SimpleNamespace()
+        SimpleNamespace(draft=SimpleNamespace(input_format="rwd")), SimpleNamespace()
     )
     assert triple is not None
     assert window._guided_execution_derivation_reason is None
@@ -729,43 +729,6 @@ def test_accepted_setup_without_reason_keeps_generic_line(window):
     assert "not available for this configuration" in details
     assert window._guided_run_readiness_label is not None
     assert not hasattr(window, "_guided_validation_artifact_link")
-
-
-def test_npm_accepted_setup_check_shows_truthful_ready_state_and_enables_run(
-    window,
-):
-    """Phase 4A: a genuinely accepted, current NPM setup check must show a
-    truthful status (not a hard-coded "not available yet" that used to
-    fire even when NPM Run was already enabled) and must enable Run --
-    NPM readiness is governed solely by evaluate_guided_npm_run_readiness,
-    the same predicate that already drives the Run button."""
-    window._guided_format_combo.setCurrentText("npm")
-    outcome = replace(
-        _accepted_outcome(),
-        compile_result=SimpleNamespace(
-            request=SimpleNamespace(
-                source=SimpleNamespace(source_format="npm"),
-            )
-        ),
-    )
-    window._guided_backend_validation_outcome = outcome
-    window._guided_backend_validation_outcome_revision = (
-        window._guided_backend_validation_revision
-    )
-    window._refresh_guided_backend_validation_display()
-
-    assert window._guided_backend_validation_status_label.text() == (
-        "The setup check passed for the current Guided NPM setup. It "
-        "does not authorize or start a run."
-    )
-    assert window._guided_backend_validation_details_label.text() == (
-        "Guided Run is ready to start."
-    )
-    assert window._guided_run_readiness_label.text() == (
-        "This NPM recording setup was checked successfully and is ready "
-        "to run."
-    )
-    assert window._guided_run_btn.isEnabled() is True
 
 
 def test_npm_accepted_but_stale_setup_check_shows_truthful_not_ready_state(

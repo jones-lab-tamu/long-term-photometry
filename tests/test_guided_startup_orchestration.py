@@ -415,4 +415,4 @@ def test_orchestration_import_boundary_and_no_gui_pipeline_calls():
     )
     assert "Pipeline(" not in source
     assert "--guided-preallocated-run-dir" in source
-    assert "production_intent.execution_profile.execution_mode" in source
+    assert "request.startup_authority.execution_mode" in source

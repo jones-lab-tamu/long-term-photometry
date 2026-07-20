@@ -32,6 +32,7 @@ from photometry_pipeline.guided_normalized_recording import (
     SESSION_DISPOSITION_EXCLUDED,
     SESSION_DISPOSITION_MISSING,
     SESSION_DISPOSITION_PROCESS,
+    build_npm_normalized_recording_description,
     build_rwd_normalized_recording_description,
 )
 from photometry_pipeline.guided_normalized_recording_consumption import (
@@ -41,9 +42,18 @@ from photometry_pipeline.guided_normalized_recording_consumption import (
     NormalizedConsumedRecordingEvidence,
     NormalizedConsumedRoiResolution,
     NormalizedConsumedSession,
+    build_npm_consumed_normalized_recording_evidence,
     build_rwd_consumed_normalized_recording_evidence,
     compare_consumed_normalized_recording_branches,
     compare_requested_and_consumed_normalized_recording,
+)
+from photometry_pipeline.io.npm_contract import (
+    NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
+    NpmParserContract,
+    inspect_npm_csv,
+)
+from photometry_pipeline.io.npm_source_snapshot import (
+    build_npm_source_candidate_snapshot,
 )
 
 
@@ -479,3 +489,365 @@ def test_rwd_consumed_extra_roi_processed_caught(real_rwd_run):
         requested, tampered_consumed
     )
     assert "ROI" in result
+
+
+def test_rwd_still_requires_resolved_time_column_after_npm_repair(real_rwd_run):
+    """Regression proof: RWD's existence checks for resolved_time_column/
+    header_row/timestamp_unit remain fully required -- unaffected by the
+    new NPM-only comparator guard."""
+    run_dir, requested = real_rwd_run
+    consumed = build_rwd_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_session = replace(consumed.sessions[0], resolved_time_column=None)
+    tampered_consumed = replace(
+        consumed, sessions=(tampered_session,) + consumed.sessions[1:]
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "time-column" in result
+
+
+def test_rwd_still_requires_roi_channel_resolution_after_npm_repair(real_rwd_run):
+    """Regression proof: RWD's per-session per-ROI signal/reference source
+    comparison remains fully required -- unaffected by the new NPM-only
+    comparator guard."""
+    run_dir, requested = real_rwd_run
+    consumed = build_rwd_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_roi = replace(
+        consumed.sessions[0].roi_resolutions[0],
+        resolved_signal_source="Region0-999",
+    )
+    tampered_session = replace(consumed.sessions[0], roi_resolutions=(tampered_roi,))
+    tampered_consumed = replace(
+        consumed, sessions=(tampered_session,) + consumed.sessions[1:]
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "signal source" in result
+
+
+# ---------------------------------------------------------------------------
+# C. NPM-specific consumed-evidence adapter, against a real Pipeline run
+# ---------------------------------------------------------------------------
+
+
+def _write_npm_source(path, *, n_seconds: float = 6.0, rate_hz: float = 2.0) -> None:
+    step = 1.0 / (2.0 * rate_hz)
+    rows = ["Timestamp,LedState,Region0G"]
+    t = 0.0
+    led = 1
+    n_samples = int(n_seconds * 2.0 * rate_hz)
+    for i in range(n_samples):
+        rows.append(f"{t:.4f},{led},{10.0 + 0.01 * i:.4f}")
+        t += step
+        led = 2 if led == 1 else 1
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _npm_config() -> Config:
+    return Config(
+        target_fs_hz=2.0,
+        chunk_duration_sec=6.0,
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="Timestamp",
+        npm_computer_ts_col="Timestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        adapter_value_nan_policy="strict",
+        timestamp_cv_max=0.02,
+    )
+
+
+def _stamp_guided_authorized_output_time_basis(cache_path) -> None:
+    """A plain (non Guided-authorized) Pipeline.run() call never invokes
+    Pipeline._bind_authorized_chunk_chronology, so it never stamps the
+    combined output_time_basis attr a real Guided-authorized NPM execution
+    always stamps (see pipeline.py's _load_entry_chunk). Simulate that one
+    authorized-execution fact directly on the genuine cache this fixture
+    otherwise builds for real, matching the pattern already established for
+    simulating multi-session caches in the NPM natural-path acceptance
+    test."""
+    import h5py
+
+    with h5py.File(cache_path, "a") as cache:
+        roi_group = cache["roi"]
+        for roi_name in roi_group:
+            for chunk_name in roi_group[roi_name]:
+                roi_group[roi_name][chunk_name].attrs["output_time_basis"] = (
+                    NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
+                )
+
+
+@pytest.fixture
+def real_npm_run(tmp_path):
+    root = tmp_path / "npm_input"
+    root.mkdir()
+    path = root / "photometryData2025-03-05T15_37_44.csv"
+    _write_npm_source(path)
+
+    cfg = _npm_config()
+    contract = NpmParserContract.from_config(cfg)
+    content = contract.content()
+    inspection = inspect_npm_csv(str(path), contract)
+    snapshot = build_npm_source_candidate_snapshot(str(root))
+
+    requested = build_npm_normalized_recording_description(
+        source_snapshot=snapshot,
+        session_inspections={
+            snapshot.candidates[0].canonical_relative_path: inspection
+        },
+        parser_contract_content=content,
+        session_duration_sec=6.0,
+        sessions_per_hour=1,
+        discovered_roi_ids=inspection.roi_ids,
+        included_roi_ids=inspection.roi_ids,
+        target_fs_hz=2.0,
+    )
+
+    run_dir = tmp_path / "run"
+    out = run_dir / "_analysis" / "phasic_out"
+    Pipeline(cfg, mode="phasic").run(
+        str(root), str(out), force_format="npm", recursive=True, sessions_per_hour=1
+    )
+    _stamp_guided_authorized_output_time_basis(out / "phasic_trace_cache.h5")
+    return str(run_dir), requested
+
+
+def test_npm_adapter_and_comparator_reconcile_a_real_run(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    assert consumed.adapter_format == "npm"
+    assert compare_requested_and_consumed_normalized_recording(requested, consumed) == ""
+
+
+def test_npm_adapter_does_not_copy_requested_channel_identities(real_npm_run):
+    """The exact correction this repair makes: NPM consumed evidence must
+    never claim execution independently resolved facts it did not
+    observe."""
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    for session in consumed.sessions:
+        assert session.resolved_time_column is None
+        assert session.resolved_header_row is None
+        assert session.resolved_timestamp_unit is None
+        assert session.roi_resolutions == ()
+
+
+def test_npm_absent_rwd_only_resolution_fields_do_not_invalidate_completion(
+    real_npm_run,
+):
+    """The exact scenario this repair fixes: NPM's genuinely absent
+    RWD-only resolution fields must not refuse an otherwise truthful NPM
+    completion."""
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    assert all(s.resolved_time_column is None for s in consumed.sessions)
+    assert all(s.resolved_header_row is None for s in consumed.sessions)
+    assert all(s.resolved_timestamp_unit is None for s in consumed.sessions)
+    assert compare_requested_and_consumed_normalized_recording(requested, consumed) == ""
+
+
+def test_npm_adapter_format_mismatch_refuses(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_consumed = replace(consumed, adapter_format="rwd")
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "adapter_format" in result
+
+
+def test_npm_adapter_missing_ledger_refuses(real_npm_run):
+    run_dir, requested = real_npm_run
+    ledger = os.path.join(
+        run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"
+    )
+    os.remove(ledger)
+    with pytest.raises(NormalizedConsumedEvidenceError):
+        build_npm_consumed_normalized_recording_evidence(
+            run_dir=run_dir, analysis_kind="phasic", requested=requested
+        )
+
+
+def test_npm_adapter_missing_cache_refuses(real_npm_run):
+    run_dir, requested = real_npm_run
+    cache_path = os.path.join(run_dir, "_analysis", "phasic_out", "phasic_trace_cache.h5")
+    os.remove(cache_path)
+    with pytest.raises(NormalizedConsumedEvidenceError):
+        build_npm_consumed_normalized_recording_evidence(
+            run_dir=run_dir, analysis_kind="phasic", requested=requested
+        )
+
+
+def test_npm_missing_tonic_evidence_refuses(real_npm_run):
+    """This fixture only produces a phasic branch; requesting tonic
+    consumed evidence must fail closed, proving missing-branch detection
+    for NPM works the same as it does for RWD."""
+    run_dir, requested = real_npm_run
+    with pytest.raises(NormalizedConsumedEvidenceError):
+        build_npm_consumed_normalized_recording_evidence(
+            run_dir=run_dir, analysis_kind="tonic", requested=requested
+        )
+
+
+def test_npm_malformed_ledger_refuses(real_npm_run):
+    run_dir, requested = real_npm_run
+    ledger = os.path.join(
+        run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"
+    )
+    with open(ledger, "w", encoding="utf-8") as handle:
+        handle.write("{not valid json")
+    with pytest.raises(NormalizedConsumedEvidenceError):
+        build_npm_consumed_normalized_recording_evidence(
+            run_dir=run_dir, analysis_kind="phasic", requested=requested
+        )
+
+
+def test_npm_consumed_digest_tamper_caught_by_comparator(real_npm_run):
+    run_dir, requested = real_npm_run
+    ledger_path = os.path.join(
+        run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"
+    )
+    payload = json.loads(open(ledger_path, encoding="utf-8").read())
+    payload["expected"][0]["sha256"] = "0" * 64
+    with open(ledger_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    result = compare_requested_and_consumed_normalized_recording(requested, consumed)
+    assert "digest" in result
+
+
+def test_npm_consumed_size_mismatch_caught_by_comparator(real_npm_run):
+    run_dir, requested = real_npm_run
+    ledger_path = os.path.join(
+        run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"
+    )
+    payload = json.loads(open(ledger_path, encoding="utf-8").read())
+    payload["expected"][0]["size_bytes"] = payload["expected"][0]["size_bytes"] + 7
+    with open(ledger_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    result = compare_requested_and_consumed_normalized_recording(requested, consumed)
+    assert "size" in result
+
+
+def test_npm_consumed_source_identity_mismatch_caught(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_session = replace(
+        consumed.sessions[0], consumed_source_reference="some/other/path.csv"
+    )
+    tampered_consumed = replace(
+        consumed, sessions=(tampered_session,) + consumed.sessions[1:]
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "source" in result and "identity" in result
+
+
+def test_npm_consumed_missing_cache_chunk_identity_caught(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_session = replace(consumed.sessions[0], cache_chunk_id=None)
+    tampered_consumed = replace(
+        consumed, sessions=(tampered_session,) + consumed.sessions[1:]
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "cache chunk" in result
+
+
+def test_npm_consumed_sampling_rate_mismatch_caught(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_requested = replace(
+        requested, sampling=replace(requested.sampling, target_fs_hz=999.0)
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        tampered_requested, consumed
+    )
+    assert "sampling rate" in result
+
+
+def test_npm_consumed_output_time_basis_mismatch_caught(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_requested = replace(
+        requested, sampling=replace(requested.sampling, time_basis="something_else")
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        tampered_requested, consumed
+    )
+    assert "time basis" in result
+
+
+def test_npm_consumed_roi_set_mismatch_caught(real_npm_run):
+    run_dir, requested = real_npm_run
+    consumed = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tampered_consumed = replace(
+        consumed, processed_roi_ids=consumed.processed_roi_ids + ("RegionGhost",)
+    )
+    result = compare_requested_and_consumed_normalized_recording(
+        requested, tampered_consumed
+    )
+    assert "ROI" in result
+
+
+def test_npm_cross_branch_disagreement_on_observable_field_caught(real_npm_run):
+    """Phasic/tonic disagreement on an NPM-observable field (sampling
+    rate) is still caught by the shared, unmodified cross-branch
+    comparator."""
+    run_dir, requested = real_npm_run
+    phasic = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tonic = replace(phasic, analysis_branch="tonic")
+    tampered_session = replace(tonic.sessions[0], fs_hz=999.0)
+    tampered_tonic = replace(
+        tonic, sessions=(tampered_session,) + tonic.sessions[1:]
+    )
+    result = compare_consumed_normalized_recording_branches(phasic, tampered_tonic)
+    assert "cross_branch_output_sampling_rate_mismatch" in result
+
+
+def test_npm_cross_branch_agreement_reconciles(real_npm_run):
+    """Two branches with identical NPM-observable evidence (as if phasic
+    and tonic both genuinely consumed the same authorized recording)
+    reconcile cleanly -- proving absent RWD-only fields (None on both
+    sides) never cause a false cross-branch mismatch."""
+    run_dir, requested = real_npm_run
+    phasic = build_npm_consumed_normalized_recording_evidence(
+        run_dir=run_dir, analysis_kind="phasic", requested=requested
+    )
+    tonic = replace(phasic, analysis_branch="tonic")
+    assert compare_consumed_normalized_recording_branches(phasic, tonic) == ""

@@ -122,17 +122,21 @@ def _accepted_npm_outcome():
     )
 
 
-def test_validated_npm_readiness_keeps_run_unavailable_message():
+def test_npm_readiness_without_authority_keeps_truthful_scientist_facing_message():
+    """Repair regression: without an accepted startup_authority, readiness
+    truthfully reports authorization_missing (the same shared, format-
+    neutral outcome RWD gets in the same state) rather than a permanent
+    NPM-specific "not available yet" message."""
     result = evaluate_guided_run_readiness(
         validation_outcome=_accepted_npm_outcome(),
         validation_revision=7,
         current_gui_revision=7,
     )
-    assert result.status == "validated_npm_not_available"
+    assert result.status == "authorization_missing"
     assert result.ready is False
     assert result.visible_run_control_enabled is False
     assert result.user_summary == (
-        "This NPM recording setup was checked successfully. Running NPM analyses "
-        "is not available yet."
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
     )
     _assert_scientist_facing(result.user_summary)

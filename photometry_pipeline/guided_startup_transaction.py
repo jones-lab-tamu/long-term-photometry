@@ -47,8 +47,17 @@ from photometry_pipeline.guided_run_authorization import (
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
     compute_normalized_recording_description_identity,
+    deserialize_normalized_recording_description,
     rebuild_normalized_recording_description_from_intent,
     serialize_normalized_recording_description,
+)
+from photometry_pipeline.guided_npm_execution_authority import (
+    compute_guided_npm_execution_authority_identity,
+    verify_guided_npm_execution_authority,
+)
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
+from photometry_pipeline.guided_production_mapping import (
+    compute_guided_npm_production_execution_intent_identity,
 )
 
 
@@ -115,7 +124,7 @@ class GuidedStartupFilesystemPolicy:
 
 @dataclass(frozen=True)
 class GuidedStartupTransactionRequest:
-    authorization_result: GuidedRunAuthorizationResult
+    startup_authority: GuidedStartupAuthority
     payload_result: GuidedExecutionPayloadDerivationResult
     startup_mapping_contract: GuidedExecutionStartupMappingContract
     application_build_identity: ApplicationBuildIdentity
@@ -313,12 +322,9 @@ def build_guided_startup_command_plan(
         run_dir, GUIDED_CANDIDATE_MANIFEST_FILENAME
     )
     wrapper = request.wrapper_entrypoint
-    sessions_per_hour = (
-        request.authorization_result.production_intent.acquisition.sessions_per_hour
-    )
-    execution_mode = (
-        request.authorization_result.production_intent.execution_profile.execution_mode
-    )
+    authority = request.startup_authority
+    sessions_per_hour = authority.sessions_per_hour
+    execution_mode = authority.execution_mode
     argv = (
         wrapper.python_executable,
         wrapper.entrypoint_value,
@@ -329,7 +335,7 @@ def build_guided_startup_command_plan(
         "--config",
         config_path,
         "--format",
-        "rwd",
+        authority.source_format,
         "--mode",
         execution_mode,
         "--run-type",
@@ -404,35 +410,12 @@ def _config_values(payload: GuidedExecutionConfigPayload) -> dict[str, Any]:
     return {item.name: item.value for item in payload.values}
 
 
-def _gate_issue(request: Any) -> GuidedStartupIssue | None:
-    if not isinstance(request, GuidedStartupTransactionRequest):
-        return GuidedStartupIssue(
-            "startup_request_invalid", "startup", "Startup request is invalid."
-        )
-    if request.explicit_user_run_transition is not True:
-        return GuidedStartupIssue(
-            "explicit_run_transition_required",
-            "authority",
-            "An explicit Guided Run transition is required.",
-        )
-    if not _TOKEN_RE.fullmatch(request.one_shot_consumption_token):
-        return GuidedStartupIssue(
-            "one_shot_token_invalid", "authority", "One-shot token is invalid."
-        )
-    if (
-        request.one_shot_token_current is not True
-        or request.one_shot_token_unused is not True
-    ):
-        return GuidedStartupIssue(
-            "one_shot_token_unavailable",
-            "authority",
-            "One-shot token is stale or already consumed.",
-        )
-    if not _RUN_ID_RE.fullmatch(request.planned_run_id):
-        return GuidedStartupIssue(
-            "planned_run_id_invalid", "allocation_plan", "Planned run ID is invalid."
-        )
-    auth = request.authorization_result
+def _rwd_gate_authority(request: Any):
+    """RWD's existing authorization/identity verification, unchanged.
+    Returns (intent, auth_identity, intent_identity, candidate_identity,
+    roi_identity, application_build_identity) on success, or a
+    GuidedStartupIssue on refusal."""
+    auth = request.startup_authority.rwd
     if (
         not isinstance(auth, GuidedRunAuthorizationResult)
         or auth.status != "authorized"
@@ -478,6 +461,137 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
             "authorization",
             "Authorization proof identities are inconsistent.",
         )
+    if any(
+        value is not True
+        for value in (
+            auth.no_files_written,
+            auth.no_directories_created,
+            auth.no_artifacts_created,
+            auth.no_output_allocated,
+            auth.no_run_id_allocated,
+            auth.no_config_or_argv_generated,
+            auth.no_runner_invoked,
+        )
+    ):
+        return GuidedStartupIssue(
+            "payload_side_effect_assertion_invalid",
+            "payload",
+            "Payload side-effect assertions are invalid.",
+        )
+    return (
+        auth.production_intent,
+        auth_identity,
+        intent_identity,
+        candidate_identity,
+        roi_identity,
+        auth.application_build_identity,
+    )
+
+
+def _npm_gate_authority(request: Any):
+    """NPM's authorization/identity verification, using only NPM's own
+    existing identity/verification functions. verify_guided_npm_execution_
+    authority's round trip already proves the authority's full internal
+    identity chain (ROI/correction/Feature-Detection sub-authorities
+    included) in one call -- NPM's authority object is pure by
+    construction (no filesystem access, no allocation), so there is no
+    side-effect-flag equivalent to RWD's auth.no_files_written etc. to
+    check."""
+    intent = request.startup_authority.npm_intent
+    authority = request.startup_authority.npm_authority
+    if request.current_guided_revision != intent.validation_revision:
+        return GuidedStartupIssue(
+            "guided_revision_stale",
+            "authorization",
+            "Guided revision changed after authorization.",
+        )
+    try:
+        intent_identity = compute_guided_npm_production_execution_intent_identity(
+            intent
+        )
+    except Exception:
+        return GuidedStartupIssue(
+            "authorization_identity_inconsistent",
+            "authorization",
+            "Authorization proof identities could not be recomputed.",
+        )
+    if intent_identity != intent.canonical_intent_identity:
+        return GuidedStartupIssue(
+            "authorization_identity_inconsistent",
+            "authorization",
+            "Authorization proof identities are inconsistent.",
+        )
+    try:
+        verify_guided_npm_execution_authority(authority)
+        auth_identity = compute_guided_npm_execution_authority_identity(authority)
+    except Exception:
+        return GuidedStartupIssue(
+            "authorization_identity_inconsistent",
+            "authorization",
+            "Authorization proof identities could not be recomputed.",
+        )
+    if (
+        auth_identity != authority.canonical_authority_identity
+        or authority.source_production_intent_identity != intent_identity
+    ):
+        return GuidedStartupIssue(
+            "authorization_identity_inconsistent",
+            "authorization",
+            "Authorization proof identities are inconsistent.",
+        )
+    return (
+        intent,
+        auth_identity,
+        intent_identity,
+        intent.source_snapshot_identity,
+        authority.roi_authority.canonical_roi_authority_identity,
+        intent.application_build_identity.canonical_identity,
+    )
+
+
+def _gate_issue(request: Any) -> GuidedStartupIssue | None:
+    if not isinstance(request, GuidedStartupTransactionRequest):
+        return GuidedStartupIssue(
+            "startup_request_invalid", "startup", "Startup request is invalid."
+        )
+    if request.explicit_user_run_transition is not True:
+        return GuidedStartupIssue(
+            "explicit_run_transition_required",
+            "authority",
+            "An explicit Guided Run transition is required.",
+        )
+    if not _TOKEN_RE.fullmatch(request.one_shot_consumption_token):
+        return GuidedStartupIssue(
+            "one_shot_token_invalid", "authority", "One-shot token is invalid."
+        )
+    if (
+        request.one_shot_token_current is not True
+        or request.one_shot_token_unused is not True
+    ):
+        return GuidedStartupIssue(
+            "one_shot_token_unavailable",
+            "authority",
+            "One-shot token is stale or already consumed.",
+        )
+    if not _RUN_ID_RE.fullmatch(request.planned_run_id):
+        return GuidedStartupIssue(
+            "planned_run_id_invalid", "allocation_plan", "Planned run ID is invalid."
+        )
+    authority = request.startup_authority
+    if not isinstance(authority, GuidedStartupAuthority):
+        return GuidedStartupIssue(
+            "authorization_not_accepted",
+            "authorization",
+            "Accepted Guided authorization is required.",
+        )
+    resolved = (
+        _npm_gate_authority(request)
+        if authority.is_npm
+        else _rwd_gate_authority(request)
+    )
+    if isinstance(resolved, GuidedStartupIssue):
+        return resolved
+    intent, auth_identity, intent_identity, candidate_identity, roi_identity, build_id_from_authority = resolved
     payload = request.payload_result
     if (
         not isinstance(payload, GuidedExecutionPayloadDerivationResult)
@@ -527,30 +641,24 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
             "payload",
             "Post-4J14l exact-consumption startup mapping is required.",
         )
-    side_effect_flags = (
-        auth.no_files_written,
-        auth.no_directories_created,
-        auth.no_artifacts_created,
-        auth.no_output_allocated,
-        auth.no_run_id_allocated,
-        auth.no_config_or_argv_generated,
-        auth.no_runner_invoked,
-        payload.no_files_written,
-        payload.no_directories_created,
-        payload.no_artifacts_created,
-        payload.no_output_allocated,
-        payload.no_run_id_allocated,
-        payload.no_config_file_generated,
-        payload.no_argv_generated,
-        payload.no_runner_invoked,
-    )
-    if any(value is not True for value in side_effect_flags):
+    if any(
+        value is not True
+        for value in (
+            payload.no_files_written,
+            payload.no_directories_created,
+            payload.no_artifacts_created,
+            payload.no_output_allocated,
+            payload.no_run_id_allocated,
+            payload.no_config_file_generated,
+            payload.no_argv_generated,
+            payload.no_runner_invoked,
+        )
+    ):
         return GuidedStartupIssue(
             "payload_side_effect_assertion_invalid",
             "payload",
             "Payload side-effect assertions are invalid.",
         )
-    intent = auth.production_intent
     manifest = payload.candidate_manifest_payload
     seed = payload.provenance_seed
     if not isinstance(request.application_build_identity, ApplicationBuildIdentity):
@@ -562,8 +670,7 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
     build_id = request.application_build_identity.canonical_identity
     if (
         not _build_identity_usable(request.application_build_identity)
-        or build_id != auth.application_build_identity
-        or build_id != intent.application_build_identity.canonical_identity
+        or build_id != build_id_from_authority
         or build_id != seed.application_build_identity
     ):
         return GuidedStartupIssue(
@@ -607,40 +714,70 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
             "payload",
             "Payload identities are inconsistent.",
         )
-    if (
-        request.source_root_canonical != intent.input_source.source_root_canonical
-        or request.source_root_canonical != manifest.source_root_canonical
-        or request.output_base_canonical
-        != intent.output_policy.output_base_canonical
-        or manifest.source_candidate_set_digest
-        != intent.input_source.source_candidate_set_digest
-        or manifest.source_candidate_content_digest
-        != intent.input_source.source_candidate_content_digest
-        or manifest.parser_contract_digest != intent.parser.parser_contract_digest
-        or manifest.discovered_roi_ids != intent.roi_scope.discovered_roi_ids
-        or manifest.included_roi_ids != intent.roi_scope.included_roi_ids
-        or manifest.excluded_roi_ids != intent.roi_scope.excluded_roi_ids
-    ):
+    if authority.is_npm:
+        source_binding_ok = (
+            request.source_root_canonical == intent.source_root_canonical
+            and request.source_root_canonical == manifest.source_root_canonical
+            and request.output_base_canonical == intent.output_policy.output_base_canonical
+            and manifest.source_candidate_set_digest == intent.source_snapshot_set_identity
+            and manifest.source_candidate_content_digest == intent.source_snapshot_content_identity
+            and manifest.parser_contract_digest == intent.parser_policy_identity
+            and manifest.discovered_roi_ids == intent.discovered_roi_ids
+            and manifest.included_roi_ids == intent.selected_roi_ids
+            and manifest.excluded_roi_ids == intent.excluded_roi_ids
+        )
+    else:
+        source_binding_ok = (
+            request.source_root_canonical == intent.input_source.source_root_canonical
+            and request.source_root_canonical == manifest.source_root_canonical
+            and request.output_base_canonical == intent.output_policy.output_base_canonical
+            and manifest.source_candidate_set_digest == intent.input_source.source_candidate_set_digest
+            and manifest.source_candidate_content_digest == intent.input_source.source_candidate_content_digest
+            and manifest.parser_contract_digest == intent.parser.parser_contract_digest
+            and manifest.discovered_roi_ids == intent.roi_scope.discovered_roi_ids
+            and manifest.included_roi_ids == intent.roi_scope.included_roi_ids
+            and manifest.excluded_roi_ids == intent.roi_scope.excluded_roi_ids
+        )
+    if not source_binding_ok:
         return GuidedStartupIssue(
             "source_output_binding_mismatch",
             "paths",
             "Source or output path is not bound to authorization.",
         )
     config = _config_values(payload.config_payload)
-    if (
-        intent.input_source.source_format != "rwd"
-        or intent.acquisition.acquisition_mode != "intermittent"
-        or intent.execution_profile.execution_mode not in {"phasic", "tonic", "both"}
-        or intent.execution_profile.run_type != "full"
-        or intent.execution_profile.traces_only is not False
-        or intent.output_policy.overwrite is not False
-        or intent.output_policy.precreate is not False
-        or intent.roi_scope.selection_mode != "include"
-        or not intent.roi_scope.included_roi_ids
-        or intent.correction.strategy_scope != "global"
-        or config.get("acquisition_mode") != "intermittent"
-        or config.get("dynamic_fit_mode") != intent.correction.global_dynamic_fit_mode
-    ):
+    if authority.is_npm:
+        # NPM has no RWD-only "selection_mode"/"strategy_scope"/global
+        # dynamic-fit concepts to recreate (see guided_npm_startup_bridge
+        # module docstring); their equivalent guarantees are already
+        # proven by GuidedNpmRoiAuthority's and GuidedNpmCorrectionAuthority's
+        # own construction-time invariants, verified above via
+        # verify_guided_npm_execution_authority.
+        first_subset_ok = (
+            intent.source_format == "npm"
+            and intent.acquisition_mode == "intermittent"
+            and intent.execution_mode == "both"
+            and intent.run_type == "full"
+            and intent.output_policy.overwrite is False
+            and intent.output_policy.precreate is False
+            and bool(intent.selected_roi_ids)
+            and config.get("acquisition_mode") == "intermittent"
+        )
+    else:
+        first_subset_ok = (
+            intent.input_source.source_format == "rwd"
+            and intent.acquisition.acquisition_mode == "intermittent"
+            and intent.execution_profile.execution_mode in {"phasic", "tonic", "both"}
+            and intent.execution_profile.run_type == "full"
+            and intent.execution_profile.traces_only is False
+            and intent.output_policy.overwrite is False
+            and intent.output_policy.precreate is False
+            and intent.roi_scope.selection_mode == "include"
+            and bool(intent.roi_scope.included_roi_ids)
+            and intent.correction.strategy_scope == "global"
+            and config.get("acquisition_mode") == "intermittent"
+            and config.get("dynamic_fit_mode") == intent.correction.global_dynamic_fit_mode
+        )
+    if not first_subset_ok:
         return GuidedStartupIssue(
             "first_subset_contract_unsupported",
             "execution_profile",
@@ -721,15 +858,23 @@ def plan_guided_startup_transaction(
     issue = _gate_issue(request)
     if issue is not None:
         return _refused(issue.category, issue.section, issue.message)
-    auth = request.authorization_result
+    authority = request.startup_authority
     payload = request.payload_result
-    intent = auth.production_intent
-    correction = intent.correction
-    native_current = bool(correction.production_strategy_map_version)
-    positive_legacy = bool(
-        not correction.production_strategy_map_version
-        and not correction.per_roi_production_strategy_map
-    )
+    intent = authority.npm_intent if authority.is_npm else authority.rwd.production_intent
+    per_roi_correction_strategy_map = authority.per_roi_correction_strategy_map
+    if authority.is_npm:
+        # NPM was never part of the RWD legacy (pre-native-correction)
+        # era: it always resolves per-ROI, so this is a truthful fixed
+        # condition, not an invented strategy-map version.
+        native_current = True
+        positive_legacy = False
+    else:
+        correction = authority.rwd.production_intent.correction
+        native_current = bool(correction.production_strategy_map_version)
+        positive_legacy = bool(
+            not correction.production_strategy_map_version
+            and not correction.per_roi_production_strategy_map
+        )
     effective_startup_contract_version = (
         GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
         if native_current
@@ -743,8 +888,8 @@ def plan_guided_startup_transaction(
     if native_current:
         try:
             native_correction_bytes = serialize_guided_correction_payload(
-                intent.roi_scope.included_roi_ids,
-                correction.per_roi_production_strategy_map,
+                authority.included_roi_ids,
+                per_roi_correction_strategy_map,
             )
             native_correction_sha256 = _sha256_bytes(native_correction_bytes)
             native_correction_identity = json.loads(native_correction_bytes)[
@@ -764,29 +909,52 @@ def plan_guided_startup_transaction(
     )
     command = build_guided_startup_command_plan(request)
 
-    # B1: rebuild the exact authorized normalized recording description
+    # B1: verify the exact authorized normalized recording description.
+    # RWD rebuilds it from scratch from granular intent facts
     # (verify-by-rebuild, zero filesystem I/O -- every field this reads was
-    # already frozen onto the intent at authorization time) and serialize
-    # it for durable startup persistence. A mismatch here means the
-    # authorized intent's own frozen facts are no longer internally
+    # already frozen onto the intent at authorization time). NPM's intent
+    # already carries the complete, already-serialized normalized
+    # recording payload verbatim -- deserializing and recomputing its
+    # identity is the equivalent proof, using the same existing
+    # deserialize/identity functions, not a rebuild-from-scratch (NPM has
+    # no granular facts to rebuild from at this layer; they were already
+    # consumed earlier, at validation time). A mismatch either way means
+    # the authorized intent's own frozen facts are no longer internally
     # consistent with its own normalized_recording_description_identity,
     # which should be impossible for an accepted authorization -- refused
     # rather than silently proceeding.
-    try:
-        rebuilt_normalized_recording = rebuild_normalized_recording_description_from_intent(
-            intent
-        )
-        rebuilt_normalized_recording_identity = (
-            compute_normalized_recording_description_identity(
-                rebuilt_normalized_recording
+    if authority.is_npm:
+        try:
+            rebuilt_normalized_recording = deserialize_normalized_recording_description(
+                json.loads(intent.normalized_recording_payload_json)
             )
-        )
-    except NormalizedRecordingError as exc:
-        return _refused(
-            "normalized_recording_description_invalid",
-            "normalized_recording",
-            f"The authorized recording description could not be rebuilt: {exc}",
-        )
+            rebuilt_normalized_recording_identity = (
+                compute_normalized_recording_description_identity(
+                    rebuilt_normalized_recording
+                )
+            )
+        except (NormalizedRecordingError, ValueError, TypeError, KeyError) as exc:
+            return _refused(
+                "normalized_recording_description_invalid",
+                "normalized_recording",
+                f"The authorized recording description could not be verified: {exc}",
+            )
+    else:
+        try:
+            rebuilt_normalized_recording = rebuild_normalized_recording_description_from_intent(
+                intent
+            )
+            rebuilt_normalized_recording_identity = (
+                compute_normalized_recording_description_identity(
+                    rebuilt_normalized_recording
+                )
+            )
+        except NormalizedRecordingError as exc:
+            return _refused(
+                "normalized_recording_description_invalid",
+                "normalized_recording",
+                f"The authorized recording description could not be rebuilt: {exc}",
+            )
     if rebuilt_normalized_recording_identity != intent.normalized_recording_description_identity:
         return _refused(
             "normalized_recording_description_mismatch",
@@ -808,9 +976,9 @@ def plan_guided_startup_transaction(
         "allocated_run_dir": request.planned_allocated_run_dir,
         "output_base": request.output_base_canonical,
         "source_root": request.source_root_canonical,
-        "application_build_identity": auth.application_build_identity,
-        "authorization_identity": auth.canonical_authorization_identity,
-        "production_intent_identity": auth.production_intent_identity,
+        "application_build_identity": authority.application_build_identity,
+        "authorization_identity": authority.canonical_authorization_identity,
+        "production_intent_identity": authority.production_intent_identity,
         "config_payload_identity": payload.config_payload_identity,
         "candidate_manifest_payload_identity": (
             payload.candidate_manifest_payload_identity
@@ -826,11 +994,11 @@ def plan_guided_startup_transaction(
         "schema_version": GUIDED_STARTUP_PROVENANCE_SCHEMA_VERSION,
         "startup_contract_version": effective_startup_contract_version,
         "state": "prepared_runner_not_started",
-        "validation_request_identity": auth.fresh_request_identity,
-        "authorization_identity": auth.canonical_authorization_identity,
-        "production_intent_identity": auth.production_intent_identity,
-        "candidate_preflight_identity": auth.candidate_preflight_identity,
-        "roi_preflight_identity": auth.roi_preflight_identity,
+        "validation_request_identity": authority.fresh_request_identity,
+        "authorization_identity": authority.canonical_authorization_identity,
+        "production_intent_identity": authority.production_intent_identity,
+        "candidate_preflight_identity": authority.candidate_preflight_identity,
+        "roi_preflight_identity": authority.roi_preflight_identity,
         "config_payload_identity": payload.config_payload_identity,
         "candidate_manifest_payload_identity": (
             payload.candidate_manifest_payload_identity
@@ -838,15 +1006,15 @@ def plan_guided_startup_transaction(
         "provenance_seed_identity": payload.provenance_seed_identity,
         "serialized_config_sha256": config_artifact.byte_sha256,
         "serialized_manifest_sha256": manifest_artifact.byte_sha256,
-        "application_build_identity": auth.application_build_identity,
-        "production_mapping_contract_version": intent.mapping_contract_version,
+        "application_build_identity": authority.application_build_identity,
+        "production_mapping_contract_version": authority.mapping_contract_version,
         "startup_mapping_contract_version": (
             request.startup_mapping_contract.contract_version
         ),
         "manifest_consumption_contract_version": (
             payload.candidate_manifest_payload.candidate_consumption_contract_version
         ),
-        "runner_contract_version": intent.runner_contract_version,
+        "runner_contract_version": authority.runner_contract_version,
         "wrapper_contract_version": (
             request.wrapper_entrypoint.supported_contract_version
         ),
@@ -878,10 +1046,10 @@ def plan_guided_startup_transaction(
     provenance_basis_hash = _sha256_bytes(provenance_basis_bytes)
     identity_envelope = {
         "startup_contract_version": effective_startup_contract_version,
-        "authorization_identity": auth.canonical_authorization_identity,
-        "production_intent_identity": auth.production_intent_identity,
-        "candidate_preflight_identity": auth.candidate_preflight_identity,
-        "roi_preflight_identity": auth.roi_preflight_identity,
+        "authorization_identity": authority.canonical_authorization_identity,
+        "production_intent_identity": authority.production_intent_identity,
+        "candidate_preflight_identity": authority.candidate_preflight_identity,
+        "roi_preflight_identity": authority.roi_preflight_identity,
         "config_payload_identity": payload.config_payload_identity,
         "candidate_manifest_payload_identity": (
             payload.candidate_manifest_payload_identity
@@ -894,7 +1062,7 @@ def plan_guided_startup_transaction(
         "command_identity": command.canonical_command_identity,
         "command_record_sha256": command.command_record_sha256,
         "normalized_recording_description_bytes_sha256": normalized_recording_sha256,
-        "application_build_identity": auth.application_build_identity,
+        "application_build_identity": authority.application_build_identity,
         "wrapper_identity": request.wrapper_entrypoint.wrapper_identity_digest,
         "run_id": request.planned_run_id,
         "allocated_run_dir": request.planned_allocated_run_dir,
@@ -912,8 +1080,8 @@ def plan_guided_startup_transaction(
     }
     provenance_bytes = _json_bytes(provenance_document)
     identities = GuidedStartupIdentityBundle(
-        authorization_identity=auth.canonical_authorization_identity,
-        production_intent_identity=auth.production_intent_identity,
+        authorization_identity=authority.canonical_authorization_identity,
+        production_intent_identity=authority.production_intent_identity,
         config_payload_identity=payload.config_payload_identity,
         candidate_manifest_payload_identity=(
             payload.candidate_manifest_payload_identity

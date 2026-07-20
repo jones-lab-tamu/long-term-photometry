@@ -55,6 +55,7 @@ from photometry_pipeline.io.adapters import (
     rwd_authorized_suffix_candidates,
     rwd_authorized_time_column_candidates,
 )
+from photometry_pipeline.io.npm_contract import NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
 
 
 NORMALIZED_RECORDING_SCHEMA_NAME = "guided_normalized_recording_description"
@@ -1550,7 +1551,7 @@ def build_npm_normalized_recording_description(
         sessions=tuple(sessions),
         roi_channels=roi_channels,
         sampling=NormalizedSamplingContract(
-            time_basis=NPM_OUTPUT_TIME_BASIS,
+            time_basis=NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
             parser_contract_identity=compute_npm_parser_contract_digest(content),
             sessions_per_hour=int(sessions_per_hour),
             session_duration_sec=float(session_duration_sec),

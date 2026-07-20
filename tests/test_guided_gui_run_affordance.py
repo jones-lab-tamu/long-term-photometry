@@ -52,7 +52,7 @@ def _set_ready(window, request):
     window._guided_backend_validation_outcome_revision = (
         request.current_guided_revision
     )
-    window._guided_run_authorization_result = request.authorization_result
+    window._guided_startup_authority = request.startup_authority
     window._guided_execution_payload_result = request.payload_result
     # See tests/test_guided_gui_run_execution_wiring.py::_set_ready -- the
     # authoritative identity check requires the freshly-rebuilt draft's
@@ -97,7 +97,7 @@ def test_stale_validation_message_asks_for_revalidation(window):
 
 def test_missing_authorization_keeps_button_disabled(window, startup_request):
     _set_ready(window, startup_request)
-    window._guided_run_authorization_result = None
+    window._guided_startup_authority = None
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_readiness.status == "authorization_missing"
     assert window._guided_run_btn.isEnabled() is False

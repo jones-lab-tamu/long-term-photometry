@@ -74,12 +74,12 @@ def _set_ready(window, request):
     window._guided_backend_validation_revision = request.current_guided_revision
     window._guided_backend_validation_outcome = replace(
         _accepted_outcome(),
-        request_identity=request.authorization_result.stored_request_identity,
+        request_identity=request.startup_authority.rwd.stored_request_identity,
     )
     window._guided_backend_validation_outcome_revision = (
         request.current_guided_revision
     )
-    window._guided_run_authorization_result = request.authorization_result
+    window._guided_startup_authority = request.startup_authority
     window._guided_execution_payload_result = request.payload_result
     window._guided_startup_transaction_request = request
     window._guided_backend_execution_result = None
@@ -160,7 +160,7 @@ def _run_production_validation_update(
     )
     accepted = outcome or replace(
         _accepted_outcome(),
-        request_identity=request.authorization_result.stored_request_identity,
+        request_identity=request.startup_authority.rwd.stored_request_identity,
     )
     monkeypatch.setattr(
         window,
@@ -176,7 +176,7 @@ def _run_production_validation_update(
         window,
         "_derive_guided_execution_state_from_validation",
         lambda _context, _outcome: (
-            request.authorization_result,
+            request.startup_authority,
             request.payload_result,
             request,
         ),
@@ -189,8 +189,8 @@ def test_production_validation_update_retains_real_bound_request_and_enables(
     window, startup_request, monkeypatch
 ):
     _run_production_validation_update(window, startup_request, monkeypatch)
-    assert window._guided_run_authorization_result is (
-        startup_request.authorization_result
+    assert window._guided_startup_authority is (
+        startup_request.startup_authority
     )
     assert window._guided_execution_payload_result is (
         startup_request.payload_result
@@ -211,12 +211,14 @@ def test_production_derivation_builds_real_exactly_bound_request(
 
     revision = startup_request.current_guided_revision
     window._guided_backend_validation_revision = revision
-    context = SimpleNamespace(revision=revision)
+    context = SimpleNamespace(
+        revision=revision, draft=SimpleNamespace(input_format="rwd")
+    )
     outcome = _accepted_outcome()
     built = request_builder.GuidedExecutionRequestBuildResult(
         status="built",
         ok=True,
-        authorization_result=startup_request.authorization_result,
+        startup_authority=startup_request.startup_authority,
         payload_result=startup_request.payload_result,
         startup_transaction_request=startup_request,
         blocking_issues=(),
@@ -235,9 +237,9 @@ def test_production_derivation_builds_real_exactly_bound_request(
     authorized, derived, request = state
     assert isinstance(request, GuidedStartupTransactionRequest)
     assert request.current_guided_revision == revision
-    assert request.authorization_result is authorized
+    assert request.startup_authority is authorized
     assert request.payload_result is derived
-    assert authorized is startup_request.authorization_result
+    assert authorized is startup_request.startup_authority
     assert derived is startup_request.payload_result
 
 
@@ -263,7 +265,7 @@ def test_production_retained_state_is_cleared_on_invalidation(
 ):
     _run_production_validation_update(window, startup_request, monkeypatch)
     window._invalidate_guided_backend_validation("input changed")
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_execution_payload_result is None
     assert window._guided_startup_transaction_request is None
     assert window._guided_backend_execution_result is None
@@ -281,7 +283,7 @@ def test_validation_start_and_refusal_clear_retained_state(
     def run_refused(_context):
         observed_cleared.append(
             (
-                window._guided_run_authorization_result,
+                window._guided_startup_authority,
                 window._guided_execution_payload_result,
                 window._guided_startup_transaction_request,
             )
@@ -298,7 +300,7 @@ def test_validation_start_and_refusal_clear_retained_state(
     )
     window._on_guided_backend_validate_clicked()
     assert observed_cleared == [(None, None, None)]
-    assert window._guided_run_authorization_result is None
+    assert window._guided_startup_authority is None
     assert window._guided_execution_payload_result is None
     assert window._guided_startup_transaction_request is None
     assert window._guided_run_btn.isEnabled() is False
@@ -1107,8 +1109,8 @@ def test_real_gui_path_press_run_after_authorization(
     window._guided_backend_validate_btn.click()
     outcome = window._guided_backend_validation_outcome
     assert outcome.status == "validator_accepted"
-    auth = window._guided_run_authorization_result
-    assert getattr(auth, "status", None) == "authorized"
+    auth = window._guided_startup_authority
+    assert getattr(auth.rwd, "status", None) == "authorized"
     assert window._guided_run_btn.isEnabled() is True
 
     # The gate now accepts this real, GUI-constructed, never-before-used
@@ -1120,7 +1122,7 @@ def test_real_gui_path_press_run_after_authorization(
 
     # Output base and the planned run directory must not exist yet --
     # nothing is allocated during Validate/authorization, only at Run press.
-    output_base = Path(auth.production_intent.output_policy.output_base_canonical)
+    output_base = Path(auth.rwd.production_intent.output_policy.output_base_canonical)
     planned_run_dir = Path(retained_request.planned_allocated_run_dir)
     assert not output_base.exists()
     assert not planned_run_dir.exists()
@@ -1360,8 +1362,8 @@ def test_real_gui_loaded_defaults_without_apply_enables_run(
     assert draft.feature_event_explicitly_applied is False
     # With the repaired payload predicate, authorization + payload succeed
     # naturally and Run is enabled.
-    auth = window._guided_run_authorization_result
-    assert getattr(auth, "status", None) == "authorized"
+    auth = window._guided_startup_authority
+    assert getattr(auth.rwd, "status", None) == "authorized"
     assert window._guided_execution_derivation_reason is None
     assert window._guided_run_readiness.status == "ready_hidden"
     assert window._guided_run_btn.isEnabled() is True
@@ -1388,7 +1390,7 @@ def test_applied_defaults_also_enable_run_after_repair(
     draft = window._build_guided_new_analysis_draft_plan()
     assert draft.feature_event_profile_status == "applied"
     assert draft.feature_event_explicitly_applied is True
-    assert getattr(window._guided_run_authorization_result, "status", None) == (
+    assert getattr(window._guided_startup_authority.rwd, "status", None) == (
         "authorized"
     )
     assert window._guided_run_btn.isEnabled() is True
@@ -1503,7 +1505,7 @@ def test_real_gui_all_custom_with_dirty_default_editor_enables_run(
 
     request = window._guided_startup_transaction_request
     assert request is not None
-    per_roi = request.authorization_result.production_intent.feature_event.per_roi_feature_event_map
+    per_roi = request.startup_authority.rwd.production_intent.feature_event.per_roi_feature_event_map
     by_roi = {entry.roi_id: entry for entry in per_roi}
     for roi in ("CH1", "CH2", "CH3"):
         entry = by_roi[roi]

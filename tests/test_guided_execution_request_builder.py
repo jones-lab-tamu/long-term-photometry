@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import photometry_pipeline.guided_execution_request_builder as builder
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from photometry_pipeline.guided_startup_transaction import (
     GuidedStartupTransactionRequest,
 )
@@ -45,7 +46,7 @@ def _patch_success(monkeypatch, request):
     monkeypatch.setattr(
         builder,
         "authorize_guided_run",
-        lambda _request: request.authorization_result,
+        lambda _request: request.startup_authority.rwd,
     )
     monkeypatch.setattr(
         builder,
@@ -79,10 +80,13 @@ def test_accepted_current_validation_builds_real_bound_request(
     request = result.startup_transaction_request
     assert result.status == "built"
     assert result.ok and result.request_ready
-    assert isinstance(result.authorization_result, type(startup_request.authorization_result))
+    assert isinstance(result.startup_authority, GuidedStartupAuthority)
+    assert isinstance(
+        result.startup_authority.rwd, type(startup_request.startup_authority.rwd)
+    )
     assert isinstance(result.payload_result, type(startup_request.payload_result))
     assert isinstance(request, GuidedStartupTransactionRequest)
-    assert request.authorization_result is result.authorization_result
+    assert request.startup_authority is result.startup_authority
     assert request.payload_result is result.payload_result
     assert request.current_guided_revision == result.current_gui_revision
     assert request.explicit_user_run_transition is True

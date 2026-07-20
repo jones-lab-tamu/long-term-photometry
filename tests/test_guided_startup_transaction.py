@@ -14,6 +14,7 @@ import photometry_pipeline.guided_execution_payloads as payloads
 import photometry_pipeline.guided_run_authorization as authorization
 import photometry_pipeline.guided_startup_transaction as startup
 from photometry_pipeline.config import Config
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from photometry_pipeline.guided_manifest_verification import (
     load_guided_candidate_manifest,
 )
@@ -59,7 +60,7 @@ def startup_request(monkeypatch):
         auth, startup_mapping_contract=contract
     )
     return startup.GuidedStartupTransactionRequest(
-        authorization_result=auth,
+        startup_authority=GuidedStartupAuthority(rwd=auth),
         payload_result=derived,
         startup_mapping_contract=contract,
         application_build_identity=auth.production_intent.application_build_identity,
@@ -308,7 +309,7 @@ def test_command_plan_sessions_per_hour_sourced_from_production_intent(
     nor its config-YAML fallback (Config has no sessions_per_hour field)
     can supply it."""
     intent_sessions_per_hour = (
-        startup_request.authorization_result.production_intent.acquisition.sessions_per_hour
+        startup_request.startup_authority.rwd.production_intent.acquisition.sessions_per_hour
     )
     assert intent_sessions_per_hour == 6
 
@@ -320,17 +321,18 @@ def test_command_plan_sessions_per_hour_sourced_from_production_intent(
     # request whose intent carries a different sessions_per_hour must
     # produce a correspondingly different argv value.
     changed_auth = replace(
-        startup_request.authorization_result,
+        startup_request.startup_authority.rwd,
         production_intent=replace(
-            startup_request.authorization_result.production_intent,
+            startup_request.startup_authority.rwd.production_intent,
             acquisition=replace(
-                startup_request.authorization_result.production_intent.acquisition,
+                startup_request.startup_authority.rwd.production_intent.acquisition,
                 sessions_per_hour=20,
             ),
         ),
     )
     changed_request = replace(
-        startup_request, authorization_result=changed_auth
+        startup_request,
+        startup_authority=GuidedStartupAuthority(rwd=changed_auth),
     )
     changed_command = startup.build_guided_startup_command_plan(changed_request)
     assert (

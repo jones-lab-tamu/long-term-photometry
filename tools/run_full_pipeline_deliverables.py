@@ -1154,7 +1154,10 @@ def validate_guided_preallocated_mode_args(args):
         (not getattr(args, "out", None), "--out required"),
         (bool(getattr(args, "out_base", None)), "--out-base prohibited"),
         (bool(getattr(args, "overwrite", False)), "overwrite prohibited"),
-        (getattr(args, "format", None) != "rwd", "RWD format required"),
+        (
+            getattr(args, "format", None) not in {"rwd", "npm"},
+            "a supported input format is required",
+        ),
         (
             getattr(args, "mode", None) not in {"phasic", "tonic", "both"},
             "supported analysis mode required",

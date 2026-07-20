@@ -192,7 +192,7 @@ def _completion_runner(monkeypatch, request=None):
                     command_argv[command_argv.index("--out") + 1]
                 )
                 intent = (
-                    request.authorization_result.production_intent
+                    request.startup_authority.rwd.production_intent
                     if request is not None
                     else None
                 )
@@ -366,7 +366,7 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
     )
     assert not any(term in visible_text for term in internal_terms)
 
-    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    roi_id = request.startup_authority.rwd.production_intent.roi_scope.included_roi_ids[0]
     shutil.rmtree(run_dir / roi_id)
     (run_dir / "status.json").unlink()
     (run_dir / "run_report.json").unlink()
@@ -412,7 +412,7 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
     # per-ROI deliverables. That, not a mutilated full run, is the real case for
     # "successful but nothing to display": a full production run that lost its
     # region outputs is corrupt, and must not reload as successful.
-    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    roi_id = request.startup_authority.rwd.production_intent.roi_scope.included_roi_ids[0]
     shutil.rmtree(run_dir / roi_id)
     # write_current_run below rebuilds the terminal set (C8 ledger, deliverable
     # profile, etc.) independently of the original Guided authorization -- it
@@ -821,14 +821,13 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
 
 @pytest.mark.extended
 @pytest.mark.parametrize(
-    ("case_name", "analysis_mode", "strategy_by_roi", "session_names"),
+    ("case_name", "strategy_by_roi", "session_names"),
     [
-        ("all_signal_phasic", "phasic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
-        ("all_signal_tonic", "tonic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
-        ("all_signal_combined", "both", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
+        ("all_signal_case_a", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
+        ("all_signal_case_b", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
+        ("all_signal_combined", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
         (
             "mixed_four_combined",
-            "both",
             {
                 "CH1": "Robust Global Event-Reject Fit",
                 "CH2": "Signal-Only F0",
@@ -838,8 +837,7 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
             None,
         ),
         (
-            "shuffled_discovery_phasic",
-            "phasic",
+            "shuffled_discovery",
             {"CH1": "Global Linear Regression"},
             (
                 "2025_01_01-00_20_00",
@@ -850,12 +848,15 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
     ],
 )
 def test_real_guided_native_correction_lifecycle_matrix(
-    tmp_path, monkeypatch, qapp, case_name, analysis_mode, strategy_by_roi,
+    tmp_path, monkeypatch, qapp, case_name, strategy_by_roi,
     session_names,
 ):
     """Real production lifecycle through ordinary production MainWindow
     construction (native Signal-Only F0 is enabled by default; no
-    capability injection is needed or possible)."""
+    capability injection is needed or possible). Guided Mode exposes no
+    phasic-versus-tonic choice: every case authorizes and runs
+    execution_mode == "both", producing both output branches -- there is
+    no single-mode Guided lifecycle left to parametrize over."""
     from PySide6.QtCore import QSettings
     from gui.main_window import MainWindow
     import photometry_pipeline.guided_execution_request_builder as request_builder
@@ -905,7 +906,6 @@ def test_real_guided_native_correction_lifecycle_matrix(
             tmp_path,
             monkeypatch,
             strategy_by_roi=strategy_by_roi,
-            analysis_mode=analysis_mode,
             rois=tuple(strategy_by_roi),
             session_names=session_names,
         )
@@ -949,7 +949,7 @@ def test_real_guided_native_correction_lifecycle_matrix(
         if session_names is not None:
             expected_session_names = tuple(sorted(session_names))
             frozen_candidates = (
-                window._guided_run_authorization_result.production_intent
+                window._guided_startup_authority.rwd.production_intent
                 .input_source.candidate_files
             )
             assert tuple(
@@ -985,7 +985,7 @@ def test_real_guided_native_correction_lifecycle_matrix(
         # "refuses once clicked".
         assert window._guided_run_btn.isEnabled() is False
         assert window._guided_validated_plan_identity is None
-        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_authority is None
         assert window._guided_execution_payload_result is None
         assert window._guided_startup_transaction_request is None
         stale_starts = []
@@ -1016,7 +1016,7 @@ def test_real_guided_native_correction_lifecycle_matrix(
         window._refresh_guided_run_readiness_display()
         assert window._guided_run_btn.isEnabled() is False
         assert window._guided_validated_plan_identity is None
-        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_authority is None
         assert window._guided_startup_transaction_request is None
         restore_starts = []
         monkeypatch.setattr(
@@ -1097,12 +1097,13 @@ def test_real_guided_native_correction_lifecycle_matrix(
         assert set(loaded_specs) == set(strategy_by_roi)
         authorized_payload = json.loads(native_payload_path.read_text(encoding="utf-8"))
         authorized_records = authorized_payload["per_roi_correction"]
+        # Guided Mode exposes no phasic-versus-tonic choice: the wrapper
+        # is always invoked with --mode both, and both output branches
+        # are always required/present, regardless of the scenario.
         assert (run_dir / "command_invoked.txt").read_text(encoding="utf-8").splitlines()[
             (run_dir / "command_invoked.txt").read_text(encoding="utf-8").splitlines().index("--mode") + 1
-        ] == analysis_mode
-        expected_branches = (
-            {"tonic", "phasic"} if analysis_mode == "both" else {analysis_mode}
-        )
+        ] == "both"
+        expected_branches = {"tonic", "phasic"}
         from photometry_pipeline.run_completion_contract import (
             SUCCESS_STATES,
             classify_run_terminal_state,
@@ -1362,12 +1363,23 @@ def test_real_gui_run_refuses_native_payload_mutated_before_wrapper_claim(
         window.close()
 
 
-def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
+def test_real_gui_hidden_full_control_mode_combo_does_not_affect_guided_authorization(
     tmp_path, monkeypatch, qapp
 ):
+    """Guided Mode exposes no phasic-versus-tonic choice: Full Control's
+    hidden `_mode_combo` (never shown by the Guided workflow) must have no
+    effect whatsoever on a Guided authorization -- the accepted Guided
+    draft always carries `execution_mode == "both"`, the authorization
+    identity is unaffected by `_mode_combo`, and no Guided invalidation is
+    triggered by that unrelated Full Control widget. This replaces a
+    retired test that asserted the opposite (now-incorrect) behavior from
+    before the Guided `execution_mode` root-cause repair."""
     from PySide6.QtCore import QSettings
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
+    from photometry_pipeline.guided_new_analysis_plan import (
+        GuidedApprovedMissingSession,
+    )
     from tests.test_gui_guided_new_analysis_plan import (
         _confirm_detected_dataset_settings_via_review_plan_button,
     )
@@ -1401,21 +1413,49 @@ def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
             "resolve_application_build_identity",
             lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
         )
-        identities = []
-        for index, mode in enumerate(("phasic", "both", "tonic")):
-            if index:
-                window._mode_combo.setCurrentText(mode)
-                assert window._guided_run_btn.isEnabled() is False
-                assert window._guided_startup_transaction_request is None
-                window._guided_workflow_stepper.setCurrentRow(
-                    list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
-                )
-            window._guided_backend_validate_btn.click()
-            assert window._guided_backend_validation_outcome.status == "validator_accepted"
-            identities.append(
-                window._guided_run_authorization_result.canonical_authorization_identity
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted"
+        assert window._guided_run_btn.isEnabled() is True
+        baseline_request = window._guided_startup_transaction_request
+        baseline_identity = (
+            window._guided_startup_authority.canonical_authorization_identity
+        )
+        assert (
+            window._build_guided_new_analysis_draft_plan().execution_intent.execution_mode
+            == "both"
+        )
+
+        for mode in ("phasic", "tonic", "both", "phasic"):
+            window._mode_combo.setCurrentText(mode)
+            # A hidden Full Control widget the Guided workflow never shows
+            # must not invalidate the accepted Guided authorization at all.
+            assert window._guided_run_btn.isEnabled() is True
+            assert window._guided_startup_transaction_request is baseline_request
+            assert (
+                window._guided_startup_authority.canonical_authorization_identity
+                == baseline_identity
             )
-        assert len(set(identities)) == 3
+            assert (
+                window._build_guided_new_analysis_draft_plan()
+                .execution_intent.execution_mode
+                == "both"
+            )
+
+        # Sensitivity is not broken generally: a genuine, visible
+        # Guided-defining change still invalidates the accepted
+        # authorization, exactly as before this repair.
+        probe_approval = GuidedApprovedMissingSession(
+            canonical_relative_path="session-mode-invariance-probe/fluorescence.csv",
+            size_bytes=1024,
+            sha256_content_digest="e" * 64,
+            session_index=99,
+            expected_start_time="2026-01-01T00:00:00Z",
+            expected_duration_sec=600.0,
+        )
+        window._add_guided_missing_session_approval(probe_approval)
+        assert window._guided_run_btn.isEnabled() is False
+        assert window._guided_startup_transaction_request is None
+        assert window._guided_startup_authority is None
     finally:
         window.close()
 
@@ -1472,7 +1512,7 @@ def test_guided_run_refuses_post_setup_canonical_chronology_rename_and_does_not_
         window._guided_backend_validate_btn.click()
         assert window._guided_backend_validation_outcome.status == "validator_accepted"
         assert window._guided_run_btn.isEnabled()
-        old_authorization = window._guided_run_authorization_result
+        old_authorization = window._guided_startup_authority
         old_request = window._guided_startup_transaction_request
         planned_run_dir = Path(old_request.planned_allocated_run_dir)
 
@@ -1491,7 +1531,7 @@ def test_guided_run_refuses_post_setup_canonical_chronology_rename_and_does_not_
         assert worker_starts == []
         assert not window._guided_backend_execution_active
         assert not planned_run_dir.exists()
-        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_authority is None
         assert window._guided_startup_transaction_request is None
         assert window._guided_validated_plan_identity is None
         assert "recording sessions changed" in (
@@ -1502,13 +1542,13 @@ def test_guided_run_refuses_post_setup_canonical_chronology_rename_and_does_not_
         # authorization/request objects must not reappear or become executable.
         moved.rename(original)
         window._refresh_guided_run_readiness_display()
-        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_authority is None
         assert window._guided_startup_transaction_request is None
         assert not window._guided_run_btn.isEnabled()
         window._on_guided_run_clicked_backend_guarded()
         assert worker_starts == []
         assert not planned_run_dir.exists()
-        assert old_authorization is not window._guided_run_authorization_result
+        assert old_authorization is not window._guided_startup_authority
         assert old_request is not window._guided_startup_transaction_request
 
         # Only a fresh Setup check creates new authorization bound to the
@@ -1516,7 +1556,7 @@ def test_guided_run_refuses_post_setup_canonical_chronology_rename_and_does_not_
         window._guided_backend_validate_btn.click()
         assert window._guided_backend_validation_outcome.status == "validator_accepted"
         assert window._guided_run_btn.isEnabled()
-        assert window._guided_run_authorization_result is not old_authorization
+        assert window._guided_startup_authority is not old_authorization
         assert window._guided_startup_transaction_request is not old_request
         assert not planned_run_dir.exists()
     finally:
@@ -1538,7 +1578,7 @@ def test_full_run_that_lost_a_region_directory_no_longer_loads_as_successful(
     run_dir = Path(request.planned_allocated_run_dir)
     assert is_successful_completed_run_dir(str(run_dir))[0] is True
 
-    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    roi_id = request.startup_authority.rwd.production_intent.roi_scope.included_roi_ids[0]
     shutil.rmtree(run_dir / roi_id)
     ok, reason = is_successful_completed_run_dir(str(run_dir))
     assert ok is False, reason
