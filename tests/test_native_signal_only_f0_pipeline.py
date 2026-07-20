@@ -804,3 +804,74 @@ def test_real_pipeline_unusable_signal_preserves_typed_failure_and_no_success_ou
     assert not (out / "phasic_trace_cache.h5").exists()
     assert not (out / "phasic_trace_cache.h5.tmp").exists()
     assert not (out / "input_processing_completeness.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Region3/chunk-22 real-dataset failure shape: a near-flat, quantized raw
+# signal whose robust range (p95-p05) sits just either side of
+# signal_only_f0_min_robust_range. The real failing recording
+# (photometryData2024-09-28T02_04_50.csv, canonical ROI Region3, physical
+# column Region3G) has raw signal-channel values clustered almost entirely
+# at exactly 1/255 (0.00392156862745...), consistent with an unconnected/
+# dead fiber channel reading ADC quantization floor noise rather than real
+# photometry signal -- resampled robust range ~=9.92e-7, just under the
+# 1e-6 threshold. Two neighboring real chunks from the same ROI measured
+# 1.008e-6 and 9.93e-7 respectively: the pass/fail split for this ROI is
+# noise-level, not a one-off glitch specific to chunk 22.
+# ---------------------------------------------------------------------------
+
+
+def _near_flat_signal(n, span, *, base=0.00392156862745098):
+    """A synthetic near-flat ramp calibrated to straddle
+    signal_only_f0_min_robust_range, mirroring the real quantized-flat
+    shape's order of magnitude without depending on real research data."""
+    return base + np.linspace(0.0, span, n)
+
+
+def test_signal_only_f0_refuses_near_flat_quantized_signal_matching_real_shape():
+    """Reproduces the exact real Region3/chunk-22 failure shape and reason:
+    a near-flat raw signal whose p95-p05 robust range falls just under the
+    production threshold raises CorrectionProcessingError with reason
+    "insufficient_robust_signal_range", exactly as the real dataset did."""
+    n = 800
+    signal = _near_flat_signal(n, span=1.05e-6)
+    p05, p95 = np.percentile(signal, [5.0, 95.0])
+    assert p95 - p05 < 1e-6, "fixture must land on the failing side of the threshold"
+
+    chunk = _chunk(n=n)
+    chunk.sig_raw[:, 0] = signal
+    pipeline = Pipeline(
+        _cfg(), mode="phasic", per_roi_correction=_signal_only_map("ROI0", "ROI1")
+    )
+    pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
+    with pytest.raises(CorrectionProcessingError) as exc_info:
+        pipeline._apply_standard_analysis(chunk, chunk_id=22)
+    exc = exc_info.value
+    assert exc.roi_id == "ROI0"
+    assert exc.chunk_id == 22
+    assert exc.selected_strategy == "signal_only_f0"
+    assert "insufficient_robust_signal_range" in exc.reason
+
+
+def test_signal_only_f0_accepts_signal_just_above_robust_range_threshold():
+    """The true boundary: a signal with the same near-flat magnitude but a
+    slightly larger span (robust range just over the threshold) must not be
+    refused for insufficient_robust_signal_range -- isolating exactly how
+    close the real dataset's chunks sit to this pass/fail line."""
+    n = 800
+    signal = _near_flat_signal(n, span=1.30e-6)
+    p05, p95 = np.percentile(signal, [5.0, 95.0])
+    assert p95 - p05 >= 1e-6, "fixture must land on the passing side of the threshold"
+
+    chunk = _chunk(n=n)
+    chunk.sig_raw[:, 0] = signal
+    pipeline = Pipeline(
+        _cfg(), mode="phasic", per_roi_correction=_signal_only_map("ROI0", "ROI1")
+    )
+    pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
+    # Must not raise for the robust-range reason specifically; other
+    # coverage/positivity checks downstream are not the boundary under test.
+    try:
+        pipeline._apply_standard_analysis(chunk, chunk_id=22)
+    except CorrectionProcessingError as exc:
+        assert "insufficient_robust_signal_range" not in exc.reason

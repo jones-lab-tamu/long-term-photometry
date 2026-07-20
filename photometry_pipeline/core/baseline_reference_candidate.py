@@ -37,6 +37,15 @@ def _json_float_or_none(value: Any) -> float | None:
     return val if np.isfinite(val) else None
 
 
+def _window_sum(padded: np.ndarray, window: int) -> np.ndarray:
+    """O(len(padded)) sliding-window sum, equivalent to
+    ``np.convolve(padded, np.ones(window), mode="valid")`` up to floating-point
+    summation order (a single running cumulative sum plus subtraction, instead
+    of a fresh per-window direct sum)."""
+    csum = np.concatenate(([0.0], np.cumsum(padded, dtype=float)))
+    return csum[window:] - csum[:-window]
+
+
 def _nan_aware_moving_average(values: np.ndarray, window_samples: int) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
     if arr.size == 0:
@@ -45,7 +54,6 @@ def _nan_aware_moving_average(values: np.ndarray, window_samples: int) -> np.nda
     window = min(window, int(arr.size))
     if window % 2 == 0 and window > 1:
         window -= 1
-    kernel = np.ones(window, dtype=float)
     finite = np.isfinite(arr)
     filled = np.where(finite, arr, 0.0)
     pad = window // 2
@@ -54,8 +62,8 @@ def _nan_aware_moving_average(values: np.ndarray, window_samples: int) -> np.nda
         finite_weights = np.pad(finite.astype(float), pad_width=pad, mode="reflect")
     else:
         finite_weights = finite.astype(float)
-    sums = np.convolve(filled, kernel, mode="valid")
-    counts = np.convolve(finite_weights, kernel, mode="valid")
+    sums = _window_sum(filled, window)
+    counts = _window_sum(finite_weights, window)
     out = np.full(arr.shape, np.nan, dtype=float)
     valid = counts > 0.0
     out[valid] = sums[valid] / counts[valid]
