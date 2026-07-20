@@ -1010,6 +1010,7 @@ def verify_guided_manifest_before_output(args):
         source_root=args.input,
         config=cfg,
         manifest_included_roi_ids=manifest.included_roi_ids,
+        source_format=args.format,
     )
     include_rois = (
         tuple(item.strip() for item in args.include_rois.split(",") if item.strip())

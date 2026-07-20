@@ -3089,6 +3089,7 @@ class Pipeline:
                 source_root=input_dir,
                 config=self.config,
                 manifest_included_roi_ids=manifest.included_roi_ids,
+                source_format=force_format,
             )
             guided_verification = verify_guided_candidate_manifest_consumption(
                 manifest=manifest,

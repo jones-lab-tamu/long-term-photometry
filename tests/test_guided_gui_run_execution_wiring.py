@@ -576,6 +576,14 @@ def test_wrapper_failure_surfaces_actionable_scientist_message(
     )
     assert "manifest" not in detail.lower()
     assert "parser_contract" not in detail.lower()
+    # The real detail (issue.message, which for a genuine wrapper failure
+    # already carries the subprocess's own stderr) must not be silently
+    # lost -- it is persisted to the existing app log even though the
+    # scientist-facing panel above stays generic.
+    logged = window._log_view.toPlainText()
+    assert "guided_manifest_parser_contract_mismatch" in logged
+    assert "wrapper_returncode=1" in logged
+    assert status in logged
 
 
 def test_execution_details_label_clears_on_next_run_start(

@@ -12844,6 +12844,22 @@ class MainWindow(QMainWindow):
                     "If the problem repeats, keep the run folder and ask for "
                     "support."
                 )
+                # The scientist-facing panel above deliberately stays
+                # generic; the real failure detail (blocking_issues[0].
+                # message, which for a wrapper_failed/wrapper_start_failed
+                # result already carries the subprocess's own stderr -- see
+                # guided_startup_orchestration.run_guided_startup_to_wrapper)
+                # is persisted to the existing app log instead, so it is not
+                # silently lost once this transient in-memory result is
+                # replaced by the next run.
+                diagnostics = getattr(result, "diagnostics", None)
+                self._append_log(
+                    "Guided Run failed: status="
+                    f"{getattr(result, 'status', '')} "
+                    "wrapper_returncode="
+                    f"{getattr(diagnostics, 'wrapper_returncode', None)}: "
+                    f"{blocking_issues[0].message}"
+                )
             elif (
                 not recovered
                 and getattr(result, "status", "")

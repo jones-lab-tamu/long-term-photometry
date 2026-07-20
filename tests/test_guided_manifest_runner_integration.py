@@ -40,6 +40,7 @@ def _manifest(tmp_path, time_col="Time(s)"):
         source_root=root,
         config=config,
         manifest_included_roi_ids=("ROI0",),
+        source_format="rwd",
     )
     snapshot = build_rwd_source_candidate_snapshot(str(root))
     manifest = verification.GuidedCandidateManifestForRunner(

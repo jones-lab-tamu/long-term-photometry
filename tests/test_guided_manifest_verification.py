@@ -403,9 +403,10 @@ def test_verifier_refuses_bad_cli_context(tmp_path):
     path, _ = _write_manifest(tmp_path, m_dict)
     load_res = verification.load_guided_candidate_manifest(str(path))
 
-    # Test format
+    # Test format (npm is a supported format alongside rwd; a genuinely
+    # unsupported format is used here instead to exercise the refusal path)
     ctx = _cli_context()
-    ctx = verification.GuidedManifestCliContext(**{**ctx.__dict__, "input_format": "npm"})
+    ctx = verification.GuidedManifestCliContext(**{**ctx.__dict__, "input_format": "custom_tabular"})
     res = verification.verify_guided_candidate_manifest_consumption(
         manifest=load_res.manifest, source_root=str(tmp_path),
         current_candidates=(), current_roi_inventory=_current_roi_inventory(),

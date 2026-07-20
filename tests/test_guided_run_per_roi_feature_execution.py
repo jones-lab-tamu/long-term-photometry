@@ -730,6 +730,7 @@ def _build_two_roi_guided_manifest(tmp_path):
         source_root=root,
         config=config,
         manifest_included_roi_ids=("ROI0", "ROI1"),
+        source_format="rwd",
     )
     snapshot = build_rwd_source_candidate_snapshot(str(root))
     manifest = verification.GuidedCandidateManifestForRunner(

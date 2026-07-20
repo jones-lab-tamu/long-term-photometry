@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 from photometry_pipeline.guided_identity import encode_canonical_value, canonicalize_absolute_path
+from photometry_pipeline.io.npm_source_snapshot import (
+    build_npm_source_candidate_snapshot,
+)
 from photometry_pipeline.io.rwd_source_snapshot import (
     compute_rwd_source_candidate_set_digest,
     compute_rwd_source_candidate_content_digest,
@@ -357,8 +360,8 @@ def verify_guided_candidate_manifest_consumption(
         )
 
     # 1. Validate CLI context first (require first Guided subset)
-    if cli_context.input_format != "rwd":
-        return _issue("guided_manifest_unsupported_mode", "Guided execution requires input format rwd.")
+    if cli_context.input_format not in ("rwd", "npm"):
+        return _issue("guided_manifest_unsupported_mode", "Guided execution requires a supported input format.")
     if cli_context.mode not in {"phasic", "tonic", "both"}:
         return _issue("guided_manifest_unsupported_mode", "Guided execution requires a supported analysis mode.")
     if cli_context.run_type != "full":
@@ -484,35 +487,55 @@ def verify_guided_candidate_manifest_consumption(
             sha256_content_digest=actual_digest,
         ))
 
-    # Recompute and compare aggregate digests using rwd_source_snapshot algorithms
+    # Recompute and compare aggregate digests using each format's own
+    # source-snapshot digest algorithm. RWD's and NPM's digest domains and
+    # inputs are disjoint (NPM's also binds each candidate's authoritative
+    # filename timestamp, which RWD has no equivalent of), so there is no
+    # single generic recomputation shared across formats here.
     try:
-        rwd_files = tuple(
-            GuidedRwdSourceCandidateFile(
-                canonical_relative_path=v.canonical_relative_path,
-                size_bytes=v.size_bytes,
-                sha256_content_digest=v.sha256_content_digest,
-            )
-            for v in verified_candidates
-        )
         path_style = canonicalize_absolute_path(manifest.source_root_canonical).path_style
-        semantic_payload = {
-            "snapshot_schema_name": "guided_rwd_source_candidate_snapshot",
-            "snapshot_schema_version": "v1",
-            "discovery_rule_version": "immediate_child_exact_fluorescence_csv.v1",
-            "path_canonicalization_version": "typed_json_utf8.v1",
-            "relative_path_rule_version": "canonical_forward_slash_relative_path.v1",
-            "digest_algorithm": "sha256",
-            "source_root_canonical": manifest.source_root_canonical,
-            "source_root_path_style": path_style,
-            "source_format": "rwd",
-            "acquisition_mode": "intermittent",
-            "candidates": rwd_files,
-            "ignored_files_policy": "ignore_non_target_entries_bounded_nested_root_check.v1",
-            "build_mode": "read_only",
-            "unresolved_inputs": (),
-        }
-        recomputed_set_digest = compute_rwd_source_candidate_set_digest(semantic_payload)
-        recomputed_content_digest = compute_rwd_source_candidate_content_digest(semantic_payload)
+        if cli_context.input_format == "npm":
+            # A fresh, independent rebuild (mirroring the precedent already
+            # established for RWD, where run_candidate_manifest_execution_
+            # preflight and run_roi_execution_preflight each independently
+            # call build_rwd_source_candidate_snapshot again rather than
+            # reusing one shared snapshot). This also sidesteps needing to
+            # re-derive each candidate's authoritative_source_start_time
+            # from `verified_candidates[i].absolute_path`, which is
+            # reconstructed from the case-folded canonical_relative_path on
+            # Windows and is therefore not reliably parseable by
+            # parse_npm_filename_timestamp (its "T" separator may already
+            # be lower-cased).
+            npm_snapshot = build_npm_source_candidate_snapshot(source_root)
+            recomputed_set_digest = npm_snapshot.source_candidate_set_digest
+            recomputed_content_digest = npm_snapshot.source_candidate_content_digest
+        else:
+            rwd_files = tuple(
+                GuidedRwdSourceCandidateFile(
+                    canonical_relative_path=v.canonical_relative_path,
+                    size_bytes=v.size_bytes,
+                    sha256_content_digest=v.sha256_content_digest,
+                )
+                for v in verified_candidates
+            )
+            semantic_payload = {
+                "snapshot_schema_name": "guided_rwd_source_candidate_snapshot",
+                "snapshot_schema_version": "v1",
+                "discovery_rule_version": "immediate_child_exact_fluorescence_csv.v1",
+                "path_canonicalization_version": "typed_json_utf8.v1",
+                "relative_path_rule_version": "canonical_forward_slash_relative_path.v1",
+                "digest_algorithm": "sha256",
+                "source_root_canonical": manifest.source_root_canonical,
+                "source_root_path_style": path_style,
+                "source_format": "rwd",
+                "acquisition_mode": "intermittent",
+                "candidates": rwd_files,
+                "ignored_files_policy": "ignore_non_target_entries_bounded_nested_root_check.v1",
+                "build_mode": "read_only",
+                "unresolved_inputs": (),
+            }
+            recomputed_set_digest = compute_rwd_source_candidate_set_digest(semantic_payload)
+            recomputed_content_digest = compute_rwd_source_candidate_content_digest(semantic_payload)
     except Exception as e:
         return _issue("guided_manifest_verification_internal_error", f"Failed to compute aggregate digests: {e}")
 

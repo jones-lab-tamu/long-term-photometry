@@ -44,6 +44,7 @@ def _facts(tmp_path, included=("ROI0",), time_col="Time(s)"):
         source_root=root,
         config=Config(rwd_time_col=time_col),
         manifest_included_roi_ids=included,
+        source_format="rwd",
     )
 
 
@@ -128,6 +129,7 @@ def test_current_facts_refuses_missing_included_roi(tmp_path):
             source_root=root,
             config=Config(),
             manifest_included_roi_ids=("MISSING",),
+            source_format="rwd",
         )
 
 
@@ -146,6 +148,7 @@ def test_current_facts_performs_no_writes(tmp_path, monkeypatch):
         source_root=root,
         config=Config(),
         manifest_included_roi_ids=("ROI0",),
+        source_format="rwd",
     )
     assert facts.current_candidates
 
