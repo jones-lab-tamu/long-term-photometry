@@ -105,6 +105,10 @@ from photometry_pipeline.workflow_safety import (
 from photometry_pipeline.guided_startup_allocation import (
     classify_output_base_reuse_eligibility,
 )
+from photometry_pipeline.guided_capabilities import (
+    GUIDED_PRODUCTION_ACQUISITION_MODES,
+    is_guided_production_acquisition_mode,
+)
 from photometry_pipeline.guided_execution_request_builder import (
     is_successful_completed_run_root,
 )
@@ -2861,12 +2865,17 @@ class MainWindow(QMainWindow):
 
         self._guided_acquisition_mode_combo = QComboBox()
         self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
-        for idx in range(self._acquisition_mode_combo.count()):
+        acquisition_mode_labels = {
+            "intermittent": "Intermittent/session-based recording",
+        }
+        for acquisition_mode in GUIDED_PRODUCTION_ACQUISITION_MODES:
             self._guided_acquisition_mode_combo.addItem(
-                self._acquisition_mode_combo.itemText(idx),
-                self._acquisition_mode_combo.itemData(idx),
+                acquisition_mode_labels[acquisition_mode],
+                acquisition_mode,
             )
-        self._guided_acquisition_mode_combo.setToolTip(self._acquisition_mode_combo.toolTip())
+        self._guided_acquisition_mode_combo.setToolTip(
+            "Use this mode when the recording is saved as repeated sessions."
+        )
         self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
         self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
@@ -3245,9 +3254,6 @@ class MainWindow(QMainWindow):
         )
         self._output_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._format_combo.currentIndexChanged.connect(lambda _idx: self._sync_guided_setup_from_full())
-        self._acquisition_mode_combo.currentIndexChanged.connect(
-            lambda _idx: self._sync_guided_setup_from_full()
-        )
         self._sph_edit.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._duration_edit.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._continuous_window_sec_spin.valueChanged.connect(
@@ -3281,7 +3287,7 @@ class MainWindow(QMainWindow):
             "output_dir": self._output_dir.text().strip(),
             "format": self._format_combo.currentText(),
             "resolved_format": resolved_format,
-            "acquisition_mode": self._selected_acquisition_mode(),
+            "acquisition_mode": self._guided_selected_acquisition_mode(),
             "sessions_per_hour": self._sph_edit.text().strip(),
             "session_duration_s": self._duration_edit.text().strip(),
             "continuous_window_sec": float(self._continuous_window_sec_spin.value()),
@@ -3368,15 +3374,8 @@ class MainWindow(QMainWindow):
             )
         mode = str(
             self._guided_acquisition_mode_combo.currentData() or ""
-        ).strip()
-        if mode == "continuous":
-            if self._guided_continuous_window_sec_spin.value() <= 0:
-                return (
-                    False,
-                    "Continuous analysis window must be greater than 0 seconds.",
-                )
-            return True, "Recording structure is ready."
-        if mode != "intermittent":
+        ).strip().lower()
+        if not is_guided_production_acquisition_mode(mode):
             return (
                 False,
                 "Select an acquisition mode to continue.",
@@ -4249,10 +4248,6 @@ class MainWindow(QMainWindow):
             fmt_idx = self._guided_format_combo.findText(self._format_combo.currentText())
             if fmt_idx >= 0:
                 self._guided_format_combo.setCurrentIndex(fmt_idx)
-            self._set_combo_data_without_signals(
-                self._guided_acquisition_mode_combo,
-                self._selected_acquisition_mode(),
-            )
             self._guided_sessions_per_hour_edit.setText(self._sph_edit.text())
             self._guided_session_duration_edit.setText(self._duration_edit.text())
             self._guided_continuous_window_sec_spin.setValue(float(self._continuous_window_sec_spin.value()))
@@ -4272,7 +4267,7 @@ class MainWindow(QMainWindow):
     def _sync_guided_recording_visibility(self) -> None:
         if not hasattr(self, "_guided_recording_structure_help_label"):
             return
-        continuous = self._selected_acquisition_mode() == "continuous"
+        continuous = self._guided_selected_acquisition_mode() == "continuous"
         for widget in (
             getattr(self, "_guided_intermittent_explanation_label", None),
             getattr(
@@ -11459,14 +11454,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_discovery_cache", None) is not None:
             resolved_format = str(self._discovery_cache.get("resolved_format", "") or "")
         resolved_format = resolved_format.strip().lower()
-        acq_mode = "continuous"
-        if hasattr(self, "_guided_acquisition_mode_combo"):
-            acq_mode = (
-                self._guided_acquisition_mode_combo.currentData()
-                or self._guided_acquisition_mode_combo.currentText().lower()
-                or "continuous"
-            )
-        acq_mode = str(acq_mode or "").strip().lower()
+        acq_mode = self._guided_selected_acquisition_mode()
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
             text = self._guided_sessions_per_hour_edit.text().strip()
@@ -13761,12 +13749,7 @@ class MainWindow(QMainWindow):
             else "auto"
         )
         input_format = str(input_format or "").strip().lower()
-        acq_mode = "continuous"
-        if hasattr(self, "_guided_acquisition_mode_combo"):
-            acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
-            if not acq_mode:
-                acq_mode = "continuous"
-        acq_mode = str(acq_mode or "").strip().lower()
+        acq_mode = self._guided_selected_acquisition_mode()
         
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
@@ -13792,12 +13775,7 @@ class MainWindow(QMainWindow):
         allow_partial = self._guided_allow_partial_final_window_cb.isChecked() if hasattr(self, "_guided_allow_partial_final_window_cb") else False
         exclude_rwd = self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked() if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb") else False
         
-        if acq_mode == "continuous":
-            if win_val > 0:
-                acq_status = "ready"
-            else:
-                acq_status = "invalid"
-        elif acq_mode == "intermittent":
+        if acq_mode == "intermittent":
             if sph_val is not None and sph_val > 0 and dur_val is not None and dur_val > 0:
                 acq_status = "ready"
             elif sph_val is None or dur_val is None:
@@ -15026,11 +15004,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = "continuous"
-        if hasattr(self, "_guided_acquisition_mode_combo"):
-            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
-            if not current_acq_mode:
-                current_acq_mode = "continuous"
+        current_acq_mode = self._guided_selected_acquisition_mode()
 
         stale_reasons = []
         if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid"):
@@ -16344,11 +16318,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = "continuous"
-        if hasattr(self, "_guided_acquisition_mode_combo"):
-            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
-            if not current_acq_mode:
-                current_acq_mode = "continuous"
+        current_acq_mode = self._guided_selected_acquisition_mode()
 
         if err:
             self._guided_new_analysis_feature_event_profile_status = "invalid"
@@ -16419,11 +16389,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = "continuous"
-        if hasattr(self, "_guided_acquisition_mode_combo"):
-            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
-            if not current_acq_mode:
-                current_acq_mode = "continuous"
+        current_acq_mode = self._guided_selected_acquisition_mode()
 
         self._guided_new_analysis_feature_event_profile_stale_reasons = []
         self._guided_new_analysis_feature_event_profile_errors = []
@@ -22988,6 +22954,16 @@ class MainWindow(QMainWindow):
                 return mode
         text = combo.currentText().strip().lower()
         return "continuous" if text.startswith("continuous") else "intermittent"
+
+    def _guided_selected_acquisition_mode(self) -> str:
+        """Return the raw normalized mode selected in Guided setup."""
+        combo = getattr(self, "_guided_acquisition_mode_combo", None)
+        if combo is None:
+            return ""
+        data = combo.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip().lower()
+        return combo.currentText().strip().lower()
 
     def _sync_continuous_step_to_window(self, value: float | None = None) -> None:
         """Keep GUI-owned continuous step fixed to the editable window length."""

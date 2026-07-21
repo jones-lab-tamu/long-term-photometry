@@ -458,7 +458,11 @@ def test_gui_verification_boundaries(window, tmp_path: Path):
     assert window._guided_missing_session_approval_from_failed_run(result) is None
     window._guided_format_combo.setCurrentText("rwd")
 
-    # 2. Continuous is rejected
+    # 2. An unsupported stale/programmatic Continuous value is rejected.
+    window._guided_acquisition_mode_combo.addItem(
+        "Injected unsupported mode",
+        "continuous",
+    )
     idx_continuous = window._guided_acquisition_mode_combo.findData("continuous")
     window._guided_acquisition_mode_combo.setCurrentIndex(idx_continuous)
     assert window._guided_missing_session_approval_from_failed_run(result) is None

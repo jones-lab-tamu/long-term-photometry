@@ -191,7 +191,7 @@ def _configure_complete_guided_new_analysis_draft(
     tmp_path,
     monkeypatch,
     *,
-    acquisition_mode="continuous",
+    acquisition_mode="intermittent",
     signal_only_f0=False,
     strategy_by_roi=None,
     write_rwd_file=False,
@@ -215,6 +215,16 @@ def _configure_complete_guided_new_analysis_draft(
             encoding="utf-8",
         )
     acquisition_idx = window._guided_acquisition_mode_combo.findData(acquisition_mode)
+    if acquisition_idx < 0 and acquisition_mode == "continuous":
+        # Simulate a stale/programmatically reconstructed unsupported value.
+        # Production Guided population must not expose this item.
+        window._guided_acquisition_mode_combo.addItem(
+            "Injected unsupported mode",
+            "continuous",
+        )
+        acquisition_idx = window._guided_acquisition_mode_combo.findData(
+            "continuous"
+        )
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
     if acquisition_mode == "intermittent":
@@ -2174,22 +2184,15 @@ def test_new_analysis_dataset_contract_invalid_candidate_cannot_apply(window, tm
     assert any(issue.category == "missing_npm_channel_mapping" for issue in subset.blocking_issues)
 
 
-def test_new_analysis_dataset_contract_npm_continuous_remains_unsupported(window, tmp_path, monkeypatch):
+def test_new_analysis_dataset_contract_npm_has_no_continuous_choice(window, tmp_path, monkeypatch):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
     _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
     window._guided_format_combo.setCurrentText("npm")
-    idx = window._guided_acquisition_mode_combo.findData("continuous")
-    window._guided_acquisition_mode_combo.setCurrentIndex(idx)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
-
-    window._guided_dataset_contract_apply_btn.click()
     plan = window._build_guided_new_analysis_draft_plan()
-    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
 
-    assert plan.dataset_contract_snapshot.current_applied is False
-    assert "unsupported_npm_continuous" in window._guided_dataset_contract_candidate_label.text()
-    assert any(issue.category == "unsupported_npm_continuous" for issue in subset.blocking_issues)
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    assert plan.acquisition_mode == "intermittent"
 
 
 def test_new_analysis_dataset_contract_clear_preserves_other_draft_state(window, tmp_path, monkeypatch):
@@ -2427,7 +2430,7 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "dynamic_fit_parameter_contract:" in preview_text
     assert "backend_config_mapping_status: label_and_parameters_ready_for_future_mapping" in preview_text
     assert "output: no directories or files created" in preview_text
-    assert "Execution: not available for this configuration yet" in preview_text
+    assert "Execution: eligible" in preview_text
     assert "No files or directories were created." in preview_text
     assert "This preview is read-only and non-executing." in preview_text
 
@@ -2435,15 +2438,18 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
 def test_new_analysis_first_subset_executable_true_but_spec_preview_unavailable_never_claims_eligible(
     window, tmp_path, monkeypatch
 ):
-    """subset_readiness.first_subset_executable is a shallower signal than
-    execution_spec_preview.spec_preview_available (it does not itself check
-    acquisition mode/format). A continuous-acquisition draft plan can reach
-    first_subset_executable=True while spec_preview_available stays False
-    because the RWD/intermittent dataset-contract mapping is unsupported.
-    No UI surface may claim execution eligibility from the shallow signal
-    alone; all three surfaces must agree with the deeper signal.
+    """An injected unsupported continuous draft cannot appear eligible.
+
+    The production selector has no Continuous item. This test deliberately
+    reconstructs that stale/programmatic value to preserve defense-in-depth at
+    the deeper execution-spec display boundary.
     """
-    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="continuous",
+    )
     window._guided_dataset_contract_apply_btn.click()
 
     plan = window._build_guided_new_analysis_draft_plan()

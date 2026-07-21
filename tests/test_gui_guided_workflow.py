@@ -1918,20 +1918,9 @@ def test_full_control_select_data_syncs_to_guided_display(window, tmp_path):
 
 
 def test_guided_recording_structure_syncs_to_full_control_state(window):
-    idx = window._guided_acquisition_mode_combo.findData("continuous")
-    assert idx >= 0
-    window._guided_acquisition_mode_combo.setCurrentIndex(idx)
-    window._guided_continuous_window_sec_spin.setValue(900.0)
-    window._guided_allow_partial_final_window_cb.setChecked(True)
-    window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
-
-    assert window._selected_acquisition_mode() == "continuous"
-    assert float(window._continuous_window_sec_spin.value()) == 900.0
-    assert float(window._continuous_step_sec_spin.value()) == 900.0
-    assert window._allow_partial_final_window_cb.isChecked() is True
-    assert window._exclude_incomplete_final_rwd_chunk_cb.isChecked() is True
-
     idx = window._guided_acquisition_mode_combo.findData("intermittent")
+    assert idx >= 0
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
     window._guided_acquisition_mode_combo.setCurrentIndex(idx)
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("300")
@@ -2052,7 +2041,7 @@ def test_guided_recording_continue_enforces_intermittent_timing_plausibility(
         )
 
 
-def test_guided_recording_continuous_readiness_and_mode_visibility(window):
+def test_guided_recording_mode_visibility_is_intermittent_only(window):
     _set_guided_rwd_intermittent(window)
     assert (
         window._guided_recording_timing_inference_label.isHidden() is False
@@ -2076,32 +2065,7 @@ def test_guided_recording_continuous_readiness_and_mode_visibility(window):
         window._guided_incomplete_final_rwd_help_label.text()
     )
 
-    continuous = window._guided_acquisition_mode_combo.findData(
-        "continuous"
-    )
-    window._guided_acquisition_mode_combo.setCurrentIndex(continuous)
-    assert window._guided_sessions_per_hour_edit.isHidden() is True
-    assert window._guided_session_duration_edit.isHidden() is True
-    assert (
-        window._guided_recording_timing_inference_label.isHidden() is True
-    )
-    assert window._guided_use_detected_timing_btn.isHidden() is True
-    assert window._guided_continuous_window_sec_spin.isHidden() is False
-    assert window._guided_incomplete_final_rwd_group.isHidden() is True
-    assert window._guided_recording_continue_btn.isEnabled() is True
-    assert window._guided_recording_continue_status.text() == (
-        "Recording structure is ready."
-    )
-
-    blocker = QSignalBlocker(window._guided_continuous_window_sec_spin)
-    window._guided_continuous_window_sec_spin.setMinimum(0)
-    window._guided_continuous_window_sec_spin.setValue(0)
-    del blocker
-    window._refresh_guided_navigation_state()
-    assert window._guided_recording_continue_btn.isEnabled() is False
-    assert window._guided_recording_continue_status.text() == (
-        "Continuous analysis window must be greater than 0 seconds."
-    )
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
 
 
 def test_guided_roi_discovery_failure_hides_parser_internals(window):
@@ -2376,22 +2340,14 @@ def test_guided_recording_requiredness_updates_with_format_and_mode(window):
     )
 
     window._guided_format_combo.setCurrentText("custom_tabular")
-    assert "outside the current Guided Run scope" in (
+    assert "Confirm sessions per hour and session duration" in (
         window._guided_recording_structure_help_label.text()
     )
     assert "required for RWD intermittent input" not in (
         window._guided_recording_structure_help_label.text()
     )
 
-    window._guided_format_combo.setCurrentText("rwd")
-    continuous = window._guided_acquisition_mode_combo.findData("continuous")
-    window._guided_acquisition_mode_combo.setCurrentIndex(continuous)
-    assert "Continuous acquisition is outside the current Guided Run scope" in (
-        window._guided_recording_structure_help_label.text()
-    )
-    assert "required for RWD intermittent input" not in (
-        window._guided_recording_structure_help_label.text()
-    )
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
 
 
 def test_guided_recording_structure_text_is_user_safe(window):
@@ -2418,14 +2374,16 @@ def test_guided_recording_structure_text_is_user_safe(window):
     assert not any(term in text for term in prohibited)
 
 
-def test_full_control_recording_structure_syncs_to_guided_display(window):
+def test_full_control_continuous_mode_does_not_enter_guided_display(window):
     idx = window._acquisition_mode_combo.findData("continuous")
     assert idx >= 0
     window._acquisition_mode_combo.setCurrentIndex(idx)
     window._continuous_window_sec_spin.setValue(1200.0)
     window._allow_partial_final_window_cb.setChecked(True)
 
-    assert window._guided_acquisition_mode_combo.currentData() == "continuous"
+    assert window._selected_acquisition_mode() == "continuous"
+    assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
     assert float(window._guided_continuous_window_sec_spin.value()) == 1200.0
     assert window._guided_allow_partial_final_window_cb.isChecked() is True
 
@@ -2788,14 +2746,7 @@ def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_
     assert window._sph_edit.text() == "4"
     assert window._duration_edit.text() == "600"
 
-    window._guided_acquisition_mode_combo.setCurrentIndex(
-        window._guided_acquisition_mode_combo.findData("continuous")
-    )
-    window._guided_continuous_window_sec_spin.setValue(750.0)
-
-    assert window._selected_acquisition_mode() == "continuous"
-    assert float(window._continuous_window_sec_spin.value()) == 750.0
-    assert float(window._continuous_step_sec_spin.value()) == 750.0
+    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
 
 
 def test_guided_setup_summary_state_is_read_only_and_tracks_current_state(window, tmp_path):
@@ -2897,7 +2848,7 @@ def test_guided_and_full_control_intermittent_setup_summary_equivalence(qapp, tm
         _close_window(full)
 
 
-def test_guided_and_full_control_continuous_setup_summary_equivalence(qapp, tmp_path):
+def test_guided_and_full_control_continuous_setup_remain_separate(qapp, tmp_path):
     input_dir = tmp_path / "continuous_input"
     output_dir = tmp_path / "continuous_output"
     input_dir.mkdir()
@@ -2909,12 +2860,6 @@ def test_guided_and_full_control_continuous_setup_summary_equivalence(qapp, tmp_
         guided._guided_input_dir_edit.setText(str(input_dir))
         guided._guided_output_dir_edit.setText(str(output_dir))
         guided._guided_format_combo.setCurrentText("auto")
-        guided._guided_acquisition_mode_combo.setCurrentIndex(
-            guided._guided_acquisition_mode_combo.findData("continuous")
-        )
-        guided._guided_continuous_window_sec_spin.setValue(900.0)
-        guided._guided_allow_partial_final_window_cb.setChecked(True)
-
         full._input_dir.setText(str(input_dir))
         full._output_dir.setText(str(output_dir))
         full._format_combo.setCurrentText("auto")
@@ -2924,7 +2869,11 @@ def test_guided_and_full_control_continuous_setup_summary_equivalence(qapp, tmp_
         full._continuous_window_sec_spin.setValue(900.0)
         full._allow_partial_final_window_cb.setChecked(True)
 
-        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
+        assert guided._guided_acquisition_mode_combo.findData("continuous") == -1
+        assert full._acquisition_mode_combo.findData("continuous") >= 0
+        assert _state_for_equivalence(guided)["acquisition_mode"] == "intermittent"
+        assert full._selected_acquisition_mode() == "continuous"
+        assert _state_for_equivalence(full)["acquisition_mode"] == "intermittent"
     finally:
         _close_window(guided)
         _close_window(full)
