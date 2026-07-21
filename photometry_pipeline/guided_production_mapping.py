@@ -52,6 +52,8 @@ from photometry_pipeline.guided_identity import (
 )
 from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+    GUIDED_SUPPORTED_TONIC_OUTPUT_MODES,
+    GUIDED_SUPPORTED_TONIC_TIMELINE_MODES,
 )
 from photometry_pipeline.core.types import (
     CORRECTION_STRATEGY_FAMILIES,
@@ -467,6 +469,9 @@ class GuidedProductionCorrection:
     # deprecated input; guided_startup_materialization.py no longer acts
     # on it, and it is never serialized into new startup artifacts.
     applied_dff_orchestration_enabled: bool = False
+    # Shared run-level tonic settings -- see GuidedBackendCorrectionFacts.
+    global_tonic_output_mode: str = ""
+    global_tonic_timeline_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -1241,6 +1246,17 @@ def map_guided_validation_request_to_execution_intent(
     modes = {item.selected_dynamic_fit_mode for item in correction.confirmed_marks}
     if not native_per_roi and modes != {correction.global_dynamic_fit_mode}:
         return _failure("mixed_strategy_not_supported", "correction", "Confirmed marks are not unanimous.", "confirmed_modes_mixed")
+    if (
+        correction.global_tonic_output_mode not in GUIDED_SUPPORTED_TONIC_OUTPUT_MODES
+        or correction.global_tonic_timeline_mode
+        not in GUIDED_SUPPORTED_TONIC_TIMELINE_MODES
+    ):
+        return _failure(
+            "unsupported_correction_strategy",
+            "correction",
+            "The selected tonic analysis settings are unsupported.",
+            "tonic_settings_unsupported",
+        )
     output = request.output
     if (
         output.path_role != "output_base"
@@ -1367,6 +1383,8 @@ def map_guided_validation_request_to_execution_intent(
                     for entry in correction.per_roi_production_strategy_map
                 ),
                 correction.applied_dff_orchestration_enabled,
+                correction.global_tonic_output_mode,
+                correction.global_tonic_timeline_mode,
             ),
             diagnostic_evidence=GuidedProductionDiagnosticEvidence(
                 request.diagnostic_evidence.cache_id, request.diagnostic_evidence.cache_root_canonical,
@@ -2043,6 +2061,17 @@ def _map_verified_guided_npm_request_to_execution_intent(
             "typed_field_unmapped",
         )
     correction = request.correction
+    if (
+        correction.global_tonic_output_mode not in GUIDED_SUPPORTED_TONIC_OUTPUT_MODES
+        or correction.global_tonic_timeline_mode
+        not in GUIDED_SUPPORTED_TONIC_TIMELINE_MODES
+    ):
+        return _failure(
+            "unsupported_analysis_configuration",
+            "correction",
+            "The selected tonic analysis settings are unsupported.",
+            "tonic_settings_unsupported",
+        )
     raw_entries = tuple(correction.per_roi_production_strategy_map)
     if not raw_entries:
         return _failure(
@@ -2266,10 +2295,31 @@ def _map_verified_guided_npm_request_to_execution_intent(
                 ],
             },
         )
+        # Shared run-level tonic settings are not a dynamic-fit/correction
+        # parameter, but are threaded through the existing generic
+        # correction_parameter_values typed-value bag (identical to RWD's
+        # reuse of the "correction family" plumbing) rather than inventing a
+        # parallel NPM identity/authority object.
+        correction_parameter_values = _typed(
+            correction.dynamic_fit_parameter_values
+        ) + (
+            GuidedProductionTypedValue(
+                "tonic_output_mode",
+                "str",
+                correction.global_tonic_output_mode,
+                "applied_tonic_settings_contract",
+            ),
+            GuidedProductionTypedValue(
+                "tonic_timeline_mode",
+                "str",
+                correction.global_tonic_timeline_mode,
+                "applied_tonic_settings_contract",
+            ),
+        )
         correction_payload_identity = _npm_digest(
             "npm-correction-payload:v1",
             {
-                "parameters": _typed(correction.dynamic_fit_parameter_values),
+                "parameters": correction_parameter_values,
                 "per_roi_strategy_map": tuple(production_strategy_map),
             },
         )
@@ -2319,7 +2369,7 @@ def _map_verified_guided_npm_request_to_execution_intent(
             discovered_roi_ids=tuple(request.roi_scope.discovered_roi_ids),
             selected_roi_ids=selected,
             excluded_roi_ids=tuple(request.roi_scope.excluded_roi_ids),
-            correction_parameter_values=_typed(correction.dynamic_fit_parameter_values),
+            correction_parameter_values=correction_parameter_values,
             per_roi_correction_strategy_map=tuple(production_strategy_map),
             correction_payload_identity=correction_payload_identity,
             feature_event=feature_event,

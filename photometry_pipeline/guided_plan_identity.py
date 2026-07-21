@@ -30,7 +30,7 @@ from photometry_pipeline.guided_identity import (
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
 
 GUIDED_PLAN_IDENTITY_SCHEMA_NAME = "guided_new_analysis_draft_plan_identity"
-GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v2"
+GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v3"
 
 
 def _canonical_path_or_raw(path: str | None) -> dict[str, Any]:
@@ -88,6 +88,17 @@ def _dynamic_fit_parameter_contract_payload(contract) -> dict[str, Any]:
     # provenance is explanatory metadata about *why* a default was chosen,
     # not a value that changes the produced analysis; schema_version is a
     # contract-version pin, not a per-plan choice.
+    payload.pop("provenance", None)
+    payload.pop("schema_version", None)
+    return payload
+
+
+def _tonic_settings_contract_payload(contract) -> dict[str, Any]:
+    if contract is None:
+        return {}
+    payload = dataclasses.asdict(contract)
+    # provenance is explanatory metadata, not a value that changes the
+    # produced analysis; schema_version is a contract-version pin.
     payload.pop("provenance", None)
     payload.pop("schema_version", None)
     return payload
@@ -206,6 +217,9 @@ def build_guided_new_analysis_draft_plan_identity_payload(
                 key=lambda item: item["roi_id"],
             ),
         },
+        "tonic_settings": _tonic_settings_contract_payload(
+            plan.tonic_settings_contract
+        ),
         "feature_detection": {
             "execution_mode": str(
                 getattr(execution_intent, "execution_mode", "") or ""

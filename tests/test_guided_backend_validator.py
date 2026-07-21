@@ -156,6 +156,8 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         mark_rule_version="explicit_confirmed_mark.v1",
         currentness_rule_version="cache_bound_currentness.v1",
         unanimity_rule_version="included_roi_unanimous_dynamic_fit.v1",
+        global_tonic_output_mode="preserve_raw_session_shape",
+        global_tonic_timeline_mode="real_elapsed_time",
     )
     evidence = contracts.GuidedBackendEvidenceReference(
         evidence_reference_id="evidence-001",

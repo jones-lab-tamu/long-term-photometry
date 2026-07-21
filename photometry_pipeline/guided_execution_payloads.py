@@ -309,8 +309,8 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "preview_first_n": CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
     "adapter_value_nan_policy": CONFIG_DISPOSITION_FIXED,
     "tonic_allowed_nan_frac": CONFIG_DISPOSITION_FIXED,
-    "tonic_output_mode": CONFIG_DISPOSITION_FIXED,
-    "tonic_timeline_mode": CONFIG_DISPOSITION_FIXED,
+    "tonic_output_mode": CONFIG_DISPOSITION_INTENT,
+    "tonic_timeline_mode": CONFIG_DISPOSITION_INTENT,
     "export_display_series_csv": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "rwd_time_col": CONFIG_DISPOSITION_INTENT,
     "uv_suffix": CONFIG_DISPOSITION_INTENT,
@@ -430,8 +430,6 @@ GUIDED_CONFIG_DEFAULT_OVERRIDES = {
     "preview_first_n": None,
     "adapter_value_nan_policy": "strict",
     "tonic_allowed_nan_frac": 0.0,
-    "tonic_output_mode": "preserve_raw_session_shape",
-    "tonic_timeline_mode": "real_elapsed_time",
     "export_display_series_csv": False,
     "continuous_window_sec": 600.0,
     "continuous_step_sec": 600.0,
@@ -961,6 +959,16 @@ def derive_guided_execution_payloads(
         payload_values.append(GuidedConfigFieldValue("sig_suffix", intent.acquisition.sig_suffix))
         payload_values.append(GuidedConfigFieldValue("dynamic_fit_mode", intent.correction.global_dynamic_fit_mode))
         payload_values.append(GuidedConfigFieldValue("acquisition_mode", intent.acquisition.acquisition_mode))
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "tonic_output_mode", intent.correction.global_tonic_output_mode
+            )
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "tonic_timeline_mode", intent.correction.global_tonic_timeline_mode
+            )
+        )
         
         # Populate overrides
         for name in sorted(serialized_non_intent_keys):

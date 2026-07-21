@@ -752,6 +752,9 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
         # proven by GuidedNpmRoiAuthority's and GuidedNpmCorrectionAuthority's
         # own construction-time invariants, verified above via
         # verify_guided_npm_execution_authority.
+        npm_correction_values = {
+            item.field_name: item.value for item in intent.correction_parameter_values
+        }
         first_subset_ok = (
             intent.source_format == "npm"
             and intent.acquisition_mode == "intermittent"
@@ -761,6 +764,10 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
             and intent.output_policy.precreate is False
             and bool(intent.selected_roi_ids)
             and config.get("acquisition_mode") == "intermittent"
+            and config.get("tonic_output_mode")
+            == npm_correction_values.get("tonic_output_mode")
+            and config.get("tonic_timeline_mode")
+            == npm_correction_values.get("tonic_timeline_mode")
         )
     else:
         first_subset_ok = (
@@ -776,6 +783,8 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
             and intent.correction.strategy_scope == "global"
             and config.get("acquisition_mode") == "intermittent"
             and config.get("dynamic_fit_mode") == intent.correction.global_dynamic_fit_mode
+            and config.get("tonic_output_mode") == intent.correction.global_tonic_output_mode
+            and config.get("tonic_timeline_mode") == intent.correction.global_tonic_timeline_mode
         )
     if not first_subset_ok:
         return GuidedStartupIssue(

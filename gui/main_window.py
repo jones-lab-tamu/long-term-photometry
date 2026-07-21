@@ -346,6 +346,46 @@ GUIDED_CONFIRM_STRATEGIES = (
     ("Global Linear Regression", "global_linear_regression"),
     ("Signal-Only F0", "signal_only_f0"),
 )
+# Shared run-level Guided tonic settings. Applies to all included ROIs; see
+# photometry_pipeline.guided_new_analysis_plan.GuidedNewAnalysisTonicSettingsContract.
+GUIDED_TONIC_OUTPUT_MODE_CHOICES = (
+    ("Preserve session shape", "preserve_raw_session_shape"),
+    (
+        "Remove within-session bleaching trend",
+        "flatten_session_bleach_preserve_session_baseline",
+    ),
+)
+GUIDED_TONIC_OUTPUT_MODE_HELP = {
+    "preserve_raw_session_shape": (
+        "Each recording session is shown as originally measured, including "
+        "any natural signal drift within the session."
+    ),
+    "flatten_session_bleach_preserve_session_baseline": (
+        "Removes a slow within-session bleaching trend before sessions are "
+        "combined, while preserving each session's overall level. This may "
+        "make cross-session comparisons easier to read, but it removes the "
+        "original slow trend within each session."
+    ),
+}
+GUIDED_TONIC_TIMELINE_MODE_CHOICES = (
+    ("Real elapsed time", "real_elapsed_time"),
+    ("Gap-free elapsed time", "gap_free_elapsed_time"),
+)
+GUIDED_TONIC_TIMELINE_MODE_HELP = {
+    "real_elapsed_time": (
+        "Shows true elapsed time, including gaps between recording sessions."
+    ),
+    "gap_free_elapsed_time": (
+        "Places recorded sessions back-to-back. Gaps between recording "
+        "sessions are removed from the tonic timeline."
+    ),
+}
+GUIDED_TONIC_GAP_FREE_NOTE = "Recording gaps will be removed from the tonic timeline."
+GUIDED_TONIC_GAP_FREE_MISSING_SESSIONS_MESSAGE = (
+    "Gap-free elapsed time is unavailable because this analysis contains "
+    "missing or excluded recording sessions. Use Real elapsed time to "
+    "preserve those gaps."
+)
 GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
     "missing_rwd_dataset_contract",
     "unsupported_dataset_contract_snapshot",
@@ -2952,6 +2992,76 @@ class MainWindow(QMainWindow):
             self._guided_incomplete_final_rwd_help_label
         )
         form.addRow("", self._guided_incomplete_final_rwd_group)
+
+        self._guided_tonic_settings_group = QGroupBox("Tonic analysis settings")
+        tonic_settings_layout = QFormLayout(self._guided_tonic_settings_group)
+        tonic_settings_layout.setContentsMargins(10, 8, 10, 8)
+
+        self._guided_tonic_output_mode_combo = QComboBox()
+        self._guided_tonic_output_mode_combo.setObjectName("guidedTonicOutputMode")
+        for label, value in GUIDED_TONIC_OUTPUT_MODE_CHOICES:
+            self._guided_tonic_output_mode_combo.addItem(label, value)
+        tonic_settings_layout.addRow(
+            "Session shape:", self._guided_tonic_output_mode_combo
+        )
+        self._guided_tonic_output_mode_help_label = QLabel("")
+        self._guided_tonic_output_mode_help_label.setObjectName(
+            "guidedTonicOutputModeHelp"
+        )
+        self._guided_tonic_output_mode_help_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_tonic_output_mode_help_label.setWordWrap(True)
+        tonic_settings_layout.addRow("", self._guided_tonic_output_mode_help_label)
+
+        self._guided_tonic_timeline_mode_combo = QComboBox()
+        self._guided_tonic_timeline_mode_combo.setObjectName("guidedTonicTimelineMode")
+        for label, value in GUIDED_TONIC_TIMELINE_MODE_CHOICES:
+            self._guided_tonic_timeline_mode_combo.addItem(label, value)
+        tonic_settings_layout.addRow(
+            "Timeline:", self._guided_tonic_timeline_mode_combo
+        )
+        self._guided_tonic_timeline_mode_help_label = QLabel("")
+        self._guided_tonic_timeline_mode_help_label.setObjectName(
+            "guidedTonicTimelineModeHelp"
+        )
+        self._guided_tonic_timeline_mode_help_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_tonic_timeline_mode_help_label.setWordWrap(True)
+        tonic_settings_layout.addRow("", self._guided_tonic_timeline_mode_help_label)
+
+        self._guided_tonic_gap_free_note_label = QLabel(GUIDED_TONIC_GAP_FREE_NOTE)
+        self._guided_tonic_gap_free_note_label.setObjectName(
+            "guidedTonicGapFreeNote"
+        )
+        self._guided_tonic_gap_free_note_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_tonic_gap_free_note_label.setWordWrap(True)
+        self._guided_tonic_gap_free_note_label.setVisible(False)
+        tonic_settings_layout.addRow("", self._guided_tonic_gap_free_note_label)
+
+        self._guided_tonic_gap_free_blocked_label = QLabel("")
+        self._guided_tonic_gap_free_blocked_label.setObjectName(
+            "guidedTonicGapFreeBlocked"
+        )
+        self._guided_tonic_gap_free_blocked_label.setProperty(
+            "guidedValidationError", True
+        )
+        self._guided_tonic_gap_free_blocked_label.setWordWrap(True)
+        self._guided_tonic_gap_free_blocked_label.setVisible(False)
+        tonic_settings_layout.addRow("", self._guided_tonic_gap_free_blocked_label)
+
+        self._guided_tonic_output_mode_combo.currentIndexChanged.connect(
+            self._on_guided_tonic_settings_changed
+        )
+        self._guided_tonic_timeline_mode_combo.currentIndexChanged.connect(
+            self._on_guided_tonic_settings_changed
+        )
+        self._refresh_guided_tonic_settings_help()
+
+        form.addRow("", self._guided_tonic_settings_group)
 
         self._guided_recording_structure_help_label = QLabel("")
         self._guided_recording_structure_help_label.setObjectName("guidedRecordingStructureHelp")
@@ -9106,6 +9216,55 @@ class MainWindow(QMainWindow):
                 return label
         return str(strategy or "")
 
+    @staticmethod
+    def _guided_tonic_output_mode_label(value: str) -> str:
+        for label, enum_value in GUIDED_TONIC_OUTPUT_MODE_CHOICES:
+            if enum_value == value:
+                return label
+        return str(value or "")
+
+    @staticmethod
+    def _guided_tonic_timeline_mode_label(value: str) -> str:
+        for label, enum_value in GUIDED_TONIC_TIMELINE_MODE_CHOICES:
+            if enum_value == value:
+                return label
+        return str(value or "")
+
+    def _guided_tonic_gap_free_blocked_by_missing_sessions(self) -> bool:
+        """Narrow, GUI-side early check mirroring the authoritative backend
+        guard: gap-free elapsed time is incompatible with any approved
+        missing/excluded session, since gap-free removes the timeline gap
+        that evidence exists to preserve. Uses the plan's own authoritative
+        approved-missing-session evidence, never filenames/free text."""
+        return bool(getattr(self, "_guided_approved_missing_sessions", []))
+
+    def _refresh_guided_tonic_settings_help(self) -> None:
+        combo = getattr(self, "_guided_tonic_output_mode_combo", None)
+        if combo is None:
+            return
+        output_mode = self._guided_tonic_output_mode_combo.currentData()
+        self._guided_tonic_output_mode_help_label.setText(
+            GUIDED_TONIC_OUTPUT_MODE_HELP.get(output_mode, "")
+        )
+        timeline_mode = self._guided_tonic_timeline_mode_combo.currentData()
+        self._guided_tonic_timeline_mode_help_label.setText(
+            GUIDED_TONIC_TIMELINE_MODE_HELP.get(timeline_mode, "")
+        )
+        gap_free_selected = timeline_mode == "gap_free_elapsed_time"
+        self._guided_tonic_gap_free_note_label.setVisible(gap_free_selected)
+        blocked = (
+            gap_free_selected
+            and self._guided_tonic_gap_free_blocked_by_missing_sessions()
+        )
+        self._guided_tonic_gap_free_blocked_label.setVisible(blocked)
+        self._guided_tonic_gap_free_blocked_label.setText(
+            GUIDED_TONIC_GAP_FREE_MISSING_SESSIONS_MESSAGE if blocked else ""
+        )
+
+    def _on_guided_tonic_settings_changed(self, *_args) -> None:
+        self._refresh_guided_tonic_settings_help()
+        self._invalidate_guided_backend_validation("tonic settings changed")
+
     def _on_guided_confirm_selection_changed(self, *_args) -> None:
         if (
             getattr(self, "_guided_confirm_source_type", "")
@@ -11079,6 +11238,13 @@ class MainWindow(QMainWindow):
                     "\nFinal incomplete session: do not exclude; an "
                     "incomplete final recording stops the setup check."
                 )
+        tonic_settings = plan.tonic_settings_contract
+        tonic_summary = (
+            "\nTonic session shape: "
+            f"{self._guided_tonic_output_mode_label(tonic_settings.tonic_output_mode)}\n"
+            "Tonic timeline: "
+            f"{self._guided_tonic_timeline_mode_label(tonic_settings.tonic_timeline_mode)}"
+        )
         self._guided_review_analysis_summary_label.setText(
             f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
             f"Input format: {plan.input_format or 'not set'}\n"
@@ -11088,6 +11254,7 @@ class MainWindow(QMainWindow):
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
             f"{final_session_policy}"
+            f"{tonic_summary}"
         )
 
         self._guided_review_feature_detection_summary_label.setText(
@@ -13577,6 +13744,7 @@ class MainWindow(QMainWindow):
             GuidedNewAnalysisDynamicFitParameterContract,
             GuidedNewAnalysisDraftPlan,
             GuidedNewAnalysisExecutionIntent,
+            GuidedNewAnalysisTonicSettingsContract,
             GuidedPlanCorrectionChoice
         )
 
@@ -13950,6 +14118,16 @@ class MainWindow(QMainWindow):
             # read Full Control's _mode_combo, which Guided never shows and
             # which a scientist never touches.
             execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode="both"),
+            tonic_settings_contract=GuidedNewAnalysisTonicSettingsContract(
+                tonic_output_mode=(
+                    self._guided_tonic_output_mode_combo.currentData()
+                    or "preserve_raw_session_shape"
+                ),
+                tonic_timeline_mode=(
+                    self._guided_tonic_timeline_mode_combo.currentData()
+                    or "real_elapsed_time"
+                ),
+            ),
         )
 
     @staticmethod

@@ -29,6 +29,8 @@ import hashlib
 import json
 import os
 import math
+
+import yaml
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -52,6 +54,7 @@ from photometry_pipeline.guided_normalized_recording_consumption import (
 )
 from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
+    GUIDED_CONFIG_EFFECTIVE_FILENAME,
     GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     GUIDED_PER_ROI_CORRECTION_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
@@ -1231,6 +1234,68 @@ def normalized_recording_completion_error(run_dir: str, run_mode: dict[str, Any]
     return ""
 
 
+def tonic_settings_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+    """Verify a Guided run consumed the exact tonic_output_mode and
+    tonic_timeline_mode it requested.
+
+    "" when tonic analysis is not enabled for this run, or the run is not a
+    current Guided run at all (an ordinary Full Control run is unaffected --
+    Full Control's requested and consumed config are the same YAML file by
+    construction, so there is nothing to compare).
+
+    Requested: config_effective.yaml, the generated config Guided produced
+    for the wrapper (guided_startup_transaction.
+    serialize_guided_config_payload_to_yaml_bytes). Consumed:
+    _analysis/tonic_out/config_used.yaml, the actual Config the tonic
+    Pipeline ran with (core.reporting.generate_run_report). Both are
+    existing, already-mandatory persisted artifacts; nothing new is written
+    and no cache schema is touched.
+    """
+    if not run_mode.get("tonic_analysis"):
+        return ""
+    state = classify_guided_current_native_state(run_dir)
+    if state in (
+        GUIDED_CURRENT_NATIVE_STATE_NOT_GUIDED,
+        GUIDED_CURRENT_NATIVE_STATE_LEGACY,
+    ):
+        return ""
+
+    requested_path = os.path.join(run_dir, GUIDED_CONFIG_EFFECTIVE_FILENAME)
+    try:
+        with open(requested_path, "r", encoding="utf-8") as handle:
+            requested = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as exc:
+        return f"the requested tonic settings could not be read: {exc}"
+    if not isinstance(requested, dict):
+        return "the requested tonic settings are not a mapping"
+
+    consumed_path = os.path.join(
+        run_dir, "_analysis", "tonic_out", "config_used.yaml"
+    )
+    try:
+        with open(consumed_path, "r", encoding="utf-8") as handle:
+            consumed = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as exc:
+        return f"the consumed tonic settings could not be read: {exc}"
+    if not isinstance(consumed, dict):
+        return "the consumed tonic settings are not a mapping"
+
+    for field_name in ("tonic_output_mode", "tonic_timeline_mode"):
+        requested_value = requested.get(field_name)
+        consumed_value = consumed.get(field_name)
+        if requested_value is None or consumed_value is None:
+            return (
+                f"{field_name} is missing from requested or consumed "
+                "configuration evidence"
+            )
+        if requested_value != consumed_value:
+            return (
+                f"{field_name} requested {requested_value!r} but the run "
+                f"consumed {consumed_value!r}"
+            )
+    return ""
+
+
 def classify_guided_current_native_state(run_dir: str, run_mode: dict[str, Any] | None = None) -> str:
     """Classify a run directory's Guided provenance, mutually exclusively.
 
@@ -1350,6 +1415,9 @@ def verify_terminal_set_before_status(
             "normalized recording provenance is incomplete or inconsistent: "
             f"{normalized_recording_error}"
         )
+    tonic_settings_error = tonic_settings_completion_error(run_dir, run_mode)
+    if tonic_settings_error:
+        return f"tonic settings are incomplete or inconsistent: {tonic_settings_error}"
 
     artifacts = manifest_block.get("artifacts")
     if not isinstance(artifacts, list):
@@ -1669,6 +1737,13 @@ def _classify_current(
             return corrupted(
                 "This run's normalized recording provenance is incomplete or "
                 f"inconsistent: {normalized_recording_error}.",
+                run_id=run_id,
+            )
+        tonic_settings_error = tonic_settings_completion_error(run_dir, run_mode)
+        if tonic_settings_error:
+            return corrupted(
+                "This run's tonic settings are incomplete or inconsistent: "
+                f"{tonic_settings_error}.",
                 run_id=run_id,
             )
 

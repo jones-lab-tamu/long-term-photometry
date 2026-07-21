@@ -1195,6 +1195,35 @@ def _is_final_validation_failed_review_candidate(
     return True
 
 
+TONIC_OUTPUT_MODE_SUMMARY_LABELS = {
+    "preserve_raw_session_shape": "Preserved",
+    "flatten_session_bleach_preserve_session_baseline": (
+        "Within-session bleaching trend removed"
+    ),
+}
+TONIC_TIMELINE_MODE_SUMMARY_LABELS = {
+    "real_elapsed_time": "Real elapsed time",
+    "gap_free_elapsed_time": "Gap-free elapsed time",
+}
+
+
+def format_tonic_settings_summary(tonic_settings: Mapping[str, str]) -> str:
+    """Scientist-facing two-line summary of the tonic settings a run
+    consumed. "" when no tonic settings evidence is available (e.g. a
+    phasic-only run, or the consumed configuration could not be read)."""
+    output_mode = tonic_settings.get("tonic_output_mode") if tonic_settings else None
+    timeline_mode = (
+        tonic_settings.get("tonic_timeline_mode") if tonic_settings else None
+    )
+    if not output_mode or not timeline_mode:
+        return ""
+    timeline_label = TONIC_TIMELINE_MODE_SUMMARY_LABELS.get(
+        timeline_mode, str(timeline_mode)
+    )
+    shape_label = TONIC_OUTPUT_MODE_SUMMARY_LABELS.get(output_mode, str(output_mode))
+    return f"Tonic timeline: {timeline_label}\nSession shape: {shape_label}"
+
+
 def _format_duration_natural(duration_sec: float) -> str:
     """Render a persisted expected-duration value as scientist-facing text,
     in whichever unit is exact for that value -- never a hardcoded figure."""
@@ -1441,6 +1470,30 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
             if count_key:
                 session_counts[count_key] += 1
 
+    # Consumed evidence only -- never the GUI's current selection -- and only
+    # when the tonic branch actually ran and its outputs are on disk. Present
+    # for both a "success" and a "reviewable_with_warning" run, since a
+    # duration warning does not affect the tonic settings that were used.
+    tonic_settings: dict[str, str] = {}
+    if "tonic" in enabled:
+        tonic_config_used_path = (
+            resolved / "_analysis" / "tonic_out" / "config_used.yaml"
+        )
+        try:
+            tonic_config_used = yaml.safe_load(
+                tonic_config_used_path.read_text(encoding="utf-8")
+            )
+        except (OSError, yaml.YAMLError):
+            tonic_config_used = None
+        if isinstance(tonic_config_used, dict):
+            output_mode = tonic_config_used.get("tonic_output_mode")
+            timeline_mode = tonic_config_used.get("tonic_timeline_mode")
+            if isinstance(output_mode, str) and isinstance(timeline_mode, str):
+                tonic_settings = {
+                    "tonic_output_mode": output_mode,
+                    "tonic_timeline_mode": timeline_mode,
+                }
+
     overview = {
         "run_dir": str(resolved),
         "terminal_state": "success" if review_status == "success" else "failed",
@@ -1457,6 +1510,7 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
         "feature_settings_by_roi": {
             str(roi): dict(record) for roi, record in feature_settings.items()
         },
+        "tonic_settings": tonic_settings,
         "full_resolution_traces_loaded": False,
     }
     if review_status == "reviewable_with_warning":

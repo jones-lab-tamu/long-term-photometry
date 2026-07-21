@@ -47,6 +47,7 @@ from photometry_pipeline.guided_completed_feature_event_reload import (
 from photometry_pipeline.completed_run_review import (
     CompletedRunReviewError,
     CompletedRunReviewModel,
+    format_tonic_settings_summary,
     load_completed_phasic_review,
 )
 
@@ -126,6 +127,14 @@ class RunReportViewer(QWidget):
         self._selected_feature_settings_label.setWordWrap(True)
         self._selected_feature_settings_label.setVisible(False)
         root.addWidget(self._selected_feature_settings_label)
+
+        self._tonic_settings_summary_label = QLabel("")
+        self._tonic_settings_summary_label.setObjectName(
+            "completedRunTonicSettingsSummary"
+        )
+        self._tonic_settings_summary_label.setWordWrap(True)
+        self._tonic_settings_summary_label.setVisible(False)
+        root.addWidget(self._tonic_settings_summary_label)
 
         self._workspace = QWidget()
         self._workspace.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -385,6 +394,8 @@ class RunReportViewer(QWidget):
         self._correction_summary_label.setVisible(False)
         self._selected_feature_settings_label.setText("")
         self._selected_feature_settings_label.setVisible(False)
+        self._tonic_settings_summary_label.setText("")
+        self._tonic_settings_summary_label.setVisible(False)
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -464,6 +475,7 @@ class RunReportViewer(QWidget):
 
         self._phasic_review_model = None
         self._completed_review_overview = dict(review_overview or {})
+        self._refresh_tonic_settings_summary()
         self._phasic_review_error = ""
         if self._completed_review_overview:
             classification = None
@@ -793,6 +805,29 @@ class RunReportViewer(QWidget):
         self._refresh_correction_summary()
         self._refresh_inline_actions()
         self.region_changed.emit(self._selected_region())
+
+    def _refresh_tonic_settings_summary(self) -> None:
+        """Show the consumed tonic-settings summary whenever the compact
+        Review overview carries valid evidence for it.
+
+        Deliberately independent of ROI selection, feature settings, and
+        feature extraction: this only reads
+        self._completed_review_overview["tonic_settings"] (already sourced
+        from the run's own consumed configuration, never the live GUI
+        selection -- see completed_run_review.load_completed_review_overview).
+        Called once per load_report(), before any ROI is chosen, so it is
+        unaffected by later ROI/image changes handled elsewhere
+        (_on_region_changed / _refresh_correction_summary never touch this
+        label).
+        """
+        tonic_settings = self._completed_review_overview.get("tonic_settings", {})
+        tonic_summary_text = format_tonic_settings_summary(tonic_settings)
+        if tonic_summary_text:
+            self._tonic_settings_summary_label.setText(tonic_summary_text)
+            self._tonic_settings_summary_label.setVisible(True)
+        else:
+            self._tonic_settings_summary_label.setText("")
+            self._tonic_settings_summary_label.setVisible(False)
 
     def _refresh_correction_summary(self) -> None:
         model = self._phasic_review_model

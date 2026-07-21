@@ -832,6 +832,9 @@ class GuidedBackendCorrectionRequest:
     # deprecated input threaded through for canonicalization/identity
     # purposes; no execution logic branches on it.
     applied_dff_orchestration_enabled: bool = False
+    # Shared run-level tonic settings -- see GuidedBackendCorrectionFacts.
+    global_tonic_output_mode: str = ""
+    global_tonic_timeline_mode: str = ""
 
     def __post_init__(self) -> None:
         if self.strategy_scope != "global":
@@ -845,6 +848,14 @@ class GuidedBackendCorrectionRequest:
         _require_non_empty(
             self.global_dynamic_fit_mode,
             "global_dynamic_fit_mode",
+        )
+        _require_non_empty(
+            self.global_tonic_output_mode,
+            "global_tonic_output_mode",
+        )
+        _require_non_empty(
+            self.global_tonic_timeline_mode,
+            "global_tonic_timeline_mode",
         )
         for name in (
             "dynamic_fit_parameter_values",
@@ -1406,6 +1417,11 @@ class GuidedBackendCorrectionFacts:
     per_roi_production_strategy_map: tuple[
         GuidedBackendPerRoiProductionStrategy, ...
     ] = ()
+    # Shared run-level tonic settings (not a correction/dynamic-fit strategy
+    # concept; carried here only to reuse the existing correction-facts
+    # materialization/validation/mapping plumbing).
+    global_tonic_output_mode: str = ""
+    global_tonic_timeline_mode: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -2443,6 +2459,8 @@ def compile_guided_backend_validation_request(
                 correction_facts.per_roi_production_strategy_map
             ),
             applied_dff_orchestration_enabled=draft.applied_dff_orchestration_enabled,
+            global_tonic_output_mode=correction_facts.global_tonic_output_mode,
+            global_tonic_timeline_mode=correction_facts.global_tonic_timeline_mode,
         )
         if cache_facts.available:
             diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
@@ -2744,6 +2762,8 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "production_strategy_map_version",
         "per_roi_production_strategy_map",
         "applied_dff_orchestration_enabled",
+        "global_tonic_output_mode",
+        "global_tonic_timeline_mode",
     ),
     GuidedBackendEvidenceReference: (
         "evidence_reference_id",

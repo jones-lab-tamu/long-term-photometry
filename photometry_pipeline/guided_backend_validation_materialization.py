@@ -1611,6 +1611,9 @@ def _materialize_correction_facts(
     # The global mode is retained only as a legacy Config compatibility value.
     # Current Guided execution is authoritative from the exact per-ROI map.
     global_mode = contract.dynamic_fit_mode
+    tonic_settings = draft.tonic_settings_contract
+    global_tonic_output_mode = tonic_settings.tonic_output_mode
+    global_tonic_timeline_mode = tonic_settings.tonic_timeline_mode
 
     parameter_values: list[GuidedBackendTypedFieldValue] = []
     excluded_parameter_fields = {
@@ -1692,6 +1695,8 @@ def _materialize_correction_facts(
     return GuidedBackendCorrectionFacts(
         available=True,
         global_dynamic_fit_mode=global_mode,
+        global_tonic_output_mode=global_tonic_output_mode,
+        global_tonic_timeline_mode=global_tonic_timeline_mode,
         dynamic_fit_parameter_values=tuple(parameter_values),
         confirmed_marks=tuple(marks),
         currentness_rule_version=currentness_rule_version,

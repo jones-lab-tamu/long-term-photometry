@@ -31,6 +31,7 @@ DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract
 EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
 OUTPUT_CREATION_POLICY_SCHEMA_VERSION = "guided_new_analysis_output_creation_policy.v1"
 DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION = "guided_new_analysis_dynamic_fit_parameter_contract.v1"
+TONIC_SETTINGS_CONTRACT_SCHEMA_VERSION = "guided_new_analysis_tonic_settings_contract.v1"
 FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION = (
     "per_roi_correction_strategy_map.v1"
@@ -68,6 +69,18 @@ OUTPUT_CREATION_TIMINGS = {"future_execution_start_only"}
 RUN_DIRECTORY_STRATEGIES = {"derive_unique_run_id_under_output_base"}
 CONFIG_WRITE_TIMINGS = {"future_execution_or_validation_only"}
 DYNAMIC_FIT_SLOPE_CONSTRAINTS = {"unconstrained", "nonnegative"}
+# Shared run-level tonic settings exposed in Guided. Values must be a subset
+# of Config's allowed tonic_output_mode/tonic_timeline_mode literals
+# (photometry_pipeline/config.py); Guided deliberately does not expose
+# Config's third timeline value, "compressed_recording_time".
+GUIDED_SUPPORTED_TONIC_OUTPUT_MODES = {
+    "preserve_raw_session_shape",
+    "flatten_session_bleach_preserve_session_baseline",
+}
+GUIDED_SUPPORTED_TONIC_TIMELINE_MODES = {
+    "real_elapsed_time",
+    "gap_free_elapsed_time",
+}
 ADAPTIVE_EVENT_GATE_FREEZE_INTERP_METHODS = {"linear_hold"}
 FEATURE_EVENT_BACKEND_DEFAULT_SOURCE = "photometry_pipeline.config.Config"
 FEATURE_EVENT_BACKEND_DEFAULT_PROVENANCE = (
@@ -568,6 +581,38 @@ class GuidedNewAnalysisDynamicFitParameterContract:
         for name, value in fraction_fields:
             if not (0.0 < float(value) <= 1.0):
                 raise ValueError(f"{name} must be in (0, 1]")
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisTonicSettingsContract:
+    """Shared run-level tonic settings. Applies to all included ROIs.
+
+    Deliberately separate from GuidedNewAnalysisDynamicFitParameterContract:
+    tonic session-shape/timeline handling is not a correction/dynamic-fit
+    parameter, and future per-ROI correction/dynamic-fit customization must
+    not entangle with this run-level contract.
+    """
+    schema_version: str = TONIC_SETTINGS_CONTRACT_SCHEMA_VERSION
+    tonic_output_mode: str = "preserve_raw_session_shape"
+    tonic_timeline_mode: str = "real_elapsed_time"
+    provenance: dict[str, Any] = field(default_factory=lambda: {
+        "tonic_output_mode": "scientist-selected Guided run-level tonic setting",
+        "tonic_timeline_mode": "scientist-selected Guided run-level tonic setting",
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    })
+
+    def __post_init__(self) -> None:
+        if self.tonic_output_mode not in GUIDED_SUPPORTED_TONIC_OUTPUT_MODES:
+            raise ValueError(
+                f"Unsupported tonic_output_mode for Guided: {self.tonic_output_mode}"
+            )
+        if self.tonic_timeline_mode not in GUIDED_SUPPORTED_TONIC_TIMELINE_MODES:
+            raise ValueError(
+                f"Unsupported tonic_timeline_mode for Guided: {self.tonic_timeline_mode}"
+            )
 
 
 @dataclass(frozen=True)
@@ -1170,6 +1215,12 @@ class GuidedNewAnalysisDraftPlan:
     )
     dynamic_fit_parameter_contract: GuidedNewAnalysisDynamicFitParameterContract = field(
         default_factory=GuidedNewAnalysisDynamicFitParameterContract
+    )
+    # Shared run-level tonic settings (session shape + timeline). Kept
+    # separate from dynamic_fit_parameter_contract -- see that dataclass's
+    # docstring.
+    tonic_settings_contract: GuidedNewAnalysisTonicSettingsContract = field(
+        default_factory=GuidedNewAnalysisTonicSettingsContract
     )
 
     # ROI inventory

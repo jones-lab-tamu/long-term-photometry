@@ -129,6 +129,8 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         mark_rule_version="explicit_confirmed_mark.v1",
         currentness_rule_version="cache_bound_currentness.v1",
         unanimity_rule_version="included_roi_unanimous_dynamic_fit.v1",
+        global_tonic_output_mode="preserve_raw_session_shape",
+        global_tonic_timeline_mode="real_elapsed_time",
     )
     evidence = contracts.GuidedBackendEvidenceReference(
         evidence_reference_id="evidence-001",
@@ -320,6 +322,8 @@ def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
             strategy_scope=correction.strategy_scope,
             global_correction_strategy=correction.global_correction_strategy,
             global_dynamic_fit_mode=correction.global_dynamic_fit_mode,
+            global_tonic_output_mode=correction.global_tonic_output_mode,
+            global_tonic_timeline_mode=correction.global_tonic_timeline_mode,
             dynamic_fit_parameter_values=correction.dynamic_fit_parameter_values,
             confirmed_marks=tuple(
                 contracts.GuidedBackendConfirmedStrategyMarkFacts(
@@ -1109,11 +1113,11 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
 
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
-    # Pinned vector updated for B1: normalized_recording_description_identity
-    # was added to the request identity payload (see
+    # Pinned vector updated: global_tonic_output_mode/global_tonic_timeline_mode
+    # were added to GuidedBackendCorrectionRequest's identity fields (see
     # _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS).
     assert first == (
-        "71ba4c6e23ca8108f090f5db977f9ad515ffeedddc9cc100aab52fa069236e8f"
+        "1379976b2494f921e74cf8a39c8d94d12a40e0882203bad6db52a12ee23812be"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request

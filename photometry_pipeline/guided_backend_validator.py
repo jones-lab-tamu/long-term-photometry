@@ -44,6 +44,8 @@ from photometry_pipeline.guided_normalized_recording import (
 )
 from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+    GUIDED_SUPPORTED_TONIC_OUTPUT_MODES,
+    GUIDED_SUPPORTED_TONIC_TIMELINE_MODES,
 )
 
 
@@ -74,6 +76,8 @@ GUIDED_BACKEND_VALIDATOR_REFUSAL_CATEGORIES = (
     "mixed_dynamic_fit_modes",
     "signal_only_not_supported_for_validate",
     "forbidden_strategy_state",
+    "unsupported_tonic_settings",
+    "tonic_timeline_gap_free_blocked_by_missing_sessions",
     "diagnostic_cache_identity_mismatch",
     "diagnostic_cache_not_completed_run_ineligible",
     "missing_or_stale_diagnostic_cache",
@@ -816,6 +820,30 @@ def _validate_semantics(
             "correction",
             "Correction rule state is unsupported.",
             "correction_rule_state_invalid",
+        )
+
+    if (
+        correction.global_tonic_output_mode not in GUIDED_SUPPORTED_TONIC_OUTPUT_MODES
+        or correction.global_tonic_timeline_mode
+        not in GUIDED_SUPPORTED_TONIC_TIMELINE_MODES
+    ):
+        return _issue(
+            "unsupported_tonic_settings",
+            "correction",
+            "The selected tonic analysis settings are unsupported.",
+            "tonic_settings_invalid",
+        )
+    if (
+        correction.global_tonic_timeline_mode == "gap_free_elapsed_time"
+        and request.source.approved_missing_candidates
+    ):
+        return _issue(
+            "tonic_timeline_gap_free_blocked_by_missing_sessions",
+            "correction",
+            "Gap-free elapsed time is unavailable because this analysis "
+            "contains missing or excluded recording sessions. Use Real "
+            "elapsed time to preserve those gaps.",
+            "tonic_timeline_gap_free_blocked_by_missing_sessions",
         )
 
     diagnostic = request.diagnostic_evidence
