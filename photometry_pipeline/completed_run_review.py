@@ -53,6 +53,7 @@ from photometry_pipeline.run_completion_contract import (
     classify_guided_current_native_state,
     correction_completion_error,
     normalized_recording_completion_error,
+    review_with_warnings_eligibility,
 )
 from photometry_pipeline.core.types import (
     CORRECTION_STRATEGY_FAMILIES,
@@ -1093,6 +1094,145 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
     )
 
 
+def _is_final_validation_failed_review_candidate(
+    resolved: Path,
+    *,
+    status: dict[str, Any],
+    completion: dict[str, Any],
+    status_completion: dict[str, Any],
+    report_completion: dict[str, Any],
+) -> bool:
+    """Cheap, HDF5-free screen for whether a failed run is even worth running
+    the heavier read-only reviewability verification on (see
+    `run_completion_contract.review_with_warnings_eligibility`).
+
+    Passing this gate is only permission to *attempt* that heavier
+    verification -- it is not itself permission to open Review. Every other
+    failed run (interrupted, cancelled, missing records, mismatched identity,
+    or a terminal failure that was never TERMINAL_VALIDATION_FAILED at all) is
+    rejected here with no further work and no HDF5 access.
+    """
+    if status.get("phase") != "final" or status.get("status") != "error":
+        return False
+    errors = status.get("errors")
+    if not isinstance(errors, list) or not any(
+        str(entry).startswith("TERMINAL_VALIDATION_FAILED:") for entry in errors
+    ):
+        return False
+    if (
+        completion.get("completion_contract_version") != "run_completion.v1"
+        or report_completion.get("contract_version") != "run_completion.v1"
+    ):
+        return False
+    if completion.get("final") is not True:
+        return False
+
+    run_id = str(status.get("run_id", ""))
+    manifest_run_id = str(completion.get("run_id", ""))
+    report_run_id = str(report_completion.get("run_id", ""))
+    if not run_id or run_id != manifest_run_id or run_id != report_run_id:
+        return False
+
+    # A failed run's status.json is written by `_finalize_status("error", ...)`
+    # without a `completion` block at all (only the success path stamps one),
+    # so there is normally nothing here to compare against. If some future
+    # status shape does record a manifest digest, it must still agree.
+    recorded_digest = (
+        status_completion.get("manifest_sha256")
+        if isinstance(status_completion, dict)
+        else None
+    )
+    if recorded_digest:
+        try:
+            manifest_digest = hashlib.sha256(
+                (resolved / "MANIFEST.json").read_bytes()
+            ).hexdigest()
+        except OSError:
+            return False
+        if recorded_digest != manifest_digest:
+            return False
+
+    run_mode = completion.get("run_mode", {})
+    if not isinstance(run_mode, dict):
+        return False
+    enabled = [
+        branch
+        for branch, key in (("tonic", "tonic_analysis"), ("phasic", "phasic_analysis"))
+        if run_mode.get(key)
+    ]
+    if not enabled:
+        return False
+    for branch in enabled:
+        branch_dir = resolved / "_analysis" / f"{branch}_out"
+        required = (
+            branch_dir / "run_metadata.json",
+            branch_dir / "run_report.json",
+            branch_dir / f"{branch}_trace_cache.h5",
+            branch_dir / "input_processing_completeness.json",
+        )
+        if any(not path.is_file() for path in required):
+            return False
+
+    deliverables = completion.get("deliverables")
+    artifacts = completion.get("artifacts")
+    if not isinstance(deliverables, dict) or not isinstance(artifacts, list):
+        return False
+    required_paths = deliverables.get("required")
+    if not isinstance(required_paths, list):
+        return False
+    listed = {
+        str(entry.get("relative_path", ""))
+        for entry in artifacts
+        if isinstance(entry, dict)
+    }
+    if any(str(rel_path) not in listed for rel_path in required_paths):
+        return False
+
+    for path in resolved.rglob("*"):
+        if path.is_file() and path.suffix.lower() in (".tmp", ".lock"):
+            return False
+
+    return True
+
+
+def _format_duration_natural(duration_sec: float) -> str:
+    """Render a persisted expected-duration value as scientist-facing text,
+    in whichever unit is exact for that value -- never a hardcoded figure."""
+    if duration_sec > 0 and duration_sec % 60 == 0:
+        return f"{int(round(duration_sec / 60))}-minute"
+    if duration_sec > 0 and duration_sec == int(duration_sec):
+        return f"{int(duration_sec)}-second"
+    return f"{duration_sec:.1f}-second"
+
+
+def _duration_validation_warning_message(
+    elapsed_time_warnings: list[dict[str, Any]], session_count: int
+) -> str:
+    """Build warning text only from facts actually present in the collected
+    evidence -- no claim about ordering, trend, or a specific duration
+    unless every affected session genuinely shares that duration."""
+    plural = "session" if session_count == 1 else "sessions"
+    expected_durations = sorted(
+        {
+            float(entry["expected_duration_sec"])
+            for entry in elapsed_time_warnings
+            if "expected_duration_sec" in entry
+        }
+    )
+    if len(expected_durations) == 1:
+        shorter_phrase = (
+            "shorter than the expected "
+            f"{_format_duration_natural(expected_durations[0])} length"
+        )
+    else:
+        shorter_phrase = "shorter than expected"
+    return (
+        "Your plots and tables were generated and are available below. Some "
+        f"recording sessions were {shorter_phrase}. {session_count} {plural} "
+        "were affected. Review those sessions before relying on the results."
+    )
+
+
 def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
     """Load a compact Guided Review orientation without trace datasets.
 
@@ -1184,9 +1324,40 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
         and run_id == manifest_run_id == report_run_id
         and status_completion.get("manifest_sha256") == manifest_digest
     )
+    review_status = "success"
+    affected_session_indices: list[int] = []
+    duration_warnings: list[dict[str, Any]] = []
     if not compact_terminal_ok:
-        raise CompletedRunReviewError(
-            "This completed result has incomplete or inconsistent completion metadata."
+        candidate = _is_final_validation_failed_review_candidate(
+            resolved,
+            status=status,
+            completion=completion,
+            status_completion=status_completion,
+            report_completion=report_completion,
+        )
+        fatal_error = "warning-review candidate gate failed"
+        elapsed_time_warnings: list[dict[str, Any]] = []
+        if candidate:
+            candidate_run_mode = completion.get("run_mode", {})
+            if isinstance(candidate_run_mode, dict):
+                fatal_error, elapsed_time_warnings = review_with_warnings_eligibility(
+                    str(resolved), run_id=run_id, run_mode=candidate_run_mode
+                )
+        # A run reaches here only because status.json recorded status=="error".
+        # Every currently-passing terminal check would make the run structurally
+        # eligible for success, so if current-code verification finds neither a
+        # fatal error nor any collected elapsed-time warning, the persisted
+        # error record disagrees with everything checkable today. That is not
+        # a case product policy covers (see: never convert a failed run to
+        # success), so it stays rejected exactly like today.
+        if fatal_error or not elapsed_time_warnings:
+            raise CompletedRunReviewError(
+                "This completed result has incomplete or inconsistent completion metadata."
+            )
+        review_status = "reviewable_with_warning"
+        duration_warnings = elapsed_time_warnings
+        affected_session_indices = sorted(
+            {int(entry["session_index"]) for entry in elapsed_time_warnings}
         )
     run_mode = completion.get("run_mode", {})
     if not isinstance(run_mode, dict):
@@ -1269,9 +1440,10 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
             if count_key:
                 session_counts[count_key] += 1
 
-    return {
+    overview = {
         "run_dir": str(resolved),
-        "terminal_state": "success",
+        "terminal_state": "success" if review_status == "success" else "failed",
+        "review_status": review_status,
         "format": adapter_format,
         "acquisition_mode": acquisition_mode,
         "analysis_branches": list(enabled),
@@ -1286,3 +1458,32 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
         },
         "full_resolution_traces_loaded": False,
     }
+    if review_status == "reviewable_with_warning":
+        session_count = len(affected_session_indices)
+        overview["validation_warning_title"] = (
+            "Analysis completed with a validation warning"
+        )
+        overview["validation_warning_message"] = _duration_validation_warning_message(
+            duration_warnings, session_count
+        )
+        overview["affected_session_count"] = session_count
+        overview["first_affected_session_index"] = (
+            affected_session_indices[0] if affected_session_indices else None
+        )
+        expected_durations = sorted(
+            {
+                float(entry["expected_duration_sec"])
+                for entry in duration_warnings
+                if "expected_duration_sec" in entry
+            }
+        )
+        if len(expected_durations) == 1:
+            overview["expected_session_duration_sec"] = expected_durations[0]
+        shortfall_magnitudes = [
+            -float(entry["duration_difference_sec"])
+            for entry in duration_warnings
+            if "duration_difference_sec" in entry
+        ]
+        if shortfall_magnitudes:
+            overview["largest_duration_shortfall_sec"] = max(shortfall_magnitudes)
+    return overview

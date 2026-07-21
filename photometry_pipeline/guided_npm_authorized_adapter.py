@@ -512,7 +512,7 @@ def load_guided_npm_authorized_chunk_with_record(
         metadata["npm_resolved_support_start_absolute"],
         metadata["npm_resolved_support_end_absolute"],
         metadata["npm_observed_duration_sec"],
-        metadata["npm_output_time_basis"],
+        metadata["output_time_basis"],
         metadata["npm_support_policy"],
     )
     expected_timing = (
@@ -563,7 +563,7 @@ def load_guided_npm_authorized_chunk_with_record(
         authorized.reference_led_value,
         authorized.signal_led_value,
         metadata["npm_support_policy"],
-        metadata["npm_output_time_basis"],
+        metadata["output_time_basis"],
         session.physical_roi_inventory,
         tuple(metadata["npm_observed_physical_roi_ids"]),
         tuple(chunk.channel_names),

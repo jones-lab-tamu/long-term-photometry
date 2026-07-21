@@ -197,3 +197,59 @@ def test_viewer_orients_first_then_loads_one_selected_review_image(
     finally:
         viewer.close()
         viewer.deleteLater()
+
+
+def test_viewer_shows_persistent_warning_banner_for_reviewable_with_warning(
+    qapp, tmp_path
+):
+    run = _compact_completed_run(tmp_path / "run")
+    summary = run / "CH1" / "summary"
+    summary.mkdir(parents=True)
+    image_path = summary / "phasic_correction_impact.png"
+    pixmap = QPixmap(4, 4)
+    pixmap.fill()
+    assert pixmap.save(str(image_path), "PNG")
+    overview = load_completed_review_overview(run)
+    overview.update(
+        {
+            "review_status": "reviewable_with_warning",
+            "validation_warning_title": "Analysis completed with a validation warning",
+            "validation_warning_message": (
+                "Your plots and tables were generated and are available below. "
+                "Later recordings became progressively shorter than the "
+                "expected 10-minute session length. 50 sessions were "
+                "affected, beginning partway through the recording. Review "
+                "those sessions before relying on the results."
+            ),
+            "included_rois": ["CH1"],
+        }
+    )
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(str(run), review_overview=overview) is True
+        status_text = viewer._status_label.text()
+        assert "validation warning" in status_text
+        assert "50 sessions" in status_text
+        # Never expose internal completion vocabulary to the scientist.
+        for internal_term in (
+            "C8",
+            "terminal validation",
+            "HDF5",
+            "manifest",
+            "schema",
+            "contract",
+            "artifact identity",
+        ):
+            assert internal_term.lower() not in status_text.lower()
+        style_before = viewer._status_label.styleSheet()
+
+        # The warning must stay visible across ROI/image changes, not just
+        # at initial load.
+        viewer._region_combo.setCurrentIndex(1)
+        qapp.processEvents()
+        assert Path(viewer.active_image_path()) == image_path
+        assert viewer._status_label.text() == status_text
+        assert viewer._status_label.styleSheet() == style_before
+    finally:
+        viewer.close()
+        viewer.deleteLater()

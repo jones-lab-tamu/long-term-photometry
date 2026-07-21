@@ -689,7 +689,11 @@ def _load_authoritative_analysis_sessions(
 
 
 def _correction_completion_error_for_analysis(
-    run_dir: str, run_mode: dict[str, Any], analysis_kind: str
+    run_dir: str,
+    run_mode: dict[str, Any],
+    analysis_kind: str,
+    *,
+    elapsed_time_warnings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Verify requested/consumed correction evidence for a current phasic run.
 
@@ -698,6 +702,20 @@ def _correction_completion_error_for_analysis(
     this section, the existing completion contract continues to decide success.
     Once the section is claimed, every field and every processed ROI/session is
     checked fail-closed against C8 and the canonical HDF5 cache.
+
+    `elapsed_time_warnings`, when given a list, turns the ROI/session
+    elapsed-time (C8) mismatch below from an immediate fatal return into a
+    collected warning -- but only when the session ran *shorter* than
+    expected (a recognized data-quality problem this collector allowlists).
+    An unexpectedly *longer* session is a different, unreviewed class of
+    problem and still returns fatal immediately even in collecting mode.
+    Each collected entry carries `expected_duration_sec`,
+    `observed_duration_sec`, and `duration_difference_sec` (observed minus
+    expected, always negative for a collected entry) so callers can build
+    warning text from real numbers instead of assumed phrasing. Every other
+    check in this function remains an immediate fatal return regardless of
+    this argument. The default (None) is byte-for-byte the original
+    fail-fast behavior used by ordinary success classification.
     """
     analysis_dir = os.path.join(run_dir, "_analysis", f"{analysis_kind}_out")
     metadata, _metadata_error = _read_json_object(
@@ -972,10 +990,43 @@ def _correction_completion_error_for_analysis(
                         try:
                             duration = float(expected_duration)
                             dt = float(np.median(np.diff(time_sec)))
-                            if abs(float(time_sec[-1]) - duration) > max(
-                                0.10, 2.0 * abs(dt), 0.05 * abs(duration)
-                            ):
-                                return f"ROI {roi!r} session {cache_id} elapsed time does not match C8"
+                            observed_duration = float(time_sec[-1])
+                            tolerance = max(0.10, 2.0 * abs(dt), 0.05 * abs(duration))
+                            if abs(observed_duration - duration) > tolerance:
+                                # Only a genuine shortfall is an allowlisted
+                                # data-quality warning. An unexpectedly
+                                # *longer* session is a different, unreviewed
+                                # class of problem and stays fatal even while
+                                # collecting -- so it never continues, in
+                                # either mode.
+                                is_shortfall = observed_duration < duration - tolerance
+                                if elapsed_time_warnings is None or not is_shortfall:
+                                    return f"ROI {roi!r} session {cache_id} elapsed time does not match C8"
+                                session_index = (
+                                    expected_entry.get("index")
+                                    if isinstance(expected_entry, dict)
+                                    else None
+                                )
+                                elapsed_time_warnings.append(
+                                    {
+                                        "roi": str(roi),
+                                        "session_index": (
+                                            int(session_index)
+                                            if isinstance(session_index, int)
+                                            and not isinstance(session_index, bool)
+                                            else int(cache_id)
+                                        ),
+                                        "cache_chunk_id": int(cache_id),
+                                        "expected_duration_sec": duration,
+                                        "observed_duration_sec": observed_duration,
+                                        # observed - expected: negative for
+                                        # every collected entry, since only
+                                        # shortfalls are ever collected.
+                                        "duration_difference_sec": (
+                                            observed_duration - duration
+                                        ),
+                                    }
+                                )
                         except (TypeError, ValueError):
                             return f"ROI {roi!r} session {cache_id} has malformed expected duration"
                     coverage_required = max(1, int(math.ceil(coverage * n)))
@@ -1048,8 +1099,18 @@ def _correction_completion_error_for_analysis(
     return ""
 
 
-def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
-    """Verify every analysis branch that claims native correction provenance."""
+def correction_completion_error(
+    run_dir: str,
+    run_mode: dict[str, Any],
+    *,
+    elapsed_time_warnings: list[dict[str, Any]] | None = None,
+) -> str:
+    """Verify every analysis branch that claims native correction provenance.
+
+    See `_correction_completion_error_for_analysis` for what passing a list as
+    `elapsed_time_warnings` changes; the default preserves the original
+    fail-fast behavior every existing caller relies on.
+    """
     for analysis_kind, enabled_key in (
         ("tonic", "tonic_analysis"),
         ("phasic", "phasic_analysis"),
@@ -1057,7 +1118,7 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
         if not run_mode.get(enabled_key):
             continue
         error = _correction_completion_error_for_analysis(
-            run_dir, run_mode, analysis_kind
+            run_dir, run_mode, analysis_kind, elapsed_time_warnings=elapsed_time_warnings
         )
         if error:
             return error
@@ -1228,12 +1289,18 @@ def verify_terminal_set_before_status(
     *,
     run_id: str,
     run_mode: dict[str, Any],
+    elapsed_time_warnings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Verify everything a successful run needs *except* its final status.
 
     The wrapper calls this immediately before writing the success status, so a
     run that cannot pass it never gets one. Returns "" when the terminal set
     verifies, otherwise an actionable internal reason.
+
+    `elapsed_time_warnings` is forwarded to `correction_completion_error`
+    unchanged (see that function). The wrapper never passes it, so its own
+    success/failure decision is unaffected; it exists only for the read-only
+    Review-eligibility check in `review_with_warnings_eligibility` below.
     """
     report, report_err = _read_json_object(os.path.join(run_dir, RUN_REPORT_FILENAME))
     if report is None:
@@ -1272,7 +1339,9 @@ def verify_terminal_set_before_status(
     completeness_error = input_completeness_error(run_dir, run_mode)
     if completeness_error:
         return f"input chunks are not fully accounted for: {completeness_error}"
-    correction_error = correction_completion_error(run_dir, run_mode)
+    correction_error = correction_completion_error(
+        run_dir, run_mode, elapsed_time_warnings=elapsed_time_warnings
+    )
     if correction_error:
         return f"correction evidence is incomplete or inconsistent: {correction_error}"
     normalized_recording_error = normalized_recording_completion_error(run_dir, run_mode)
@@ -1296,6 +1365,42 @@ def verify_terminal_set_before_status(
         return f"{MANIFEST_FILENAME} omits mandatory outputs: " + ", ".join(unlisted)
 
     return _verify_recorded_artifacts(run_dir, artifacts)
+
+
+def review_with_warnings_eligibility(
+    run_dir: str,
+    *,
+    run_id: str,
+    run_mode: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Read-only Review-viewing eligibility check for a run whose status is
+    already known to be TERMINAL_VALIDATION_FAILED.
+
+    This is *not* a success classifier and never changes what counts as a
+    successful run: `verify_terminal_set_before_status` (called with its
+    default `elapsed_time_warnings=None`) remains the only definition of
+    success, still treats every ROI/session elapsed-time (C8) mismatch as
+    fatal, and may still return on the first failure it finds.
+
+    This function instead runs the same terminal-set verification while
+    collecting C8 mismatches instead of failing on the first one, so a run
+    whose *only* problem is one or more legitimate recording-duration
+    shortfalls can still be identified precisely. Returns
+    `(fatal_error, elapsed_time_warnings)`: `fatal_error` is "" only when
+    every other completion requirement -- structural run mode, continuous
+    index, input completeness, normalized recording provenance, mandatory
+    deliverable listing, and recorded-artifact identity -- passed for every
+    requested branch. A non-empty `fatal_error` means this run must still be
+    rejected regardless of `elapsed_time_warnings`.
+    """
+    warnings: list[dict[str, Any]] = []
+    fatal_error = verify_terminal_set_before_status(
+        run_dir,
+        run_id=run_id,
+        run_mode=run_mode,
+        elapsed_time_warnings=warnings,
+    )
+    return fatal_error, warnings
 
 
 # ----------------------------------------------------------------------

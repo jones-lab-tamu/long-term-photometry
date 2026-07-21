@@ -48,7 +48,6 @@ from photometry_pipeline.guided_normalized_recording_consumption import (
     compare_requested_and_consumed_normalized_recording,
 )
 from photometry_pipeline.io.npm_contract import (
-    NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
     NpmParserContract,
     inspect_npm_csv,
 )
@@ -564,26 +563,6 @@ def _npm_config() -> Config:
     )
 
 
-def _stamp_guided_authorized_output_time_basis(cache_path) -> None:
-    """A plain (non Guided-authorized) Pipeline.run() call never invokes
-    Pipeline._bind_authorized_chunk_chronology, so it never stamps the
-    combined output_time_basis attr a real Guided-authorized NPM execution
-    always stamps (see pipeline.py's _load_entry_chunk). Simulate that one
-    authorized-execution fact directly on the genuine cache this fixture
-    otherwise builds for real, matching the pattern already established for
-    simulating multi-session caches in the NPM natural-path acceptance
-    test."""
-    import h5py
-
-    with h5py.File(cache_path, "a") as cache:
-        roi_group = cache["roi"]
-        for roi_name in roi_group:
-            for chunk_name in roi_group[roi_name]:
-                roi_group[roi_name][chunk_name].attrs["output_time_basis"] = (
-                    NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
-                )
-
-
 @pytest.fixture
 def real_npm_run(tmp_path):
     root = tmp_path / "npm_input"
@@ -615,7 +594,6 @@ def real_npm_run(tmp_path):
     Pipeline(cfg, mode="phasic").run(
         str(root), str(out), force_format="npm", recursive=True, sessions_per_hour=1
     )
-    _stamp_guided_authorized_output_time_basis(out / "phasic_trace_cache.h5")
     return str(run_dir), requested
 
 

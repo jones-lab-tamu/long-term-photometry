@@ -560,7 +560,22 @@ class RunReportViewer(QWidget):
             title += " [PREVIEW]"
         elif run_type == "tuning_prep":
             title += " [TUNING PREP]"
-        if classification is not None and classification.completed_with_missing:
+        if (
+            self._completed_review_overview.get("review_status")
+            == "reviewable_with_warning"
+        ):
+            warning_title = str(
+                self._completed_review_overview.get("validation_warning_title")
+                or "Analysis completed with a validation warning"
+            )
+            warning_message = str(
+                self._completed_review_overview.get("validation_warning_message") or ""
+            )
+            self._set_status_message(
+                f"{warning_title}\n{warning_message}" if warning_message else warning_title,
+                level="warning",
+            )
+        elif classification is not None and classification.completed_with_missing:
             completion_summary = get_scientist_completion_summary(out_dir, classification)
             self._set_status_message(completion_summary, level="ready")
         else:
@@ -1164,6 +1179,7 @@ class RunReportViewer(QWidget):
             "running": "color: #666; font-size: 13px;",
             "ready": "font-weight: bold; font-size: 14px;",
             "error": "color: #a94442; font-size: 12px;",
+            "warning": "color: #8a6d3b; font-weight: bold; font-size: 13px;",
         }
         self._status_label.setText(text)
         self._status_label.setStyleSheet(style_map.get(level, style_map["idle"]))

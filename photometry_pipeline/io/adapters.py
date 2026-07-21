@@ -2233,7 +2233,13 @@ def _build_npm_chunk_from_dataframe(
             "adapter_value_nan_policy": getattr(config, "adapter_value_nan_policy", "strict"),
             "npm_resolved_timestamp_column": time_col,
             "npm_timestamp_unit": "seconds",
-            "npm_output_time_basis": "relative_seconds_since_uv_signal_overlap_origin",
+            # Common key the shared HDF5 cache writer and the
+            # adapter-neutral normalized-recording comparator both read
+            # (io/hdf5_cache.py, guided_normalized_recording_consumption.py).
+            # NPM keeps its own distinct value here -- this is not the same
+            # convention as RWD/custom_tabular's
+            # "relative_seconds_since_session_start".
+            "output_time_basis": "relative_seconds_since_uv_signal_overlap_origin",
             "npm_overlap_origin_absolute": float(geometry["overlap_origin_absolute"]),
             "npm_resolved_support_start_offset_sec": float(geometry["inner_start_rel_overlap"]),
             "npm_resolved_support_end_offset_sec": float(geometry["inner_end_rel_overlap"]),

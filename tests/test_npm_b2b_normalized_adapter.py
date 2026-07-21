@@ -82,7 +82,7 @@ def test_npm_overlap_origin_grid_is_preserved(tmp_path: Path):
     permissive = load_chunk(str(path), "npm", _config(strict=False), 0)
 
     np.testing.assert_allclose(strict.time_sec, [0.5, 1.0])
-    assert strict.metadata["npm_output_time_basis"] == (
+    assert strict.metadata["output_time_basis"] == (
         "relative_seconds_since_uv_signal_overlap_origin"
     )
     assert strict.metadata["npm_overlap_origin_absolute"] == 100.5

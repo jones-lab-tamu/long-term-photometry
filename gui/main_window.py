@@ -5936,7 +5936,12 @@ class MainWindow(QMainWindow):
         if not has_loaded_results or not run_dir or not os.path.isdir(run_dir):
             return {"status": "not_generated", "run_dir": "", "artifacts": []}
 
-        if accepted_overview is not None:
+        if accepted_overview is not None and accepted_overview.get(
+            "review_status", "success"
+        ) == "success":
+            # A "reviewable_with_warning" overview is accepted for read-only
+            # Review only -- it must not also count as a successfully
+            # completed run here.
             completed, evidence = True, "accepted compact Review overview"
         else:
             completed, evidence = is_successful_completed_run_dir(run_dir)
@@ -20835,7 +20840,12 @@ class MainWindow(QMainWindow):
             self._refresh_dff_dayplot_rerender_availability()
             return
         accepted_overview = self._accepted_completed_review_for(run_dir)
-        if accepted_overview is not None:
+        if accepted_overview is not None and accepted_overview.get(
+            "review_status", "success"
+        ) == "success":
+            # A "reviewable_with_warning" overview is accepted for read-only
+            # Review only -- it must not also count as a successfully
+            # completed run for tuning/retune/rerender eligibility.
             is_successful_complete, evidence = (
                 True,
                 "accepted compact Review overview",
@@ -26211,7 +26221,12 @@ class MainWindow(QMainWindow):
         if not run_dir or not os.path.isdir(run_dir):
             return False, "No completed run directory is active."
         accepted_overview = self._accepted_completed_review_for(run_dir)
-        if accepted_overview is not None:
+        if accepted_overview is not None and accepted_overview.get(
+            "review_status", "success"
+        ) == "success":
+            # A "reviewable_with_warning" overview is accepted for read-only
+            # Review only -- it must not also count as a successfully
+            # completed run for rerender eligibility.
             ok, evidence = True, "accepted compact Review overview"
         else:
             ok, evidence = is_successful_completed_run_dir(run_dir)
