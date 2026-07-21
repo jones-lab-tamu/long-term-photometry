@@ -13080,6 +13080,30 @@ class MainWindow(QMainWindow):
             elif (
                 not recovered
                 and getattr(result, "status", "")
+                == "wrapper_failed_reviewable_with_warning"
+            ):
+                # The run genuinely failed (status.json still records
+                # "error"; nothing here claims otherwise) -- but its
+                # generated plots and tables already verified as reviewable,
+                # so the scientist is pointed at Results instead of told to
+                # rerun. The specific duration/affected-session facts come
+                # from the compact overview's own persistent warning inside
+                # Results, not reconstructed here from the wrapper's error
+                # text.
+                details_label.setText(
+                    "Your plots and tables were generated and have been "
+                    "opened in Results. Some recording sessions were "
+                    "shorter than expected. Review the warning in Results "
+                    "before relying on the analysis."
+                )
+                # Reuse the existing loader-gated handoff exactly as the
+                # ordinary "Load completed run for review" click does --
+                # triggered automatically here only because this outcome's
+                # wording already tells the scientist Results is open.
+                self._on_guided_load_completed_run_for_review_clicked()
+            elif (
+                not recovered
+                and getattr(result, "status", "")
                 == "wrapper_completed_needs_review_loading"
                 and getattr(result, "completed_run_candidate_path", None)
             ):
@@ -13396,7 +13420,10 @@ class MainWindow(QMainWindow):
         ready = bool(
             result is not None
             and getattr(result, "status", "")
-            == "wrapper_completed_needs_review_loading"
+            in (
+                "wrapper_completed_needs_review_loading",
+                "wrapper_failed_reviewable_with_warning",
+            )
             and getattr(result, "completed_run_candidate_path", None)
             and getattr(
                 result,
@@ -13425,7 +13452,10 @@ class MainWindow(QMainWindow):
         if (
             result is None
             or getattr(result, "status", "")
-            != "wrapper_completed_needs_review_loading"
+            not in (
+                "wrapper_completed_needs_review_loading",
+                "wrapper_failed_reviewable_with_warning",
+            )
             or getattr(
                 result,
                 "requires_completed_run_loader_validation",

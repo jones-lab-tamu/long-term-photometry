@@ -91,6 +91,72 @@ _OUTPUT_UNSAFE_SUMMARY = (
     "try again."
 )
 
+# A wrapper failure this backend adapter still treats as reviewable: the
+# run genuinely failed (wrapper returncode != 0, status.json stays "error"),
+# but generated deliverables verify as `review_status ==
+# "reviewable_with_warning"` through the same compact Review overview a
+# successful run uses. Deliberately distinct from "wrapper_completed_needs_
+# review_loading" (`ok=True`) -- this status keeps `ok=False` and must never
+# be treated as, or confused with, ordinary success.
+STATUS_WRAPPER_FAILED_REVIEWABLE_WITH_WARNING = (
+    "wrapper_failed_reviewable_with_warning"
+)
+_WRAPPER_FAILED_REVIEWABLE_WITH_WARNING_SUMMARY = (
+    "Guided analysis finished with a validation warning."
+)
+
+
+def _reviewable_with_warning_overview(run_dir: str) -> dict | None:
+    """Narrow, read-only check for the one wrapper-failure shape this
+    backend adapter still treats as reviewable: a *final terminal-validation*
+    failure whose generated outputs the compact Review overview itself
+    verifies as `review_status == "reviewable_with_warning"`.
+
+    Returns None for every other reason -- missing/unreadable status.json,
+    a non-final phase, any status other than "error", an error that is not
+    specifically TERMINAL_VALIDATION_FAILED, or an overview that raises or
+    reports a different review_status (missing deliverable, structural
+    cache defect, identity mismatch, ...). None here always falls through
+    to the existing generic wrapper_failed presentation unchanged; this
+    function only decides whether to *attempt* the existing verification,
+    it never weakens or bypasses it.
+    """
+    status_path = os.path.join(run_dir, "status.json")
+    try:
+        with open(status_path, "r", encoding="utf-8") as handle:
+            status_data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(status_data, dict):
+        return None
+    if status_data.get("phase") != "final" or status_data.get("status") != "error":
+        return None
+    errors = status_data.get("errors")
+    if not isinstance(errors, list) or not any(
+        isinstance(entry, str) and entry.startswith("TERMINAL_VALIDATION_FAILED:")
+        for entry in errors
+    ):
+        return None
+
+    from photometry_pipeline.completed_run_review import (
+        CompletedRunReviewError,
+        load_completed_review_overview,
+    )
+
+    try:
+        overview = load_completed_review_overview(run_dir)
+    except CompletedRunReviewError:
+        return None
+    except Exception:
+        return None
+    if (
+        not isinstance(overview, dict)
+        or overview.get("review_status") != "reviewable_with_warning"
+    ):
+        return None
+    return overview
+
+
 _STATUS_MAP = {
     "refused_before_allocation": (
         "refused_before_startup",
@@ -186,9 +252,25 @@ def execute_guided_backend_run(
             summary = _OUTPUT_NOT_CREATABLE_SUMMARY
         elif first_category == "pure_plan_output_unsafe":
             summary = _OUTPUT_UNSAFE_SUMMARY
+    if status == "wrapper_failed" and internal.allocated_run_dir:
+        review_overview = _reviewable_with_warning_overview(
+            internal.allocated_run_dir
+        )
+        if review_overview is not None:
+            # The run genuinely failed (ok stays False, unchanged from the
+            # "wrapper_failed" mapping) -- this only unlocks the existing
+            # compact Review handoff for a run whose generated outputs
+            # already verified as reviewable-with-warning.
+            status = STATUS_WRAPPER_FAILED_REVIEWABLE_WITH_WARNING
+            user_state = "run_finished_with_validation_warning"
+            summary = _WRAPPER_FAILED_REVIEWABLE_WITH_WARNING_SUMMARY
     completed_candidate = (
         internal.allocated_run_dir
-        if status == "wrapper_completed_needs_review_loading"
+        if status
+        in (
+            "wrapper_completed_needs_review_loading",
+            STATUS_WRAPPER_FAILED_REVIEWABLE_WITH_WARNING,
+        )
         else None
     )
     diagnostics = GuidedBackendExecutionDiagnostics(
