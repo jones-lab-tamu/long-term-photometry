@@ -819,29 +819,26 @@ def _npm_shared_completion_runner(monkeypatch):
         return description
 
     def _stamp_authorized_chunk_evidence(
-        cache_path: Path, target_fs_hz: float, dynamic_fit_mode: str
+        cache_path: Path,
+        target_fs_hz: float,
+        output_time_basis: str,
+        dynamic_fit_mode: str,
     ) -> None:
-        """A real Guided-authorized NPM execution always stamps fs_hz, the
-        combined output_time_basis, and per-chunk correction-execution
-        evidence onto every chunk (see
-        Pipeline._bind_authorized_chunk_chronology and
-        Pipeline._build_requested_correction_provenance); the generic
-        seed_wrapper_analysis_outputs stub cache does not. Stamp the same
-        facts this stub's completeness/correction-provenance records now
-        authorize, matching run_completion_contract's per-chunk
-        dynamic-fit verification exactly."""
-        import h5py
+        """Stamp the accepted per-session time basis and correction evidence.
 
-        from photometry_pipeline.io.npm_contract import (
-            NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS,
-        )
+        The shared wrapper uses the ordinary NPM adapter, whose cache time axis
+        is relative to the UV/signal overlap origin.  This numerical-worker
+        replacement must consume the accepted normalized description rather
+        than imitate the superseded combined-chronology worker route.
+        """
+        import h5py
 
         with h5py.File(cache_path, "a") as cache:
             for roi_name in cache["roi"]:
                 for chunk_name in cache[f"roi/{roi_name}"]:
                     attrs = cache[f"roi/{roi_name}/{chunk_name}"].attrs
                     attrs["fs_hz"] = target_fs_hz
-                    attrs["output_time_basis"] = NPM_GUIDED_COMBINED_OUTPUT_TIME_BASIS
+                    attrs["output_time_basis"] = output_time_basis
                     attrs["correction_execution_status"] = "consumed"
                     attrs["correction_strategy_family"] = "dynamic_fit"
                     attrs["correction_selected_strategy"] = dynamic_fit_mode
@@ -964,18 +961,24 @@ def _npm_shared_completion_runner(monkeypatch):
                 )
                 description = _write_matching_npm_completeness_record(run_dir)
                 target_fs_hz = float(description["sampling"]["target_fs_hz"])
+                output_time_basis = description["sampling"]["time_basis"]
                 config_path = command_argv[command_argv.index("--config") + 1]
-                dynamic_fit_mode = original_config_loader(
-                    config_path
-                ).dynamic_fit_mode
+                consumed_config = Path(config_path).read_text(encoding="utf-8")
+                for analysis_kind in ("phasic", "tonic"):
+                    (run_dir / "_analysis" / f"{analysis_kind}_out" / "config_used.yaml").write_text(
+                        consumed_config, encoding="utf-8"
+                    )
+                dynamic_fit_mode = original_config_loader(config_path).dynamic_fit_mode
                 _stamp_authorized_chunk_evidence(
                     run_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5",
                     target_fs_hz,
+                    output_time_basis,
                     dynamic_fit_mode,
                 )
                 _stamp_authorized_chunk_evidence(
                     run_dir / "_analysis" / "tonic_out" / "tonic_trace_cache.h5",
                     target_fs_hz,
+                    output_time_basis,
                     dynamic_fit_mode,
                 )
                 _write_matching_correction_provenance(
