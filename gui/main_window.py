@@ -2497,6 +2497,7 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_outcome_revision = None
         self._guided_backend_validation_stale_reason = ""
         self._guided_backend_validation_active = False
+        self._guided_continuous_rwd_review_binding = None
         self._guided_startup_authority = None
         self._guided_execution_payload_result = None
         self._guided_run_readiness = None
@@ -10982,11 +10983,23 @@ class MainWindow(QMainWindow):
             self._refresh_guided_review_plan_checkpoint(
                 plan, readiness, subset_readiness
             )
-            label.setText(
-                self._guided_new_analysis_draft_plan_summary_text(
-                    plan, readiness, subset_readiness, execution_spec_preview
-                )
+            summary_text = self._guided_new_analysis_draft_plan_summary_text(
+                plan, readiness, subset_readiness, execution_spec_preview
             )
+            continuous_facts = self._guided_continuous_rwd_review_facts(plan)
+            if continuous_facts is not None:
+                summary_text += (
+                    "\n\nContinuous recording\n"
+                    f"Recording type: {continuous_facts['recording_type']}\n"
+                    f"Duration: {continuous_facts['duration']}\n"
+                    "Included ROIs: "
+                    f"{', '.join(continuous_facts['included_roi_ids'])}\n"
+                    "Timestamp continuity: "
+                    f"{continuous_facts['timestamp_continuity']}\n"
+                    "Source location: "
+                    f"{continuous_facts['current_source_location']}"
+                )
+            label.setText(summary_text)
             label.setToolTip("")
 
             readiness_label = getattr(self, "_guided_plan_readiness_summary_label", None)
@@ -12036,6 +12049,131 @@ class MainWindow(QMainWindow):
                 self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
         self._refresh_guided_backend_validation_display()
+        self._refresh_guided_continuous_rwd_review_binding_for_current_draft()
+
+    def _set_guided_continuous_rwd_review_binding(self, binding) -> None:
+        from photometry_pipeline.guided_continuous_rwd_review_binding import (
+            GuidedContinuousRwdReviewBinding,
+        )
+
+        if not isinstance(binding, GuidedContinuousRwdReviewBinding):
+            raise TypeError(
+                "binding must be a GuidedContinuousRwdReviewBinding"
+            )
+        self._guided_continuous_rwd_review_binding = binding
+        self._invalidate_guided_backend_validation(
+            "continuous RWD Review binding changed"
+        )
+        self._refresh_guided_continuous_rwd_review_if_visible()
+
+    def _clear_guided_continuous_rwd_review_binding(
+        self, *, invalidate_validation: bool = True
+    ) -> None:
+        if getattr(self, "_guided_continuous_rwd_review_binding", None) is None:
+            return
+        self._guided_continuous_rwd_review_binding = None
+        if invalidate_validation:
+            self._invalidate_guided_backend_validation(
+                "continuous RWD Review binding cleared"
+            )
+        self._refresh_guided_continuous_rwd_review_if_visible()
+
+    def _refresh_guided_continuous_rwd_review_binding_for_current_draft(
+        self,
+    ) -> None:
+        binding = getattr(
+            self, "_guided_continuous_rwd_review_binding", None
+        )
+        if binding is None:
+            return
+        try:
+            draft = self._build_guided_new_analysis_draft_plan()
+            current_source_folder = Path(binding.current_source_path).parent
+            draft_source_folders = (
+                draft.input_source_path,
+                draft.resolved_input_source_path,
+            )
+            if any(
+                source_folder is not None
+                and Path(source_folder) != current_source_folder
+                for source_folder in draft_source_folders
+            ):
+                raise ValueError(
+                    "Guided draft source provenance changed"
+                )
+            from photometry_pipeline.guided_continuous_rwd_review_binding import (
+                build_guided_continuous_rwd_review_binding,
+            )
+
+            rebuilt = build_guided_continuous_rwd_review_binding(
+                draft,
+                recording=binding.recording,
+                continuity_evaluation=binding.continuity_evaluation,
+                current_source_path=binding.current_source_path,
+            )
+        except (AttributeError, TypeError, ValueError):
+            self._clear_guided_continuous_rwd_review_binding(
+                invalidate_validation=False
+            )
+            return
+        self._guided_continuous_rwd_review_binding = rebuilt
+
+    def _refresh_guided_continuous_rwd_review_if_visible(self) -> None:
+        stepper = getattr(self, "_guided_workflow_stepper", None)
+        if stepper is None or stepper.currentItem() is None:
+            return
+        if stepper.currentItem().data(Qt.UserRole) == "Draft plan":
+            self._refresh_guided_draft_run_plan_preview()
+
+    @staticmethod
+    def _format_guided_continuous_duration(duration_seconds: float) -> str:
+        remaining = max(0, int(round(float(duration_seconds))))
+        days, remaining = divmod(remaining, 86_400)
+        hours, remaining = divmod(remaining, 3_600)
+        minutes, seconds = divmod(remaining, 60)
+        parts = []
+        for value, singular in (
+            (days, "day"),
+            (hours, "hour"),
+            (minutes, "minute"),
+            (seconds, "second"),
+        ):
+            if value:
+                parts.append(f"{value} {singular if value == 1 else singular + 's'}")
+        return ", ".join(parts) if parts else "0 seconds"
+
+    def _guided_continuous_rwd_review_facts(self, draft=None):
+        binding = getattr(
+            self, "_guided_continuous_rwd_review_binding", None
+        )
+        if binding is None:
+            return None
+        try:
+            current_draft = (
+                draft
+                if draft is not None
+                else self._build_guided_new_analysis_draft_plan()
+            )
+            from photometry_pipeline.guided_plan_identity import (
+                compute_guided_new_analysis_draft_plan_identity,
+            )
+
+            current_identity = compute_guided_new_analysis_draft_plan_identity(
+                current_draft
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if current_identity != binding.draft_plan_identity:
+            return None
+        return {
+            "recording_type": "Continuous RWD",
+            "duration": self._format_guided_continuous_duration(
+                binding.recording.time.measured_duration_seconds
+            ),
+            "included_roi_ids": binding.recording.roi.included_roi_ids,
+            "timestamp_continuity": "Passed",
+            "current_source_location": binding.current_source_path,
+        }
 
     def _clear_guided_missing_session_approvals_for_source_change(self, _text: str = "") -> None:
         """Never carry a session approval into a different recording.
