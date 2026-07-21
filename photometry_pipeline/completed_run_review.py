@@ -1212,6 +1212,7 @@ def _duration_validation_warning_message(
     evidence -- no claim about ordering, trend, or a specific duration
     unless every affected session genuinely shares that duration."""
     plural = "session" if session_count == 1 else "sessions"
+    verb = "was" if session_count == 1 else "were"
     expected_durations = sorted(
         {
             float(entry["expected_duration_sec"])
@@ -1229,7 +1230,7 @@ def _duration_validation_warning_message(
     return (
         "Your plots and tables were generated and are available below. Some "
         f"recording sessions were {shorter_phrase}. {session_count} {plural} "
-        "were affected. Review those sessions before relying on the results."
+        f"{verb} affected. Review those sessions before relying on the results."
     )
 
 

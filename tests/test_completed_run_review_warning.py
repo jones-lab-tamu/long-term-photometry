@@ -235,6 +235,9 @@ def test_c8_only_mismatch_is_reviewable_with_warning(
     message = overview["validation_warning_message"]
     assert "C8" not in message
     assert "terminal validation" not in message.lower()
+    # Singular grammar: exactly one affected session.
+    assert "1 session was affected" in message
+    assert "1 session were affected" not in message
     # The 20-second fixture duration is derived from persisted evidence, not
     # a hardcoded "10-minute" figure that would be wrong for this fixture.
     assert overview["expected_session_duration_sec"] == 20.0
@@ -346,6 +349,9 @@ def test_mixed_expected_durations_use_generic_wording(
     assert "shorter than the expected" not in message
     assert "-second" not in message
     assert "-minute" not in message
+    # Plural grammar: two affected sessions.
+    assert "2 sessions were affected" in message
+    assert "2 sessions was affected" not in message
 
 
 def test_stale_status_prose_is_not_the_displayed_reason(

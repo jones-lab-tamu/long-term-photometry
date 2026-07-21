@@ -103,7 +103,13 @@ class RunReportViewer(QWidget):
 
         self._status_label = QLabel("No completed results loaded.")
         self._status_label.setAlignment(Qt.AlignCenter)
+        self._status_label.setWordWrap(True)
         self._status_label.setStyleSheet("color: gray; font-size: 14px;")
+        # Ignored horizontally: the label never forces the viewer wider than
+        # its allocated width (it just wraps at whatever width the layout
+        # gives it). Preferred vertically, combined with word wrap, makes
+        # Qt use QLabel's height-for-width sizing so a two- or three-line
+        # warning grows the label instead of being clipped to one line.
         self._status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         root.addWidget(self._status_label)
 

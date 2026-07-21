@@ -227,6 +227,7 @@ def test_viewer_shows_persistent_warning_banner_for_reviewable_with_warning(
     viewer = RunReportViewer()
     try:
         assert viewer.load_report(str(run), review_overview=overview) is True
+        assert viewer._status_label.wordWrap() is True
         status_text = viewer._status_label.text()
         assert "validation warning" in status_text
         assert "50 sessions" in status_text
@@ -250,6 +251,83 @@ def test_viewer_shows_persistent_warning_banner_for_reviewable_with_warning(
         assert Path(viewer.active_image_path()) == image_path
         assert viewer._status_label.text() == status_text
         assert viewer._status_label.styleSheet() == style_before
+    finally:
+        viewer.close()
+        viewer.deleteLater()
+
+
+def test_status_label_has_word_wrap_enabled(qapp):
+    viewer = RunReportViewer()
+    try:
+        assert viewer._status_label.wordWrap() is True
+    finally:
+        viewer.close()
+        viewer.deleteLater()
+
+
+def test_long_warning_displays_in_full_and_grows_beyond_one_line(qapp, tmp_path):
+    run = _compact_completed_run(tmp_path / "run")
+    summary = run / "CH1" / "summary"
+    summary.mkdir(parents=True)
+    pixmap = QPixmap(4, 4)
+    pixmap.fill()
+    assert pixmap.save(str(summary / "phasic_correction_impact.png"), "PNG")
+    long_message = (
+        "Your plots and tables were generated and are available below. "
+        "Some recording sessions were shorter than the expected 10-minute "
+        "length. 50 sessions were affected. Review those sessions before "
+        "relying on the results. It is a good idea to inspect each affected "
+        "session's plots individually before drawing any conclusions from "
+        "this analysis."
+    )
+    overview = load_completed_review_overview(run)
+    overview.update(
+        {
+            "review_status": "reviewable_with_warning",
+            "validation_warning_title": "Analysis completed with a validation warning",
+            "validation_warning_message": long_message,
+            "included_rois": ["CH1"],
+        }
+    )
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(str(run), review_overview=overview) is True
+        status_text = viewer._status_label.text()
+        # The full message is present -- nothing truncated or elided.
+        assert long_message in status_text
+
+        # A realistic Results-pane width forces multiple wrapped lines
+        # instead of a single clipped one.
+        realistic_width = 420
+        one_line_height = viewer._status_label.fontMetrics().height()
+        wrapped_height = viewer._status_label.heightForWidth(realistic_width)
+        assert wrapped_height > one_line_height * 1.5
+    finally:
+        viewer.close()
+        viewer.deleteLater()
+
+
+def test_ordinary_short_status_still_displays_normally(qapp, tmp_path):
+    run = _compact_completed_run(tmp_path / "run")
+    summary = run / "CH1" / "summary"
+    summary.mkdir(parents=True)
+    pixmap = QPixmap(4, 4)
+    pixmap.fill()
+    assert pixmap.save(str(summary / "phasic_correction_impact.png"), "PNG")
+    overview = load_completed_review_overview(run)
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(str(run), review_overview=overview) is True
+        assert viewer._status_label.wordWrap() is True
+        status_text = viewer._status_label.text()
+        assert status_text
+        assert "results workspace" in status_text.lower()
+
+        # A short, single-line-ish message must not be forced multiple
+        # lines' worth of height at a generously wide viewer width.
+        wide_width = 2000
+        one_line_height = viewer._status_label.fontMetrics().height()
+        assert viewer._status_label.heightForWidth(wide_width) <= one_line_height * 1.5
     finally:
         viewer.close()
         viewer.deleteLater()
