@@ -33,7 +33,7 @@ from statistics import median
 import numpy as np
 
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker, QRectF, QPointF
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, Slot, QSignalBlocker, QRectF, QPointF
 from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -436,6 +436,251 @@ def _pixmap_sha256_png(pix: QPixmap) -> str:
     finally:
         buffer.close()
     return _sha256_bytes(bytes(payload))
+
+
+class _GuidedContinuousRwdRecordingCheckRequestError(ValueError):
+    """Captured continuous-RWD recording-check inputs are invalid."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdRecordingCheckRequest:
+    selected_acquisition_folder: str
+    included_roi_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.selected_acquisition_folder, str)
+            or not self.selected_acquisition_folder.strip()
+        ):
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "selected_acquisition_folder must be a nonempty string"
+            )
+        if not isinstance(self.included_roi_ids, tuple) or not self.included_roi_ids:
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "included_roi_ids must be a nonempty tuple"
+            )
+        if any(
+            not isinstance(roi_id, str) or not roi_id.strip()
+            for roi_id in self.included_roi_ids
+        ):
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "included_roi_ids must contain nonempty strings"
+            )
+        if len(set(self.included_roi_ids)) != len(self.included_roi_ids):
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "included_roi_ids must be unique"
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdRecordingCheckSuccess:
+    request: _GuidedContinuousRwdRecordingCheckRequest
+    recording: "GuidedContinuousRwdRecordingDescription"
+    continuity_evaluation: "ContinuousRwdDiscontinuityEvaluation"
+    current_source_path: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdRecordingCheckFailure:
+    stage: str
+    category: str
+    scientist_summary: str
+
+
+class _GuidedContinuousRwdRecordingCheckWorker(QObject):
+    """Run the committed CR1-A -> B1 -> B2b check without GUI access."""
+
+    stage_changed = Signal(str)
+    succeeded = Signal(object)
+    failed = Signal(object)
+    cancelled = Signal()
+
+    _CONTINUITY_FAILURE_SUMMARIES = {
+        "short_interval_anomaly_detected": (
+            "The recording contains timestamp intervals shorter than its "
+            "accepted cadence."
+        ),
+        "material_long_interval_detected": (
+            "The recording contains material timestamp gaps."
+        ),
+        "short_and_long_discontinuities_detected": (
+            "The recording contains both short timestamp anomalies and "
+            "material timestamp gaps."
+        ),
+        "source_changed_or_mismatched": (
+            "The recording changed or no longer matches the inspected source."
+        ),
+    }
+
+    def __init__(self, request: _GuidedContinuousRwdRecordingCheckRequest):
+        super().__init__()
+        if not isinstance(request, _GuidedContinuousRwdRecordingCheckRequest):
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "request must be a continuous RWD recording-check request"
+            )
+        self._request = request
+        self._cancel_event = threading.Event()
+        # Retain one bound callback object so both long scientific stages receive
+        # the exact same thread-safe cancellation callback.
+        self._cancellation_requested = self._cancel_event.is_set
+
+    @staticmethod
+    def _bounded_text(value, fallback: str, *, maximum: int) -> str:
+        if not isinstance(value, str):
+            return fallback
+        candidate = value.strip()
+        if not candidate or len(candidate) > maximum:
+            return fallback
+        return candidate
+
+    def _unexpected_failure(self, stage: str) -> None:
+        summaries = {
+            "inspection": "The recording could not be inspected.",
+            "recording_authority": "The inspected recording could not be accepted.",
+            "continuity": "Timestamp continuity could not be checked.",
+        }
+        self.failed.emit(
+            _GuidedContinuousRwdRecordingCheckFailure(
+                stage=stage,
+                category="unexpected_check_failure",
+                scientist_summary=summaries[stage],
+            )
+        )
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from photometry_pipeline.guided_continuous_rwd_discontinuity_evaluation import (
+                CONTINUITY_PASSED,
+                EVALUATION_INTERRUPTED,
+                ContinuousRwdDiscontinuityEvaluationError,
+                evaluate_continuous_rwd_timestamp_continuity,
+            )
+            from photometry_pipeline.guided_continuous_rwd_recording import (
+                ContinuousRwdRecordingAuthorityError,
+                build_guided_continuous_rwd_recording_description,
+            )
+            from photometry_pipeline.io.rwd_continuous_source import (
+                inspect_continuous_rwd_acquisition_folder,
+            )
+        except Exception:
+            self._unexpected_failure("inspection")
+            return
+
+        if self._cancellation_requested():
+            self.cancelled.emit()
+            return
+
+        self.stage_changed.emit("inspecting_recording")
+        try:
+            inspection = inspect_continuous_rwd_acquisition_folder(
+                self._request.selected_acquisition_folder,
+                cancellation_check=self._cancellation_requested,
+            )
+        except Exception:
+            self._unexpected_failure("inspection")
+            return
+        if getattr(inspection, "outcome_category", None) == "inspection_interrupted":
+            self.cancelled.emit()
+            return
+        if (
+            getattr(inspection, "status", None) != "completed"
+            or getattr(inspection, "outcome_category", None) != "inspection_completed"
+        ):
+            self.failed.emit(
+                _GuidedContinuousRwdRecordingCheckFailure(
+                    stage="inspection",
+                    category=self._bounded_text(
+                        getattr(inspection, "outcome_category", None),
+                        "inspection_failed",
+                        maximum=100,
+                    ),
+                    scientist_summary=self._bounded_text(
+                        getattr(inspection, "scientist_summary", None),
+                        "The recording could not be inspected.",
+                        maximum=500,
+                    ),
+                )
+            )
+            return
+        if self._cancellation_requested():
+            self.cancelled.emit()
+            return
+
+        try:
+            recording = build_guided_continuous_rwd_recording_description(
+                inspection,
+                included_roi_ids=self._request.included_roi_ids,
+            )
+        except ContinuousRwdRecordingAuthorityError:
+            self.failed.emit(
+                _GuidedContinuousRwdRecordingCheckFailure(
+                    stage="recording_authority",
+                    category="recording_authority_rejected",
+                    scientist_summary="The inspected recording could not be accepted.",
+                )
+            )
+            return
+        except Exception:
+            self._unexpected_failure("recording_authority")
+            return
+        if self._cancellation_requested():
+            self.cancelled.emit()
+            return
+
+        self.stage_changed.emit("checking_timestamp_continuity")
+        try:
+            evaluation = evaluate_continuous_rwd_timestamp_continuity(
+                recording,
+                source_path=recording.source.fluorescence_path_canonical,
+                cancellation_requested=self._cancellation_requested,
+            )
+        except ContinuousRwdDiscontinuityEvaluationError:
+            self._unexpected_failure("continuity")
+            return
+        except Exception:
+            self._unexpected_failure("continuity")
+            return
+        outcome = getattr(evaluation, "outcome", None)
+        if outcome == EVALUATION_INTERRUPTED:
+            self.cancelled.emit()
+            return
+        if outcome != CONTINUITY_PASSED:
+            if not isinstance(outcome, str):
+                self._unexpected_failure("continuity")
+                return
+            self.failed.emit(
+                _GuidedContinuousRwdRecordingCheckFailure(
+                    stage="continuity",
+                    category=(
+                        outcome
+                        if outcome in self._CONTINUITY_FAILURE_SUMMARIES
+                        else "unexpected_check_failure"
+                    ),
+                    scientist_summary=self._CONTINUITY_FAILURE_SUMMARIES.get(
+                        outcome,
+                        "Timestamp continuity could not be checked.",
+                    ),
+                )
+            )
+            return
+        if self._cancellation_requested():
+            self.cancelled.emit()
+            return
+
+        self.succeeded.emit(
+            _GuidedContinuousRwdRecordingCheckSuccess(
+                request=self._request,
+                recording=recording,
+                continuity_evaluation=evaluation,
+                current_source_path=recording.source.fluorescence_path_canonical,
+            )
+        )
+
+    @Slot()
+    def request_cancel(self) -> None:
+        # Safe for a direct GUI-thread call while run() occupies the worker thread.
+        self._cancel_event.set()
 
 
 class _GuidedRoiDiscoveryWorker(QObject):
