@@ -438,15 +438,26 @@ def _validate_description(description: GuidedContinuousRwdRecordingDescription) 
     _integer(description.source.total_data_row_count, "total row count", minimum=1)
     _integer(description.source.valid_timestamp_count, "valid timestamp count", minimum=1)
     _integer(description.source.header_row_index, "header row index")
+    raw_columns = description.source.raw_columns
     if (
-        not isinstance(description.source.raw_columns, tuple)
-        or not description.source.raw_columns
-        or any(not isinstance(item, str) or not item for item in description.source.raw_columns)
+        not isinstance(raw_columns, tuple)
+        or not raw_columns
+        or any(not isinstance(item, str) for item in raw_columns)
     ):
         _fail("Raw columns must be a non-empty tuple of strings.")
-    _string(description.source.selected_time_column, "selected time column")
-    if description.source.selected_time_column not in description.source.raw_columns:
-        _fail("Selected time column must be present in raw columns.")
+    empty_indices = tuple(
+        index for index, item in enumerate(raw_columns) if not item
+    )
+    if empty_indices not in ((), (len(raw_columns) - 1,)):
+        _fail("Only one terminal empty raw column is allowed.")
+    nonempty_columns = tuple(item for item in raw_columns if item)
+    if len(set(nonempty_columns)) != len(nonempty_columns):
+        _fail("Nonempty raw column names must be unique.")
+    selected_time_column = _string(
+        description.source.selected_time_column, "selected time column"
+    )
+    if raw_columns.count(selected_time_column) != 1:
+        _fail("Selected time column must occur exactly once in raw columns.")
     for name in ("selected_folder_canonical", "fluorescence_path_canonical",
                  "stable_source_identity"):
         _string(getattr(description.source, name), name)
@@ -455,6 +466,13 @@ def _validate_description(description: GuidedContinuousRwdRecordingDescription) 
     if description.source.source_content_identity != expected_source:
         _fail("Source-content identity mismatch.")
     _validate_roi(description.roi)
+    for channel in description.roi.available_roi_channels:
+        for column, name in (
+            (channel.reference_column, "ROI reference column"),
+            (channel.signal_column, "ROI signal column"),
+        ):
+            if raw_columns.count(column) != 1:
+                _fail(f"{name} must occur exactly once in raw columns.")
     _validate_time_evidence(
         raw_first_timestamp=description.time.raw_first_timestamp,
         raw_last_timestamp=description.time.raw_last_timestamp,

@@ -35,6 +35,7 @@ from photometry_pipeline.io.rwd_continuous_source import (
     ContinuousRwdRoiPair,
     ContinuousRwdSourceIdentity,
     ContinuousRwdTimeAxisEvidence,
+    inspect_continuous_rwd_acquisition_folder,
 )
 
 
@@ -124,6 +125,135 @@ def _build(inspection=None, included=("2", "1")):
     return build_guided_continuous_rwd_recording_description(
         inspection or _inspection(), included_roi_ids=included
     )
+
+
+def _trailing_delimiter_inspection(tmp_path: Path):
+    folder = tmp_path / "trailing-delimiter-acquisition"
+    folder.mkdir()
+    source = folder / "Fluorescence.csv"
+    rows = "".join(f"{second},1,2,\n" for second in range(601))
+    source.write_text(
+        "synthetic preamble\n"
+        "\ufeff  Time(s)  , CH1-410 , CH1-470 ,\n"
+        + rows,
+        encoding="utf-8",
+    )
+    inspection = inspect_continuous_rwd_acquisition_folder(folder)
+    assert inspection.status == "completed"
+    assert inspection.parser_facts.raw_columns == (
+        "Time(s)", "CH1-410", "CH1-470", ""
+    )
+    assert inspection.channels.malformed_row_count == 0
+    return inspection
+
+
+def test_cr1_a_terminal_empty_column_builds_and_round_trips_identity(tmp_path: Path):
+    inspection = _trailing_delimiter_inspection(tmp_path)
+    description = _build(inspection, included=("CH1",))
+    assert description.source.raw_columns[-1] == ""
+
+    serialized = serialize_guided_continuous_rwd_recording_description(description)
+    assert serialized["source"]["raw_columns"][-1] == ""
+    restored = deserialize_guided_continuous_rwd_recording_description(
+        json.loads(json.dumps(serialized))
+    )
+    assert restored == description
+    assert restored.source.raw_columns[-1] == ""
+    assert restored.source.parser_interpretation_identity == (
+        description.source.parser_interpretation_identity
+    )
+    assert restored.recording_identity == description.recording_identity
+
+
+def test_terminal_empty_column_remains_parser_and_recording_identity_bearing(
+    tmp_path: Path,
+):
+    inspection = _trailing_delimiter_inspection(tmp_path)
+    trailing = _build(inspection, included=("CH1",))
+    without_terminal = _build(
+        replace(
+            inspection,
+            parser_facts=replace(
+                inspection.parser_facts,
+                raw_columns=inspection.parser_facts.raw_columns[:-1],
+            ),
+        ),
+        included=("CH1",),
+    )
+    assert trailing.source.parser_interpretation_identity != (
+        without_terminal.source.parser_interpretation_identity
+    )
+    assert trailing.recording_identity != without_terminal.recording_identity
+
+
+@pytest.mark.parametrize(
+    "raw_columns",
+    [
+        ("TimeStamp", "", "1-470", "2-410", "2-470", "10-410", "10-470"),
+        ("TimeStamp", "1-410", "1-470", "2-410", "2-470", "10-410", "10-470", "", ""),
+        ("", "1-410", "1-470", "2-410", "2-470", "10-410", "10-470"),
+        ("TimeStamp", "1-410", "", "1-470", "2-410", "2-470", "10-410", "10-470"),
+    ],
+)
+def test_rejects_interior_first_or_repeated_empty_raw_columns(raw_columns):
+    inspection = _inspection()
+    inspection = replace(
+        inspection,
+        parser_facts=replace(inspection.parser_facts, raw_columns=raw_columns),
+    )
+    with pytest.raises(
+        ContinuousRwdRecordingAuthorityError,
+        match="Only one terminal empty raw column",
+    ):
+        _build(inspection)
+
+
+def test_selected_time_column_cannot_be_terminal_empty():
+    inspection = _inspection()
+    inspection = replace(
+        inspection,
+        parser_facts=replace(
+            inspection.parser_facts,
+            time_column="",
+            raw_columns=inspection.parser_facts.raw_columns + ("",),
+        ),
+    )
+    with pytest.raises(ContinuousRwdRecordingAuthorityError, match="selected time"):
+        _build(inspection)
+
+
+@pytest.mark.parametrize("role", ["reference", "signal"])
+def test_roi_columns_cannot_be_empty(role):
+    inspection = _inspection()
+    pair = inspection.channels.roi_pairs[0]
+    changed = replace(
+        pair,
+        reference_column="" if role == "reference" else pair.reference_column,
+        signal_column="" if role == "signal" else pair.signal_column,
+    )
+    inspection = replace(
+        inspection,
+        channels=replace(
+            inspection.channels,
+            roi_pairs=(changed,) + inspection.channels.roi_pairs[1:],
+        ),
+    )
+    with pytest.raises(ContinuousRwdRecordingAuthorityError, match=f"{role} column"):
+        _build(inspection)
+
+
+def test_duplicate_nonempty_raw_columns_remain_rejected():
+    inspection = _inspection()
+    columns = inspection.parser_facts.raw_columns
+    inspection = replace(
+        inspection,
+        parser_facts=replace(
+            inspection.parser_facts,
+            raw_columns=columns + (columns[-1],),
+        ),
+    )
+    with pytest.raises(ContinuousRwdRecordingAuthorityError, match="must be unique"):
+        _build(inspection)
 
 
 def test_valid_construction_freezes_exact_authority_and_pending_admission():
