@@ -423,6 +423,17 @@ class Hdf5TraceCacheWriter:
                             ('correction_execution_status', 'execution_status'),
                             ('correction_production_baseline_dataset', 'production_baseline_dataset'),
                             ('correction_production_baseline_source', 'production_baseline_source'),
+                            # Narrow addition for CR1-D1: the accepted
+                            # continuous-RWD segment-correction kernel (C4b)
+                            # carries a fallback chain (requested strategy may
+                            # fall back to a simpler one) and a per-ROI QC
+                            # blob that the legacy per-file correction path has
+                            # no equivalent for. Both are optional (only
+                            # present when consumed_meta supplies them), so
+                            # existing intermittent producers are unaffected.
+                            ('correction_applied_strategy', 'applied_strategy'),
+                            ('correction_fallback_path', 'fallback_path'),
+                            ('correction_qc_json', 'qc_json'),
                         ):
                             value = consumed_meta.get(key)
                             if value is not None and str(value):
