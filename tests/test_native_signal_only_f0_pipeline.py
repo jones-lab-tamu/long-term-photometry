@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 import photometry_pipeline.pipeline as pipeline_module
+import photometry_pipeline.signal_only_f0 as signal_only_module
 from photometry_pipeline.config import Config
 from photometry_pipeline.core import regression
 from photometry_pipeline.core.signal_only_f0_candidate import (
@@ -179,7 +180,7 @@ def test_signal_only_candidate_is_computed_once_and_persisted_baseline_is_exact(
         calls.append(1)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(pipeline_module, "compute_signal_only_f0_candidate", count)
+    monkeypatch.setattr(signal_only_module, "compute_signal_only_f0_candidate", count)
     pipeline = Pipeline(cfg, mode="phasic", per_roi_correction=strategy_map)
     pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
     processed = pipeline._apply_standard_analysis(chunk, chunk_id=4)
@@ -289,7 +290,7 @@ def test_signal_only_f0_and_canonical_dff_coverage_fail_independently(monkeypatc
         result["signal_only_f0_candidate_uncapped"] = baseline
         return result
 
-    monkeypatch.setattr(pipeline_module, "compute_signal_only_f0_candidate", low_f0_coverage)
+    monkeypatch.setattr(signal_only_module, "compute_signal_only_f0_candidate", low_f0_coverage)
     pipeline = Pipeline(_cfg(), mode="phasic", per_roi_correction=_signal_only_map("ROI0", "ROI1"))
     pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
     with pytest.raises(CorrectionProcessingError, match="production F0 finite coverage"):
@@ -302,7 +303,7 @@ def test_signal_only_f0_and_canonical_dff_coverage_fail_independently(monkeypatc
         )
         return result
 
-    monkeypatch.setattr(pipeline_module, "compute_signal_only_f0_candidate", overflowing_dff)
+    monkeypatch.setattr(signal_only_module, "compute_signal_only_f0_candidate", overflowing_dff)
     cfg = _cfg()
     cfg.f0_min_value = 0.0
     pipeline = Pipeline(cfg, mode="phasic", per_roi_correction=_signal_only_map("ROI0", "ROI1"))

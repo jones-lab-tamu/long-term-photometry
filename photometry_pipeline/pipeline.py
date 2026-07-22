@@ -37,6 +37,10 @@ from .core.signal_only_f0_candidate import (
     compute_signal_only_f0_candidate,
     summarize_signal_only_f0_candidates,
 )
+from .signal_only_f0 import (
+    SignalOnlyF0ProductionError,
+    compute_signal_only_f0_production,
+)
 from .core.correction_policy_proposal import (
     apply_correction_policy_proposals,
     summarize_correction_policy_proposals,
@@ -2250,184 +2254,36 @@ class Pipeline:
         """Compute and validate one canonical native Signal-Only F0 trace.
 
         The production baseline is the exact uncapped candidate used by the
-        accepted standalone Signal-Only F0 formula. The candidate is computed
-        once here; the diagnostic recorder reuses the returned metadata and
-        baseline rather than invoking the candidate a second time.
+        accepted standalone Signal-Only F0 formula. The delegated pure helper
+        computes the candidate once; the diagnostic recorder reuses its
+        returned metadata and baseline rather than invoking it a second time.
         """
-        signal = np.asarray(chunk.sig_raw[:, roi_index], dtype=float).reshape(-1)
-        state = compute_signal_state_diagnostics(
-            signal=signal,
-            time=chunk.time_sec,
-            config=self._signal_state_config(),
+        try:
+            result = compute_signal_only_f0_production(
+                chunk.sig_raw[:, roi_index],
+                chunk.time_sec,
+                signal_state_config=self._signal_state_config(),
+                signal_only_f0_config=self._signal_only_f0_config(),
+                coverage_fraction=float(
+                    getattr(self.config, "signal_only_f0_min_coverage_fraction", 0.80)
+                ),
+                f0_min_value=float(getattr(self.config, "f0_min_value", 1e-9)),
+            )
+        except SignalOnlyF0ProductionError as exc:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=str(exc),
+            ) from exc
+        return (
+            result.delta_f,
+            result.dff,
+            result.baseline,
+            result.signal_state,
+            result.qc,
         )
-        result = compute_signal_only_f0_candidate(
-            signal=signal,
-            time=chunk.time_sec,
-            signal_state=state,
-            config=self._signal_only_f0_config(),
-            return_uncapped_candidate=True,
-        )
-
-        baseline_raw = result.get("signal_only_f0_candidate_uncapped")
-        expected_sample_count = int(signal.size)
-        finite_signal = np.isfinite(signal)
-        n_finite_signal = int(np.sum(finite_signal))
-        coverage_fraction = float(
-            getattr(self.config, "signal_only_f0_min_coverage_fraction", 0.80)
-        )
-        if not np.isfinite(coverage_fraction) or not 0.0 < coverage_fraction <= 1.0:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "invalid signal-only coverage policy: "
-                    f"signal_only_f0_min_coverage_fraction={coverage_fraction!r}"
-                ),
-            )
-        # Coverage is measured against the expected processed trace length,
-        # never only against samples that happened to be finite. The explicit
-        # policy allows up to (1 - coverage_fraction) missing samples,
-        # including ordinary edge NaNs; there is no additional hidden edge
-        # allowance.
-        min_required = max(
-            10, int(np.ceil(coverage_fraction * expected_sample_count))
-        )
-        if n_finite_signal < min_required:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "raw signal finite coverage is insufficient: "
-                    f"{n_finite_signal}/{expected_sample_count} valid samples, "
-                    f"{min_required} required"
-                ),
-            )
-        if str(result.get("signal_only_f0_status", "")) != "ok":
-            reason = str(
-                result.get("signal_only_f0_warning")
-                or result.get("signal_only_f0_status")
-                or "candidate_unavailable"
-            )
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=reason,
-            )
-        if baseline_raw is None:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason="candidate did not return the production F0 baseline",
-            )
-
-        baseline = np.asarray(baseline_raw, dtype=float).reshape(-1)
-        if baseline.shape != signal.shape:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "production F0 baseline shape mismatch: "
-                    f"{baseline.shape} versus signal {signal.shape}"
-                ),
-            )
-        valid = finite_signal & np.isfinite(baseline)
-        baseline_finite_count = int(np.sum(np.isfinite(baseline)))
-        valid_count = int(np.sum(valid))
-        if baseline_finite_count < min_required:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "production F0 finite coverage is insufficient: "
-                    f"{baseline_finite_count}/{expected_sample_count} finite samples, "
-                    f"{min_required} required"
-                ),
-            )
-        if valid_count < min_required:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "production F0 coverage is insufficient: "
-                    f"{valid_count} valid samples, {min_required} required"
-                ),
-            )
-        min_f0 = float(getattr(self.config, "f0_min_value", 1e-9))
-        if np.any(baseline[valid] <= min_f0):
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason=(
-                    "production F0 baseline contains non-positive or too-small "
-                    f"values (minimum allowed {min_f0})"
-                ),
-            )
-
-        canonical_delta_f = np.full_like(signal, np.nan, dtype=float)
-        canonical_dff = np.full_like(signal, np.nan, dtype=float)
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            canonical_delta_f[valid] = signal[valid] - baseline[valid]
-            canonical_dff[valid] = 100.0 * canonical_delta_f[valid] / baseline[valid]
-        if int(np.sum(np.isfinite(canonical_dff))) < min_required:
-            raise CorrectionProcessingError(
-                roi_id=roi_id,
-                chunk_id=chunk_id,
-                source_file=chunk.source_file,
-                selected_strategy="signal_only_f0",
-                reason="canonical dF/F has insufficient finite coverage",
-            )
-
-        qc = {
-            key: value
-            for key, value in result.items()
-            if key not in {
-                "signal_only_f0_candidate",
-                "signal_only_f0_candidate_uncapped",
-            }
-        }
-        qc.update(
-            {
-                "signal_only_f0_production_available": True,
-                "signal_only_f0_production_baseline_source": "signal_only_f0_candidate_uncapped",
-                "signal_only_f0_production_formula": "100 * (signal - f0) / f0",
-                "signal_only_f0_production_baseline_p05": float(
-                    np.percentile(baseline[valid], 5.0)
-                ),
-                "signal_only_f0_production_baseline_p50": float(
-                    np.percentile(baseline[valid], 50.0)
-                ),
-                "signal_only_f0_production_baseline_p95": float(
-                    np.percentile(baseline[valid], 95.0)
-                ),
-                "signal_only_f0_production_valid_sample_count": valid_count,
-                "signal_only_f0_production_expected_sample_count": expected_sample_count,
-                "signal_only_f0_production_baseline_finite_count": baseline_finite_count,
-                "signal_only_f0_production_dff_finite_count": int(
-                    np.sum(np.isfinite(canonical_dff))
-                ),
-                "signal_only_f0_production_min_required_samples": min_required,
-                "signal_only_f0_production_valid_fraction": float(
-                    valid_count / max(1, expected_sample_count)
-                ),
-            }
-        )
-        return canonical_delta_f, canonical_dff, baseline, state, qc
 
 
     # Helper for Unit Testing / Invariant Enforcement
