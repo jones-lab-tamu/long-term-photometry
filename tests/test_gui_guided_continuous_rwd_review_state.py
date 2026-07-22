@@ -48,14 +48,23 @@ def state_case(window, tmp_path, monkeypatch):
     return current, binding
 
 
-def test_initial_state_is_one_empty_optional_binding(window):
+def test_initial_state_keeps_scientific_authority_only_in_optional_binding(window):
     assert window._guided_continuous_rwd_review_binding is None
-    scientific_fields = {
+    continuous_fields = {
         name
         for name in vars(window)
         if name.startswith("_guided_continuous_rwd_")
     }
-    assert scientific_fields == {"_guided_continuous_rwd_review_binding"}
+    assert "_guided_continuous_rwd_review_binding" in continuous_fields
+    assert window._guided_continuous_rwd_check_thread is None
+    assert window._guided_continuous_rwd_check_worker is None
+    assert window._guided_continuous_rwd_check_active_token is None
+    assert not any("pending" in name for name in continuous_fields)
+    assert not any(
+        name != "_guided_continuous_rwd_review_binding"
+        and ("recording" in name or "evaluation" in name)
+        for name in continuous_fields
+    )
 
 
 def test_valid_binding_installs_and_invalid_object_is_refused(state_case, window):

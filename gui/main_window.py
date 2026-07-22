@@ -487,6 +487,18 @@ class _GuidedContinuousRwdRecordingCheckFailure:
     scientist_summary: str
 
 
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdRecordingCheckSnapshot:
+    token: int
+    input_source_path: str | None
+    resolved_input_source_path: str | None
+    input_format: str
+    acquisition_mode: str
+    discovered_roi_ids: tuple[str, ...]
+    included_roi_ids: tuple[str, ...]
+    excluded_roi_ids: tuple[str, ...]
+
+
 class _GuidedContinuousRwdRecordingCheckWorker(QObject):
     """Run the committed CR1-A -> B1 -> B2b check without GUI access."""
 
@@ -2743,6 +2755,13 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_stale_reason = ""
         self._guided_backend_validation_active = False
         self._guided_continuous_rwd_review_binding = None
+        self._guided_continuous_rwd_check_thread = None
+        self._guided_continuous_rwd_check_worker = None
+        self._guided_continuous_rwd_check_token = 0
+        self._guided_continuous_rwd_check_active_token = None
+        self._guided_continuous_rwd_check_snapshot = None
+        self._guided_continuous_rwd_check_terminal_token = None
+        self._guided_continuous_rwd_check_closing = False
         self._guided_startup_authority = None
         self._guided_execution_payload_result = None
         self._guided_run_readiness = None
@@ -3048,6 +3067,25 @@ class MainWindow(QMainWindow):
         self._guided_roi_discovery_progress.setTextVisible(False)
         self._guided_roi_discovery_progress.setVisible(False)
         roi_layout.addWidget(self._guided_roi_discovery_progress)
+
+        self._guided_continuous_rwd_check_status_label = QLabel("")
+        self._guided_continuous_rwd_check_status_label.setObjectName(
+            "guidedContinuousRwdCheckStatus"
+        )
+        self._guided_continuous_rwd_check_status_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_continuous_rwd_check_status_label.setWordWrap(True)
+        self._guided_continuous_rwd_check_status_label.setVisible(False)
+        roi_layout.addWidget(self._guided_continuous_rwd_check_status_label)
+        self._guided_continuous_rwd_check_progress = QProgressBar()
+        self._guided_continuous_rwd_check_progress.setObjectName(
+            "guidedContinuousRwdCheckProgress"
+        )
+        self._guided_continuous_rwd_check_progress.setRange(0, 0)
+        self._guided_continuous_rwd_check_progress.setTextVisible(False)
+        self._guided_continuous_rwd_check_progress.setVisible(False)
+        roi_layout.addWidget(self._guided_continuous_rwd_check_progress)
 
         self._guided_roi_list = QListWidget()
         self._guided_roi_list.setObjectName("guidedRoiList")
@@ -4953,6 +4991,32 @@ class MainWindow(QMainWindow):
                 "Guided Run In Progress",
                 "Guided Run is still running. Wait for it to finish before "
                 "closing.",
+            )
+            event.ignore()
+            return
+        recording_check_thread = getattr(
+            self, "_guided_continuous_rwd_check_thread", None
+        )
+        recording_check_worker = getattr(
+            self, "_guided_continuous_rwd_check_worker", None
+        )
+        if recording_check_worker is not None or (
+            recording_check_thread is not None
+            and recording_check_thread.isRunning()
+        ):
+            self._guided_continuous_rwd_check_closing = True
+            self._guided_continuous_rwd_check_token += 1
+            self._guided_continuous_rwd_check_active_token = None
+            self._guided_continuous_rwd_check_snapshot = None
+            if recording_check_worker is not None:
+                recording_check_worker.request_cancel()
+            if (
+                recording_check_thread is not None
+                and recording_check_thread.isRunning()
+            ):
+                recording_check_thread.quit()
+            self._set_guided_continuous_rwd_check_status(
+                "Cancelling the recording check before closing…", active=True
             )
             event.ignore()
             return
@@ -12295,6 +12359,285 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_outcome_revision = None
         self._refresh_guided_backend_validation_display()
         self._refresh_guided_continuous_rwd_review_binding_for_current_draft()
+
+    def _set_guided_continuous_rwd_check_status(
+        self, message: str, *, active: bool
+    ) -> None:
+        label = getattr(self, "_guided_continuous_rwd_check_status_label", None)
+        progress = getattr(self, "_guided_continuous_rwd_check_progress", None)
+        bounded = str(message or "").strip()
+        if label is not None:
+            label.setText(bounded)
+            label.setVisible(bool(bounded))
+        if progress is not None:
+            progress.setRange(0, 0)
+            progress.setTextVisible(False)
+            progress.setVisible(bool(active))
+
+    def _guided_continuous_rwd_check_callback_is_current(
+        self, token: int, worker
+    ) -> bool:
+        return bool(
+            not getattr(self, "_guided_continuous_rwd_check_closing", False)
+            and token
+            == getattr(self, "_guided_continuous_rwd_check_active_token", None)
+            and worker
+            is getattr(self, "_guided_continuous_rwd_check_worker", None)
+        )
+
+    def _start_guided_continuous_rwd_recording_check(self) -> bool:
+        if getattr(self, "_guided_continuous_rwd_check_closing", False):
+            return False
+        current_worker = getattr(
+            self, "_guided_continuous_rwd_check_worker", None
+        )
+        if current_worker is not None:
+            if getattr(self, "_guided_continuous_rwd_check_active_token", None) is not None:
+                self._guided_continuous_rwd_check_token += 1
+                self._guided_continuous_rwd_check_active_token = None
+                self._guided_continuous_rwd_check_snapshot = None
+                current_worker.request_cancel()
+                self._set_guided_continuous_rwd_check_status(
+                    "Cancelling the current recording check…", active=True
+                )
+            return False
+        if getattr(self, "_guided_roi_discovery_running", False):
+            self._set_guided_continuous_rwd_check_status(
+                "Finish selecting ROIs before checking the recording.",
+                active=False,
+            )
+            return False
+
+        try:
+            draft = self._build_guided_new_analysis_draft_plan()
+            if draft.input_format != "rwd" or draft.acquisition_mode != "continuous":
+                raise ValueError("current draft is not continuous RWD")
+            selected_folder = (
+                draft.resolved_input_source_path or draft.input_source_path
+            )
+            request = _GuidedContinuousRwdRecordingCheckRequest(
+                selected_acquisition_folder=selected_folder,
+                included_roi_ids=tuple(draft.included_roi_ids),
+            )
+        except (AttributeError, TypeError, ValueError):
+            self._set_guided_continuous_rwd_check_status(
+                "The current setup cannot be checked as a continuous RWD recording.",
+                active=False,
+            )
+            return False
+
+        self._guided_continuous_rwd_check_token += 1
+        token = self._guided_continuous_rwd_check_token
+        snapshot = _GuidedContinuousRwdRecordingCheckSnapshot(
+            token=token,
+            input_source_path=draft.input_source_path,
+            resolved_input_source_path=draft.resolved_input_source_path,
+            input_format=draft.input_format,
+            acquisition_mode=draft.acquisition_mode,
+            discovered_roi_ids=tuple(draft.discovered_roi_ids),
+            included_roi_ids=tuple(draft.included_roi_ids),
+            excluded_roi_ids=tuple(draft.excluded_roi_ids),
+        )
+        thread = QThread(self)
+        worker = _GuidedContinuousRwdRecordingCheckWorker(request)
+        worker.moveToThread(thread)
+        self._guided_continuous_rwd_check_thread = thread
+        self._guided_continuous_rwd_check_worker = worker
+        self._guided_continuous_rwd_check_active_token = token
+        self._guided_continuous_rwd_check_snapshot = snapshot
+        self._guided_continuous_rwd_check_terminal_token = None
+
+        thread.started.connect(worker.run)
+        worker.stage_changed.connect(
+            lambda stage, t=token, w=worker: (
+                self._on_guided_continuous_rwd_check_stage(t, w, stage)
+            )
+        )
+        worker.succeeded.connect(
+            lambda result, t=token, w=worker: (
+                self._on_guided_continuous_rwd_check_succeeded(t, w, result)
+            )
+        )
+        worker.failed.connect(
+            lambda failure, t=token, w=worker: (
+                self._on_guided_continuous_rwd_check_failed(t, w, failure)
+            )
+        )
+        worker.cancelled.connect(
+            lambda t=token, w=worker: (
+                self._on_guided_continuous_rwd_check_cancelled(t, w)
+            )
+        )
+        for terminal_signal in (
+            worker.succeeded,
+            worker.failed,
+            worker.cancelled,
+        ):
+            terminal_signal.connect(worker.deleteLater)
+            terminal_signal.connect(thread.quit)
+        thread.finished.connect(
+            lambda t=token, w=worker, th=thread: (
+                self._cleanup_guided_continuous_rwd_recording_check(t, w, th)
+            )
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._set_guided_continuous_rwd_check_status(
+            "Inspecting recording…", active=True
+        )
+        thread.start()
+        return True
+
+    def _cancel_guided_continuous_rwd_recording_check(self) -> None:
+        worker = getattr(self, "_guided_continuous_rwd_check_worker", None)
+        active_token = getattr(
+            self, "_guided_continuous_rwd_check_active_token", None
+        )
+        if worker is None or active_token is None:
+            return
+        self._guided_continuous_rwd_check_token += 1
+        self._guided_continuous_rwd_check_active_token = None
+        self._guided_continuous_rwd_check_snapshot = None
+        worker.request_cancel()
+        self._set_guided_continuous_rwd_check_status(
+            "Recording check cancelled.", active=False
+        )
+
+    def _on_guided_continuous_rwd_check_stage(
+        self, token: int, worker, stage: str
+    ) -> None:
+        if not self._guided_continuous_rwd_check_callback_is_current(token, worker):
+            return
+        messages = {
+            "inspecting_recording": "Inspecting recording…",
+            "checking_timestamp_continuity": "Checking timestamp continuity…",
+        }
+        self._set_guided_continuous_rwd_check_status(
+            messages.get(stage, "Checking recording…"), active=True
+        )
+
+    def _retire_guided_continuous_rwd_check(
+        self, token: int, worker, message: str
+    ) -> bool:
+        if not self._guided_continuous_rwd_check_callback_is_current(token, worker):
+            return False
+        self._guided_continuous_rwd_check_terminal_token = token
+        self._guided_continuous_rwd_check_active_token = None
+        self._guided_continuous_rwd_check_snapshot = None
+        self._set_guided_continuous_rwd_check_status(message, active=False)
+        return True
+
+    def _on_guided_continuous_rwd_check_succeeded(
+        self, token: int, worker, success
+    ) -> None:
+        if not self._guided_continuous_rwd_check_callback_is_current(token, worker):
+            return
+        if not isinstance(success, _GuidedContinuousRwdRecordingCheckSuccess):
+            self._retire_guided_continuous_rwd_check(
+                token, worker, "The recording could not be checked."
+            )
+            return
+        snapshot = getattr(self, "_guided_continuous_rwd_check_snapshot", None)
+        try:
+            draft = self._build_guided_new_analysis_draft_plan()
+            if not isinstance(snapshot, _GuidedContinuousRwdRecordingCheckSnapshot):
+                raise ValueError("recording-check snapshot is unavailable")
+            current_source_facts = (
+                draft.input_source_path,
+                draft.resolved_input_source_path,
+                draft.input_format,
+                draft.acquisition_mode,
+            )
+            captured_source_facts = (
+                snapshot.input_source_path,
+                snapshot.resolved_input_source_path,
+                snapshot.input_format,
+                snapshot.acquisition_mode,
+            )
+            if current_source_facts != captured_source_facts:
+                raise ValueError("recording-check source authority changed")
+            if draft.input_format != "rwd" or draft.acquisition_mode != "continuous":
+                raise ValueError("current draft is not continuous RWD")
+            self._set_guided_continuous_rwd_check_status(
+                "Preparing Review…", active=True
+            )
+            from photometry_pipeline.guided_continuous_rwd_review_binding import (
+                build_guided_continuous_rwd_review_binding,
+            )
+
+            binding = build_guided_continuous_rwd_review_binding(
+                draft,
+                recording=success.recording,
+                continuity_evaluation=success.continuity_evaluation,
+                current_source_path=success.current_source_path,
+            )
+        except (AttributeError, TypeError, ValueError):
+            self._retire_guided_continuous_rwd_check(
+                token,
+                worker,
+                "Setup changed while the recording was checked. "
+                "Check the recording again.",
+            )
+            return
+
+        if not self._retire_guided_continuous_rwd_check(
+            token, worker, "Recording check completed."
+        ):
+            return
+        try:
+            self._set_guided_continuous_rwd_review_binding(binding)
+        except (AttributeError, TypeError, ValueError):
+            self._set_guided_continuous_rwd_check_status(
+                "The recording could not be prepared for Review.", active=False
+            )
+
+    def _on_guided_continuous_rwd_check_failed(
+        self, token: int, worker, failure
+    ) -> None:
+        if not self._guided_continuous_rwd_check_callback_is_current(token, worker):
+            return
+        summary = "The recording could not be checked."
+        if isinstance(failure, _GuidedContinuousRwdRecordingCheckFailure):
+            candidate = failure.scientist_summary
+            if isinstance(candidate, str) and 0 < len(candidate.strip()) <= 500:
+                summary = candidate.strip()
+        self._retire_guided_continuous_rwd_check(token, worker, summary)
+
+    def _on_guided_continuous_rwd_check_cancelled(
+        self, token: int, worker
+    ) -> None:
+        self._retire_guided_continuous_rwd_check(
+            token, worker, "Recording check cancelled."
+        )
+
+    def _cleanup_guided_continuous_rwd_recording_check(
+        self, token: int, worker, thread
+    ) -> None:
+        if (
+            worker is not getattr(self, "_guided_continuous_rwd_check_worker", None)
+            or thread is not getattr(self, "_guided_continuous_rwd_check_thread", None)
+        ):
+            return
+        unexpected = bool(
+            token == getattr(self, "_guided_continuous_rwd_check_active_token", None)
+            and token
+            != getattr(self, "_guided_continuous_rwd_check_terminal_token", None)
+            and not getattr(self, "_guided_continuous_rwd_check_closing", False)
+        )
+        self._guided_continuous_rwd_check_worker = None
+        self._guided_continuous_rwd_check_thread = None
+        self._guided_continuous_rwd_check_closing = False
+        if token == getattr(self, "_guided_continuous_rwd_check_active_token", None):
+            self._guided_continuous_rwd_check_active_token = None
+            self._guided_continuous_rwd_check_snapshot = None
+        if token == getattr(self, "_guided_continuous_rwd_check_terminal_token", None):
+            self._guided_continuous_rwd_check_terminal_token = None
+        progress = getattr(self, "_guided_continuous_rwd_check_progress", None)
+        if progress is not None:
+            progress.setVisible(False)
+        if unexpected:
+            self._set_guided_continuous_rwd_check_status(
+                "The recording could not be checked.", active=False
+            )
 
     def _set_guided_continuous_rwd_review_binding(self, binding) -> None:
         from photometry_pipeline.guided_continuous_rwd_review_binding import (
