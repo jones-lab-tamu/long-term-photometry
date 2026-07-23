@@ -161,7 +161,7 @@ from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstr
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
 from tools.run_applied_dff_batch import AppliedDffBatchError, run_applied_dff_batch
 import dataclasses
-from typing import get_args
+from typing import Callable, get_args
 
 
 class _GuidedFeaturePreviewPlot(QWidget):
@@ -861,6 +861,171 @@ class _GuidedCompletedReviewLoadWorker(QObject):
         self.succeeded.emit(dict(overview))
 
 
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdExecutionRequest:
+    """Bundles the already-accepted continuous-RWD authorities needed to
+    execute exactly one accepted backend entry point (CR1-E2).
+
+    Every field is forwarded unchanged to the selected backend
+    (``photometry_pipeline.guided_continuous_rwd_{correction,tonic,phasic,
+    combined}_run.execute_guided_continuous_rwd_*_run``) -- this request
+    object and the worker that consumes it never rebuild, recompute, or
+    reinterpret any of them. There is currently no Guided-review GUI code
+    path that assembles these authorities from a live session (only
+    ``review_binding`` exists as ``MainWindow`` state today); callers build
+    this request the same way the accepted continuous-RWD backend test
+    fixtures already do, directly from the accepted setup/review authority
+    builders.
+    """
+
+    review_binding: object
+    target_grid: object
+    block_plan: object
+    segment_plan: object
+    dynamic_f0_authority: object
+    accepted_draft: object
+    startup_mapping_contract: object
+    output_base: str
+    config: object
+    cancellation_requested: Callable[[], bool] | None = None
+
+
+def _guided_continuous_rwd_analysis_selection(accepted_draft) -> tuple[bool, bool]:
+    """Derive ``(tonic_analysis, phasic_analysis)`` from the accepted
+    execution intent already carried by Guided review -- the same
+    ``execution_intent.execution_mode`` field
+    (``photometry_pipeline.guided_new_analysis_plan.
+    GuidedNewAnalysisExecutionIntent``) the intermittent path already uses
+    for this exact selection. Never inferred from output directories, tab
+    visibility, cached widget state, or ``Config`` defaults (CR1-E2 handoff
+    section 8).
+
+    Fails closed for anything outside the three recognized values. There is
+    currently no accepted Guided-review signal requesting a correction-only
+    continuous run; see the CR1-E2 implementation report.
+    """
+    mode = accepted_draft.execution_intent.execution_mode
+    if mode == "both":
+        return True, True
+    if mode == "tonic":
+        return True, False
+    if mode == "phasic":
+        return False, True
+    raise ValueError(
+        "The accepted Guided plan's execution mode "
+        f"({mode!r}) is not a recognized continuous-RWD analysis selection."
+    )
+
+
+def _select_guided_continuous_rwd_backend(tonic_analysis: bool, phasic_analysis: bool):
+    """Return the one accepted backend entry point for this analysis
+    combination. Exactly one public backend function is ever selected; none
+    are called to synthesize a result for another (CR1-E2 handoff section
+    6)."""
+    from photometry_pipeline.guided_continuous_rwd_combined_run import (
+        execute_guided_continuous_rwd_combined_run,
+    )
+    from photometry_pipeline.guided_continuous_rwd_correction_run import (
+        execute_guided_continuous_rwd_correction_run,
+    )
+    from photometry_pipeline.guided_continuous_rwd_phasic_run import (
+        execute_guided_continuous_rwd_phasic_run,
+    )
+    from photometry_pipeline.guided_continuous_rwd_tonic_run import (
+        execute_guided_continuous_rwd_tonic_run,
+    )
+
+    if tonic_analysis and phasic_analysis:
+        return execute_guided_continuous_rwd_combined_run
+    if tonic_analysis:
+        return execute_guided_continuous_rwd_tonic_run
+    if phasic_analysis:
+        return execute_guided_continuous_rwd_phasic_run
+    return execute_guided_continuous_rwd_correction_run
+
+
+def _guided_continuous_rwd_execution_is_cancellation(exc: Exception) -> bool:
+    """Classify a genuine continuous-RWD backend exception as cancellation
+    using the exact (exception type, category) pairs the accepted backends
+    themselves already define -- never a new worker-specific cancellation
+    category (CR1-E2 handoff section 23/24)."""
+    from photometry_pipeline.guided_continuous_rwd_phasic_run import (
+        _is_lower_layer_cancellation,
+    )
+
+    return bool(_is_lower_layer_cancellation(exc))
+
+
+def _execute_guided_continuous_rwd(
+    execution_request: "_GuidedContinuousRwdExecutionRequest",
+):
+    """Execute exactly one accepted continuous-RWD backend for the analysis
+    selection the accepted Guided plan already carries.
+
+    This is the sole continuous-RWD execution decision point (CR1-E2
+    handoff section 18): analysis-family selection, ROI-authority
+    consistency, and the confirmed-feature-settings gate are all checked
+    here, once, before any backend is invoked -- never duplicated in
+    ``MainWindow``, the worker, or a backend module.
+    """
+    from photometry_pipeline.guided_backend_validation_request import (
+        is_saved_feature_event_profile_current,
+    )
+
+    accepted_draft = execution_request.accepted_draft
+    review_binding = execution_request.review_binding
+
+    # acquisition_mode == "continuous" alone is not a sufficient discriminant:
+    # the older chunked custom_tabular continuous-output workflow
+    # (tools/run_full_pipeline_deliverables.py) also declares it. input_format
+    # == "rwd" is required in addition, mirroring the CR1-E1-B Results-side
+    # lesson (gui/run_report_parser.is_continuous_rwd_run_mode).
+    if (
+        getattr(accepted_draft, "acquisition_mode", None) != "continuous"
+        or getattr(accepted_draft, "input_format", None) != "rwd"
+    ):
+        raise ValueError(
+            "The accepted Guided plan is not a continuous-RWD analysis; "
+            "this execution path only runs continuous-RWD backends."
+        )
+
+    accepted_roi_ids = tuple(accepted_draft.included_roi_ids)
+    review_roi_ids = tuple(review_binding.recording.roi.included_roi_ids)
+    if accepted_roi_ids != review_roi_ids:
+        raise ValueError(
+            "The accepted Guided plan's included regions do not match the "
+            "accepted continuous review binding's regions; this run cannot "
+            "be executed."
+        )
+
+    tonic_analysis, phasic_analysis = _guided_continuous_rwd_analysis_selection(
+        accepted_draft
+    )
+
+    if phasic_analysis and not is_saved_feature_event_profile_current(
+        accepted_draft.feature_event_profile_status,
+        accepted_draft.feature_event_explicitly_applied,
+    ):
+        raise ValueError(
+            "Phasic event analysis was selected, but confirmed "
+            "feature-detection settings are not available for this plan."
+        )
+
+    backend = _select_guided_continuous_rwd_backend(tonic_analysis, phasic_analysis)
+    return backend(
+        execution_request.review_binding,
+        execution_request.target_grid,
+        execution_request.block_plan,
+        execution_request.segment_plan,
+        execution_request.dynamic_f0_authority,
+        accepted_draft=execution_request.accepted_draft,
+        startup_mapping_contract=execution_request.startup_mapping_contract,
+        output_base=execution_request.output_base,
+        config=execution_request.config,
+        cancellation_requested=execution_request.cancellation_requested,
+    )
+
+
 class _GuidedRunExecutionWorker(QObject):
     """Runs the existing synchronous Guided backend execution seam off the GUI thread.
 
@@ -871,17 +1036,37 @@ class _GuidedRunExecutionWorker(QObject):
     `MainWindow` and calls only the module-level `execute_guided_backend_run`
     function; it must never call a MainWindow method or read a MainWindow
     attribute, since it runs on a separate thread.
+
+    `continuous_execution` (CR1-E2) is an optional
+    `_GuidedContinuousRwdExecutionRequest`. When supplied, `run()` executes
+    exactly one accepted continuous-RWD backend instead of
+    `execute_guided_backend_run`, and `request`/`runner` are ignored. No
+    existing call site passes this parameter yet -- Guided continuous Run
+    remains hidden/disabled; this is the internal execution bridge only.
     """
 
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, request, runner):
+    def __init__(self, request, runner, continuous_execution=None):
         super().__init__()
         self._request = request
         self._runner = runner
+        self._continuous_execution = continuous_execution
 
     def run(self) -> None:
+        if self._continuous_execution is not None:
+            try:
+                result = _execute_guided_continuous_rwd(self._continuous_execution)
+            except Exception as exc:
+                if _guided_continuous_rwd_execution_is_cancellation(exc):
+                    self.failed.emit(f"cancelled: {exc}")
+                else:
+                    self.failed.emit(f"{type(exc).__name__}: {exc}")
+                return
+            self.succeeded.emit(result)
+            return
+
         from photometry_pipeline.guided_backend_execution import (
             execute_guided_backend_run,
         )

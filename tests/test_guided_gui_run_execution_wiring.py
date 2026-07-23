@@ -899,7 +899,12 @@ def test_run_worker_does_not_reference_main_window():
     init_params = list(
         inspect.signature(_GuidedRunExecutionWorker.__init__).parameters
     )
-    assert init_params == ["self", "request", "runner"]
+    # CR1-E2 added one optional `continuous_execution` parameter (default
+    # None) for the internal continuous-RWD execution bridge; no existing
+    # call site passes it and the intermittent request/runner contract is
+    # unchanged (see test_no_existing_call_site_passes_continuous_execution
+    # in tests/test_guided_continuous_rwd_execution_worker.py).
+    assert init_params == ["self", "request", "runner", "continuous_execution"]
 
     run_source = inspect.getsource(_GuidedRunExecutionWorker.run)
     assert "execute_guided_backend_run(" in run_source
