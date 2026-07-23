@@ -91,7 +91,21 @@ _FS_HZ_TOLERANCE_HZ = 1e-9
 
 class GuidedContinuousRwdPhasicDetectionError(RuntimeError):
     """A narrow refusal while reconstructing one continuous ROI trace or
-    running the existing phasic detector against it."""
+    running the existing phasic detector against it.
+
+    ``category`` is empty for every ordinary validation/detection refusal.
+    The one narrow exception is cancellation: :func:`_check_cancellation`
+    sets ``category="phasic_detection_interrupted"`` when the caller's
+    cancellation callback actually returns true, so a caller can distinguish
+    "cancellation was requested" from every other failure by an exact
+    ``(type, category)`` pair rather than by parsing message text -- the same
+    convention ``guided_continuous_rwd_correction_pass._is_lower_layer_
+    cancellation`` already uses for its own lower-layer exceptions.
+    """
+
+    def __init__(self, message: str, *, category: str = "") -> None:
+        super().__init__(message)
+        self.category = category
 
 
 @dataclass(frozen=True)
@@ -140,7 +154,8 @@ def _check_cancellation(callback: Callable[[], bool] | None) -> None:
         )
     if callback():
         raise GuidedContinuousRwdPhasicDetectionError(
-            "Continuous phasic detection was cancelled."
+            "Continuous phasic detection was cancelled.",
+            category="phasic_detection_interrupted",
         )
 
 
