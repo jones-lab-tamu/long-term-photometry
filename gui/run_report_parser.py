@@ -200,6 +200,21 @@ def classify_completed_run_terminal_state(run_dir: str):
     return classify_run_terminal_state(run_dir)
 
 
+def is_continuous_rwd_run_mode(run_mode: Dict[str, Any]) -> bool:
+    """True only for a completed CR1 continuous-RWD run (the accepted
+    ``guided_continuous_rwd_{correction,tonic,phasic,combined}`` producers),
+    never for the older chunked "continuous acquisition" full-pipeline mode.
+
+    Both share ``acquisition_mode == "continuous"`` and
+    ``deliverable_profile == "continuous"`` in the normalized run mode, so
+    neither field alone distinguishes them; ``run_profile`` does, since only
+    the CR1 continuous-RWD producers use the ``guided_continuous_rwd_``
+    prefix (see CR1-E1-B handoff section 4/7 and the completed-run routing
+    in ``gui/run_report_viewer.py`` / ``gui/main_window.py``).
+    """
+    return str(run_mode.get("run_profile", "")).startswith("guided_continuous_rwd_")
+
+
 def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
     """Return plain-language completion text for the existing Review surface.
 

@@ -59,6 +59,7 @@ from gui.run_report_parser import (
     is_successful_completed_run_dir,
     resolve_region_deliverables,
     classify_completed_run_candidate,
+    is_continuous_rwd_run_mode,
 )
 from gui.validate_run_policy import (
     compute_run_signature,
@@ -144,6 +145,12 @@ from photometry_pipeline.guided_recording_structure_inference import (
 from photometry_pipeline.completed_run_review import (
     load_completed_review_overview,
 )
+from photometry_pipeline.completed_continuous_rwd_review import (
+    CompletedContinuousRwdReviewError,
+    ContinuousRunOverview,
+    load_continuous_run_overview,
+)
+from photometry_pipeline.run_completion_contract import classify_run_terminal_state
 from photometry_pipeline.signal_only_f0_diagnostics import (
     build_default_signal_only_f0_diagnostic_cache_output_dir,
     make_signal_only_f0_diagnostic_id,
@@ -812,7 +819,15 @@ class _GuidedCorrectionPreviewWorker(QObject):
 
 
 class _GuidedCompletedReviewLoadWorker(QObject):
-    """Read one compact completed-run overview without retaining GUI state."""
+    """Read one compact completed-run overview without retaining GUI state.
+
+    Branches to the continuous-RWD review loader (CR1-E1-A) for a completed
+    continuous recording, emitting a `ContinuousRunOverview` instead of a
+    dict; callers distinguish the two by type (see CR1-E1-B handoff section
+    7). This never routes a continuous run through the intermittent
+    `load_completed_review_overview`, which requires provenance evidence the
+    continuous producers do not write.
+    """
 
     succeeded = Signal(object)
     failed = Signal(str)
@@ -823,6 +838,22 @@ class _GuidedCompletedReviewLoadWorker(QObject):
 
     def run(self) -> None:
         try:
+            classification = classify_run_terminal_state(self._run_dir)
+            routing_run_mode = classification.run_mode or {}
+            if classification.is_success and is_continuous_rwd_run_mode(
+                routing_run_mode
+            ):
+                try:
+                    overview = load_continuous_run_overview(self._run_dir)
+                except CompletedContinuousRwdReviewError as exc:
+                    # Already scientist-facing text (see
+                    # completed_continuous_rwd_review.py); no exception-class
+                    # prefix here. Unlike the generic branch below, this is
+                    # not a technical/unexpected failure.
+                    self.failed.emit(str(exc))
+                    return
+                self.succeeded.emit(overview)
+                return
             overview = load_completed_review_overview(self._run_dir)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -4213,13 +4244,20 @@ class MainWindow(QMainWindow):
     ) -> None:
         selected = str(self._guided_start_open_results_path or "")
         guided_viewer = getattr(self, "_guided_report_viewer", None)
-        loaded = bool(
-            selected
-            and guided_viewer is not None
-            and guided_viewer.load_report(
-                selected, review_overview=dict(overview)
+        if isinstance(overview, ContinuousRunOverview):
+            loaded = bool(
+                selected
+                and guided_viewer is not None
+                and guided_viewer.load_continuous_results(selected, overview)
             )
-        )
+        else:
+            loaded = bool(
+                selected
+                and guided_viewer is not None
+                and guided_viewer.load_report(
+                    selected, review_overview=dict(overview)
+                )
+            )
         if not loaded:
             technical_reason = (
                 guided_viewer._status_label.text()
@@ -14405,13 +14443,20 @@ class MainWindow(QMainWindow):
         )
         self._set_guided_completed_review_loading(False)
         guided_viewer = getattr(self, "_guided_report_viewer", None)
-        loaded = bool(
-            candidate
-            and guided_viewer is not None
-            and guided_viewer.load_report(
-                candidate, review_overview=dict(overview)
+        if isinstance(overview, ContinuousRunOverview):
+            loaded = bool(
+                candidate
+                and guided_viewer is not None
+                and guided_viewer.load_continuous_results(candidate, overview)
             )
-        )
+        else:
+            loaded = bool(
+                candidate
+                and guided_viewer is not None
+                and guided_viewer.load_report(
+                    candidate, review_overview=dict(overview)
+                )
+            )
         label = getattr(self, "_guided_run_readiness_label", None)
         if not loaded:
             if guided_viewer is not None:

@@ -4,6 +4,8 @@ RunReportViewer
 Complete-state results workspace driven by run outputs under <run_dir>.
 """
 
+import io
+import math
 import os
 import re
 from typing import Dict, List, Tuple
@@ -21,6 +23,10 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QComboBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QApplication,
 )
 
 from gui.run_report_parser import (
@@ -30,6 +36,7 @@ from gui.run_report_parser import (
     resolve_region_deliverables,
     classify_completed_run_terminal_state,
     get_scientist_completion_summary,
+    is_continuous_rwd_run_mode,
 )
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from photometry_pipeline.guided_completed_applied_dff_reload import (
@@ -50,6 +57,15 @@ from photometry_pipeline.completed_run_review import (
     format_tonic_settings_summary,
     load_completed_phasic_review,
 )
+from photometry_pipeline.completed_continuous_rwd_review import (
+    CompletedContinuousRwdReviewError,
+    ContinuousRunOverview,
+    load_continuous_phasic_events,
+    load_continuous_roi_trace,
+    load_continuous_run_overview,
+    load_continuous_window_summary,
+)
+from photometry_pipeline.continuous_outputs import CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
 
 
 TAB_VERIFICATION = "Verification"
@@ -83,6 +99,8 @@ class RunReportViewer(QWidget):
 
         self._current_run_dir = ""
         self._run_summary_path = ""
+        self._continuous_overview: ContinuousRunOverview | None = None
+        self._continuous_selected_roi = ""
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._phasic_review_model: CompletedRunReviewModel | None = None
@@ -337,7 +355,134 @@ class RunReportViewer(QWidget):
         ws.setStretch(3, 1)
         root.addWidget(self._workspace, 1)
 
+        self._continuous_workspace = self._build_continuous_workspace()
+        root.addWidget(self._continuous_workspace, 1)
+
         self.clear()
+
+    def _build_continuous_workspace(self) -> QWidget:
+        """Build the continuous-recording Results presentation (CR1-E1-B).
+
+        One recording, one shared ROI selector, and up to two analysis tabs
+        (Tonic/Phasic) added only for analyses that actually ran -- never one
+        tab per ROI, never a fabricated empty tab. See the CR1-E1-B handoff,
+        section 9.
+        """
+        workspace = QWidget()
+        workspace.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        cw = QVBoxLayout(workspace)
+        cw.setContentsMargins(0, 0, 0, 0)
+        cw.setSpacing(6)
+
+        self._continuous_overview_label = QLabel("")
+        self._continuous_overview_label.setObjectName("continuousRunOverviewLabel")
+        self._continuous_overview_label.setWordWrap(True)
+        self._continuous_overview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._continuous_overview_label.setFrameShape(QFrame.StyledPanel)
+        self._continuous_overview_label.setContentsMargins(8, 6, 8, 6)
+        cw.addWidget(self._continuous_overview_label)
+
+        self._continuous_roi_row = QWidget()
+        roi_row = QHBoxLayout(self._continuous_roi_row)
+        roi_row.setContentsMargins(0, 0, 0, 0)
+        roi_row.addWidget(QLabel("Region:"))
+        self._continuous_roi_combo = QComboBox()
+        self._continuous_roi_combo.setToolTip(
+            "Select the region of interest shown in the continuous results viewer."
+        )
+        self._continuous_roi_combo.currentIndexChanged.connect(
+            self._on_continuous_roi_changed
+        )
+        roi_row.addWidget(self._continuous_roi_combo, 1)
+        cw.addWidget(self._continuous_roi_row)
+
+        self._continuous_tabs = QTabWidget()
+        self._continuous_tabs.setToolTip(
+            "Available continuous analysis views for the selected region."
+        )
+        cw.addWidget(self._continuous_tabs, 1)
+
+        self._continuous_tonic_page = QWidget()
+        (
+            self._continuous_tonic_image_label,
+            self._continuous_tonic_scroll,
+            self._continuous_tonic_interaction,
+            self._continuous_tonic_summary_table,
+        ) = self._build_continuous_analysis_page(
+            self._continuous_tonic_page,
+            "No tonic trace loaded.",
+            "continuousTonicSummaryTable",
+        )
+
+        self._continuous_phasic_page = QWidget()
+        (
+            self._continuous_phasic_image_label,
+            self._continuous_phasic_scroll,
+            self._continuous_phasic_interaction,
+            self._continuous_phasic_summary_table,
+        ) = self._build_continuous_analysis_page(
+            self._continuous_phasic_page,
+            "No phasic trace loaded.",
+            "continuousPhasicSummaryTable",
+            event_count_label_name="continuousPhasicEventCountLabel",
+        )
+        self._continuous_phasic_event_count_label = self._continuous_phasic_page.findChild(
+            QLabel, "continuousPhasicEventCountLabel"
+        )
+
+        return workspace
+
+    def _build_continuous_analysis_page(
+        self,
+        page: QWidget,
+        placeholder_text: str,
+        table_object_name: str,
+        *,
+        event_count_label_name: str | None = None,
+    ) -> Tuple[InteractiveImageLabel, QScrollArea, InteractiveImageController, QTableWidget]:
+        """Build one Tonic/Phasic analysis tab page: an in-memory-rendered
+        trace image plus the persisted per-window summary table."""
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        image_label = InteractiveImageLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setStyleSheet(
+            "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
+        )
+        image_label.setText(placeholder_text)
+        image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setAlignment(Qt.AlignCenter)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(image_label)
+        scroll.setMinimumHeight(220)
+        layout.addWidget(scroll, 1)
+
+        interaction = InteractiveImageController(
+            label=image_label,
+            scroll_area=scroll,
+            set_hint_text=lambda _text: None,
+            fit_hint="",
+            zoom_hint="",
+            allow_upscale_in_fit=True,
+        )
+
+        if event_count_label_name:
+            event_count_label = QLabel("")
+            event_count_label.setObjectName(event_count_label_name)
+            layout.addWidget(event_count_label)
+
+        table = QTableWidget(0, 0)
+        table.setObjectName(table_object_name)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.setMaximumHeight(220)
+        layout.addWidget(table)
+
+        return image_label, scroll, interaction, table
 
     def _on_applied_dff_details_toggled(self, checked: bool) -> None:
         self._applied_dff_details_label.setVisible(bool(checked))
@@ -383,6 +528,17 @@ class RunReportViewer(QWidget):
         """Reset to idle/placeholder state."""
         self._current_run_dir = ""
         self._run_summary_path = ""
+        self._continuous_overview = None
+        self._continuous_selected_roi = ""
+        self._continuous_overview_label.setText("")
+        self._continuous_roi_row.setVisible(False)
+        self._continuous_roi_combo.blockSignals(True)
+        self._continuous_roi_combo.clear()
+        self._continuous_roi_combo.blockSignals(False)
+        self._continuous_tabs.setVisible(False)
+        self._clear_continuous_tonic_display()
+        self._clear_continuous_phasic_display()
+        self._continuous_workspace.hide()
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._refresh_applied_dff_display()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
@@ -436,6 +592,14 @@ class RunReportViewer(QWidget):
         """Load complete-state workspace from a run directory."""
         self.clear()
         self._current_run_dir = out_dir
+
+        if review_overview is None:
+            routing_classification = classify_completed_run_terminal_state(out_dir)
+            routing_run_mode = routing_classification.run_mode or {}
+            if routing_classification.is_success and is_continuous_rwd_run_mode(
+                routing_run_mode
+            ):
+                return self.load_continuous_results(out_dir)
 
         run_report_path = os.path.join(out_dir, "run_report.json")
         data, parse_err = parse_run_report(run_report_path)
@@ -638,6 +802,349 @@ class RunReportViewer(QWidget):
             self._refresh_inline_actions()
 
         return True
+
+    def load_continuous_results(
+        self,
+        run_dir: str,
+        overview: ContinuousRunOverview | None = None,
+    ) -> bool:
+        """Load the read-only continuous-recording Results presentation
+        (CR1-E1-B).
+
+        The sole continuous loading/validation layer is
+        ``photometry_pipeline.completed_continuous_rwd_review`` (CR1-E1-A):
+        this method never parses run_report.json, summary CSVs, event CSVs,
+        or HDF5 caches directly. ``overview`` may be supplied already-loaded
+        (the Guided entry point loads it once, off the GUI thread, to decide
+        routing) or left unset so this method loads it itself (the Full
+        Control entry point).
+        """
+        self.clear()
+        self._current_run_dir = run_dir
+
+        if overview is None:
+            try:
+                overview = load_continuous_run_overview(run_dir)
+            except CompletedContinuousRwdReviewError as exc:
+                self._set_status_message(str(exc), level="error")
+                return False
+
+        self._continuous_overview = overview
+        self._run_summary_path = os.path.join(overview.run_dir, "run_report.json")
+        self._set_status_message(
+            "Results workspace — continuous recording", level="ready"
+        )
+        self._populate_continuous_overview(overview)
+        self._rebuild_continuous_tabs(overview)
+
+        self._continuous_roi_combo.blockSignals(True)
+        self._continuous_roi_combo.clear()
+        self._continuous_roi_combo.addItems(list(overview.included_roi_ids))
+        self._continuous_roi_combo.blockSignals(False)
+        self._continuous_roi_row.setVisible(
+            bool(overview.tonic_analysis or overview.phasic_analysis)
+        )
+
+        if self._continuous_roi_combo.count() > 0 and (
+            overview.tonic_analysis or overview.phasic_analysis
+        ):
+            self._continuous_roi_combo.blockSignals(True)
+            self._continuous_roi_combo.setCurrentIndex(0)
+            self._continuous_roi_combo.blockSignals(False)
+            initial_roi_id = self._continuous_roi_combo.currentText().strip()
+            if not self._select_continuous_roi(overview, initial_roi_id, is_initial=True):
+                # The scientist-facing CompletedContinuousRwdReviewError text
+                # is already in the status label (set by
+                # _select_continuous_roi); neither workspace may be shown,
+                # and there is no fallback to the intermittent loader.
+                return False
+
+        self._workspace.hide()
+        self._continuous_workspace.show()
+        return True
+
+    @staticmethod
+    def _format_recording_duration(total_sec: float) -> str:
+        """Render a total recording duration as simple scientist-facing
+        text -- never only a sample/second count (see CR1-E1-B handoff
+        section 14)."""
+        total_sec = max(0.0, float(total_sec))
+        days, remainder_sec = divmod(total_sec, 86400.0)
+        hours, remainder_sec = divmod(remainder_sec, 3600.0)
+        minutes, _seconds = divmod(remainder_sec, 60.0)
+        days, hours, minutes = int(days), int(hours), int(minutes)
+        if days > 0:
+            return f"{days} d {hours} h {minutes} min"
+        return f"{hours} h {minutes} min"
+
+    def _populate_continuous_overview(self, overview: ContinuousRunOverview) -> None:
+        total_duration_sec = (
+            overview.final_window.end_sec if overview.final_window is not None else 0.0
+        )
+        lines = [
+            "Continuous recording",
+            "Regions of interest: " + ", ".join(overview.included_roi_ids),
+            "Correction: Completed" if overview.correction_completed else "Correction: Not completed",
+            "Tonic analysis: " + ("Completed" if overview.tonic_analysis else "Not run"),
+            "Phasic event analysis: " + ("Completed" if overview.phasic_analysis else "Not run"),
+            "Recording duration: " + self._format_recording_duration(total_duration_sec),
+            "Analysis windows: " + str(overview.corrected_segment_count),
+        ]
+        self._continuous_overview_label.setText("\n".join(lines))
+
+    def _rebuild_continuous_tabs(self, overview: ContinuousRunOverview) -> None:
+        """Show only the Tonic/Phasic tabs for analyses that actually
+        completed -- never a fabricated empty tab for an analysis that did
+        not run (see CR1-E1-B handoff section 9)."""
+        while self._continuous_tabs.count() > 0:
+            self._continuous_tabs.removeTab(0)
+        if overview.tonic_analysis:
+            self._continuous_tabs.addTab(self._continuous_tonic_page, "Tonic")
+        if overview.phasic_analysis:
+            self._continuous_tabs.addTab(self._continuous_phasic_page, "Phasic")
+        has_any = overview.tonic_analysis or overview.phasic_analysis
+        self._continuous_tabs.setVisible(has_any)
+        if self._continuous_tabs.count() > 0:
+            self._continuous_tabs.setCurrentIndex(0)
+
+    def _clear_continuous_tonic_display(self) -> None:
+        self._continuous_tonic_interaction.clear(
+            "No tonic trace loaded.", fallback_width=640, fallback_height=320
+        )
+        self._continuous_tonic_summary_table.setRowCount(0)
+        self._continuous_tonic_summary_table.setColumnCount(0)
+
+    def _clear_continuous_phasic_display(self) -> None:
+        self._continuous_phasic_interaction.clear(
+            "No phasic trace loaded.", fallback_width=640, fallback_height=320
+        )
+        self._continuous_phasic_summary_table.setRowCount(0)
+        self._continuous_phasic_summary_table.setColumnCount(0)
+        self._continuous_phasic_event_count_label.setText("")
+
+    def _on_continuous_roi_changed(self, _index: int) -> None:
+        overview = self._continuous_overview
+        if overview is None:
+            return
+        roi_id = self._continuous_roi_combo.currentText().strip()
+        if not roi_id:
+            return
+        self._select_continuous_roi(overview, roi_id, is_initial=False)
+
+    def _select_continuous_roi(
+        self,
+        overview: ContinuousRunOverview,
+        roi_id: str,
+        *,
+        is_initial: bool,
+    ) -> bool:
+        """Atomically load and display one ROI's requested continuous
+        analyses: every requested family (tonic and/or phasic) is loaded and
+        rendered to an in-memory pixmap/table first, and the visible display
+        is only replaced once every requested load has succeeded. A single
+        family failing never leaves one section showing the new ROI while
+        another still shows the old one, and never leaves a partial
+        trace/table/event-count visible.
+
+        On the initial load (``is_initial=True``) there is no previously
+        displayed ROI to fall back to, so failure clears every continuous
+        display instead of restoring a selection. On a later ROI switch,
+        failure restores the ROI selector and every display to the last
+        successfully shown ROI. Returns whether ``roi_id`` is now fully and
+        successfully displayed.
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            tonic_data, phasic_data = self._load_continuous_roi_data(overview, roi_id)
+        except CompletedContinuousRwdReviewError as exc:
+            QApplication.restoreOverrideCursor()
+            self._set_status_message(str(exc), level="error")
+            if is_initial or not self._continuous_selected_roi:
+                self._clear_continuous_tonic_display()
+                self._clear_continuous_phasic_display()
+            else:
+                self._restore_continuous_roi_selector(self._continuous_selected_roi)
+            return False
+        QApplication.restoreOverrideCursor()
+
+        self._apply_continuous_roi_data(roi_id, tonic_data, phasic_data)
+        self._continuous_selected_roi = roi_id
+        return True
+
+    def _restore_continuous_roi_selector(self, roi_id: str) -> None:
+        """Restore the ROI selector to ``roi_id`` without re-triggering
+        another load attempt (the last successful display for that ROI is
+        already showing and must not be touched)."""
+        if not roi_id:
+            return
+        idx = self._continuous_roi_combo.findText(roi_id)
+        if idx < 0:
+            return
+        self._continuous_roi_combo.blockSignals(True)
+        self._continuous_roi_combo.setCurrentIndex(idx)
+        self._continuous_roi_combo.blockSignals(False)
+
+    def _load_continuous_roi_data(
+        self, overview: ContinuousRunOverview, roi_id: str
+    ):
+        """Load and render every analysis family requested for ``roi_id``
+        without touching any visible widget. Raises
+        ``CompletedContinuousRwdReviewError`` on the first failure, leaving
+        no widget mutated."""
+        tonic_data = None
+        phasic_data = None
+        if overview.tonic_analysis:
+            trace = load_continuous_roi_trace(
+                overview.run_dir, family="tonic", roi_id=roi_id
+            )
+            pixmap = self._render_continuous_trace_pixmap(
+                trace.time_sec,
+                trace.primary_trace,
+                title=f"{roi_id} — {trace.primary_trace_label}",
+                y_label=trace.primary_trace_label,
+            )
+            summary = load_continuous_window_summary(
+                overview.run_dir, family="tonic", roi_id=roi_id
+            )
+            tonic_data = (pixmap, summary)
+        if overview.phasic_analysis:
+            trace = load_continuous_roi_trace(
+                overview.run_dir, family="phasic", roi_id=roi_id
+            )
+            events = load_continuous_phasic_events(overview.run_dir, roi_id=roi_id)
+            event_times = (
+                events["global_time_sec"].to_numpy(dtype=float) if len(events) else None
+            )
+            event_polarities = (
+                events["polarity"].to_numpy(dtype=float) if len(events) else None
+            )
+            pixmap = self._render_continuous_trace_pixmap(
+                trace.time_sec,
+                trace.primary_trace,
+                title=f"{roi_id} — {trace.primary_trace_label}",
+                y_label=trace.primary_trace_label,
+                event_times=event_times,
+                event_polarities=event_polarities,
+            )
+            persisted_total = overview.phasic_event_counts_by_roi.get(roi_id, len(events))
+            summary = load_continuous_window_summary(
+                overview.run_dir, family="phasic", roi_id=roi_id
+            )
+            phasic_data = (pixmap, persisted_total, summary)
+        return tonic_data, phasic_data
+
+    def _apply_continuous_roi_data(
+        self,
+        roi_id: str,
+        tonic_data,
+        phasic_data,
+    ) -> None:
+        """Replace visible continuous displays with already-successfully-
+        loaded data. Never called unless every requested family for
+        ``roi_id`` has already loaded without error."""
+        if tonic_data is not None:
+            pixmap, summary = tonic_data
+            self._continuous_tonic_interaction.set_pixmap(pixmap, reset_zoom=True)
+            self._populate_summary_table(self._continuous_tonic_summary_table, summary)
+        if phasic_data is not None:
+            pixmap, persisted_total, summary = phasic_data
+            self._continuous_phasic_interaction.set_pixmap(pixmap, reset_zoom=True)
+            self._continuous_phasic_event_count_label.setText(
+                f"Saved phasic events for {roi_id}: {persisted_total}"
+            )
+            self._populate_summary_table(self._continuous_phasic_summary_table, summary)
+
+    @staticmethod
+    def _render_continuous_trace_pixmap(
+        time_sec,
+        primary_trace,
+        *,
+        title: str,
+        y_label: str,
+        event_times=None,
+        event_polarities=None,
+    ) -> QPixmap:
+        """Render one selected ROI's full continuous trace to an in-memory
+        PNG for display -- never persisted to disk, never a new plotting
+        engine (matplotlib's non-interactive Agg backend is already used
+        elsewhere in this GUI for on-the-fly preview rendering). Display-only
+        decimation bounds the plotted line to
+        ``CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS`` samples; saved event markers
+        are always drawn in full and are never counted from what is drawn
+        (see CR1-E1-B handoff sections 10-12)."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+
+        n_points = len(time_sec)
+        stride = max(1, math.ceil(n_points / CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS))
+        plot_time = time_sec[::stride]
+        plot_trace = primary_trace[::stride]
+
+        with matplotlib.rc_context({"figure.dpi": 90}):
+            figure, axis = plt.subplots(figsize=(9.5, 4.2))
+            try:
+                axis.plot(plot_time, plot_trace, linewidth=0.6, color="#3b6ea5")
+                if event_times is not None and len(event_times):
+                    positive = event_polarities > 0 if event_polarities is not None else None
+                    if positive is not None:
+                        axis.scatter(
+                            event_times[positive],
+                            [axis.get_ylim()[1]] * int(positive.sum()),
+                            marker="v",
+                            s=10,
+                            color="#c0392b",
+                            label="Positive event",
+                        )
+                        negative = ~positive
+                        axis.scatter(
+                            event_times[negative],
+                            [axis.get_ylim()[0]] * int(negative.sum()),
+                            marker="^",
+                            s=10,
+                            color="#2e7d32",
+                            label="Negative event",
+                        )
+                        axis.legend(loc="upper right", fontsize="small")
+                    else:
+                        axis.scatter(
+                            event_times,
+                            [axis.get_ylim()[1]] * len(event_times),
+                            marker="v",
+                            s=10,
+                            color="#c0392b",
+                        )
+                axis.set_title(title)
+                axis.set_xlabel("Recording time (seconds)")
+                axis.set_ylabel(y_label)
+                figure.tight_layout()
+
+                buffer = io.BytesIO()
+                figure.savefig(buffer, format="png")
+                buffer.seek(0)
+                pixmap = QPixmap()
+                pixmap.loadFromData(buffer.getvalue(), "PNG")
+                return pixmap
+            finally:
+                plt.close(figure)
+
+    @staticmethod
+    def _populate_summary_table(table: QTableWidget, summary) -> None:
+        """Display an already-persisted per-window summary table verbatim --
+        never recomputed. The storage-window partition column is relabeled
+        for the scientist-facing header only; the underlying data is
+        unchanged (see CR1-E1-B handoff section 13)."""
+        columns = list(summary.columns)
+        table.setColumnCount(len(columns))
+        header_labels = [
+            "Analysis window" if col == "window_index" else col for col in columns
+        ]
+        table.setHorizontalHeaderLabels(header_labels)
+        table.setRowCount(len(summary))
+        for row_idx, row in enumerate(summary.itertuples(index=False)):
+            for col_idx, value in enumerate(row):
+                table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
 
     @property
     def applied_dff_state(self) -> GuidedCompletedAppliedDffState:
