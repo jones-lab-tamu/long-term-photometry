@@ -398,6 +398,13 @@ GUIDED_TONIC_TIMELINE_MODE_HELP = {
     ),
 }
 GUIDED_TONIC_GAP_FREE_NOTE = "Recording gaps will be removed from the tonic timeline."
+# Shown on Correction approach only while those steps really are incomplete.
+# Once they are done, the preview panel's own current reason is shown instead,
+# so the page never claims finished steps are unfinished (CR1-F1-D).
+GUIDED_PREVIEW_MISSING_PREREQUISITES_TEXT = (
+    "Complete Select data, Recording structure, and ROI selection to "
+    "generate a local correction preview."
+)
 GUIDED_TONIC_GAP_FREE_MISSING_SESSIONS_MESSAGE = (
     "Gap-free elapsed time is unavailable because this analysis contains "
     "missing or excluded recording sessions. Use Real elapsed time to "
@@ -5282,6 +5289,11 @@ class MainWindow(QMainWindow):
             getattr(self, "_guided_sessions_per_hour_edit", None),
             getattr(self, "_guided_session_duration_label", None),
             getattr(self, "_guided_session_duration_edit", None),
+            # Session shape and timeline describe how repeated recording
+            # sessions and the gaps between them are shown. One uninterrupted
+            # recording has neither, and continuous analysis does not consult
+            # them, so they are not shown there (CR1-F1-D).
+            getattr(self, "_guided_tonic_settings_group", None),
         ):
             if widget is not None:
                 widget.setVisible(not continuous)
@@ -7166,8 +7178,7 @@ class MainWindow(QMainWindow):
         # so normal preview-readiness changes cannot re-show it.
         signal_group.setVisible(False)
         self._guided_preview_locked_label = QLabel(
-            "Complete Select data, Recording structure, and ROI selection to "
-            "generate a local correction preview."
+            GUIDED_PREVIEW_MISSING_PREREQUISITES_TEXT
         )
         self._guided_preview_locked_label.setObjectName(
             "guidedCorrectionPreviewLocked"
@@ -7370,7 +7381,7 @@ class MainWindow(QMainWindow):
                 self._format_combo.currentText(),
             )
         ).strip().lower()
-        return {
+        resolved = {
             "source_type": "local_raw_segment",
             "discovered_session_index": discovered_index,
             "segment_label": label,
@@ -7380,6 +7391,16 @@ class MainWindow(QMainWindow):
             "path_exists": True,
             "path_kind": "file",
         }
+        if "continuous_window_index" in segment:
+            # Continuous recordings have no sessions; the segment is one
+            # planned analysis window (CR1-F1-D).
+            resolved["continuous_window_index"] = int(
+                segment["continuous_window_index"]
+            )
+            resolved["continuous_window_sec"] = float(
+                segment.get("continuous_window_sec", 0.0)
+            )
+        return resolved
 
     def _resolve_current_guided_preview_diagnostic_cache_source(self):
         record = getattr(self, "_guided_diagnostic_cache_record", None)
@@ -7806,6 +7827,105 @@ class MainWindow(QMainWindow):
                     return f"{self._guided_preview_method_label(str(method))}: {detail or state}"
         return ""
 
+    @staticmethod
+    def _guided_elapsed_label(seconds: float) -> str:
+        """Elapsed seconds as h:mm:ss, for windows of a long recording."""
+        total = int(round(float(seconds)))
+        return f"{total // 3600}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+    def _guided_continuous_preview_window_segments(
+        self,
+    ) -> list[dict[str, object]] | None:
+        """The analysis windows a continuous correction preview can use.
+
+        Returns ``None`` when this is not a continuous RWD plan at all, so the
+        existing session-based path stays untouched (CR1-F1-D), and an empty
+        list when it is one but no whole window is available yet.
+
+        A continuous recording has no sessions, so the preview segment is one
+        of the equal, non-overlapping analysis windows the recording will be
+        reported in. These are derived entirely from the recording the
+        Select-data recording check already accepted -- nothing is read here.
+        Only whole windows are offered, and the accepted recording's measured
+        duration never exceeds the duration the adapter's own window plan
+        computes, so every window offered here also exists in that plan.
+        """
+        if self._guided_continuous_rwd_live_draft() is None:
+            return None
+        accepted = self._guided_continuous_rwd_accepted_plan()
+        if accepted is None:
+            return []
+        _draft, binding, _identity = accepted
+        recording = binding.recording
+        source_path = os.path.realpath(
+            str(recording.source.fluorescence_path_canonical)
+        )
+        duration_sec = float(recording.time.measured_duration_seconds)
+        window_sec = float(self._continuous_window_sec_spin.value())
+        if window_sec <= 0.0 or duration_sec <= 0.0:
+            return []
+        count = int(math.floor((duration_sec + 1e-9) / window_sec))
+        segments: list[dict[str, object]] = []
+        for index in range(count):
+            start = float(index * window_sec)
+            end = float(start + window_sec)
+            segments.append(
+                {
+                    # The generic "which segment" identity the existing local
+                    # preview plumbing carries; for continuous data it is the
+                    # analysis-window number.
+                    "discovered_session_index": index,
+                    "segment_label": (
+                        f"Window {index + 1} "
+                        f"({self._guided_elapsed_label(start)}"
+                        f"–{self._guided_elapsed_label(end)})"
+                    ),
+                    "source_path": source_path,
+                    "adapter_chunk_index": index,
+                    "continuous_window_index": index,
+                    "continuous_window_sec": window_sec,
+                    "window_start_sec": start,
+                    "window_end_sec": end,
+                }
+            )
+        return segments
+
+    def _guided_continuous_preview_config_overrides(self) -> dict[str, object]:
+        """Reader settings for a continuous preview window.
+
+        Taken from the accepted recording, not inferred from the file: the
+        cadence is the one the production target grid uses, so a preview
+        window is sampled exactly as the final analysis would sample it. The
+        full continuous file is never parsed to work these out.
+        """
+        accepted = self._guided_continuous_rwd_accepted_plan()
+        if accepted is None:
+            raise RuntimeError("No checked continuous recording is available.")
+        _draft, binding, _identity = accepted
+        recording = binding.recording
+        cadence_sec = float(recording.cadence.nominal_cadence_seconds)
+        if cadence_sec <= 0.0:
+            raise RuntimeError("The recording cadence could not be used.")
+        window_sec = float(self._continuous_window_sec_spin.value())
+        overrides: dict[str, object] = {
+            "target_fs_hz": 1.0 / cadence_sec,
+            "continuous_window_sec": window_sec,
+            "continuous_step_sec": window_sec,
+            # Only whole windows are offered as preview evidence.
+            "allow_partial_final_window": False,
+            "rwd_time_col": str(recording.source.selected_time_column),
+        }
+        channels = tuple(recording.roi.available_roi_channels)
+        if channels:
+            first = channels[0]
+            roi_id = str(first.roi_id)
+            uv_suffix = str(first.reference_column)[len(roi_id):]
+            sig_suffix = str(first.signal_column)[len(roi_id):]
+            if uv_suffix and sig_suffix:
+                overrides["uv_suffix"] = uv_suffix
+                overrides["sig_suffix"] = sig_suffix
+        return overrides
+
     def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
         if not hasattr(self, "_guided_preview_source_status_label"):
             return
@@ -7828,16 +7948,34 @@ class MainWindow(QMainWindow):
         if mode == "new_analysis":
             source, status = self._resolve_current_guided_preview_diagnostic_cache_source()
             if source is None:
-                discovery = getattr(self, "_discovery_cache", None) or {}
-                sessions = [
-                    entry
-                    for entry in discovery.get("sessions", [])
-                    if isinstance(entry, dict)
-                    and entry.get("included_in_preview", True)
-                    and entry.get("path")
-                ]
+                # A continuous recording has no sessions, so its preview
+                # segments are analysis windows instead (CR1-F1-D). Everything
+                # after this point is shared with the session path.
+                segments = self._guided_continuous_preview_window_segments()
+                continuous = segments is not None
+                if segments is None:
+                    discovery = getattr(self, "_discovery_cache", None) or {}
+                    segments = [
+                        {
+                            "discovered_session_index": int(
+                                entry.get("index", 0)
+                            ),
+                            "segment_label": str(
+                                entry.get("session_id")
+                                or entry.get("index", 0)
+                            ),
+                            "source_path": os.path.realpath(
+                                str(entry["path"])
+                            ),
+                            "adapter_chunk_index": 0,
+                        }
+                        for entry in discovery.get("sessions", [])
+                        if isinstance(entry, dict)
+                        and entry.get("included_in_preview", True)
+                        and entry.get("path")
+                    ]
                 included_rois = list(self._guided_selected_roi_ids()[1])
-                if sessions and included_rois:
+                if segments and included_rois:
                     source_id = os.path.realpath(
                         str(self._input_dir.text().strip())
                     )
@@ -7850,21 +7988,9 @@ class MainWindow(QMainWindow):
                             self._guided_preview_roi_combo.addItem(
                                 str(roi), str(roi)
                             )
-                        for entry in sessions:
-                            index = int(entry.get("index", 0))
-                            label = str(
-                                entry.get("session_id") or index
-                            )
+                        for segment in segments:
                             self._guided_preview_chunk_combo.addItem(
-                                label,
-                                {
-                                    "discovered_session_index": index,
-                                    "segment_label": label,
-                                    "source_path": os.path.realpath(
-                                        str(entry["path"])
-                                    ),
-                                    "adapter_chunk_index": 0,
-                                },
+                                str(segment["segment_label"]), dict(segment)
                             )
                         if previous_roi:
                             index = self._guided_preview_roi_combo.findData(
@@ -7903,21 +8029,34 @@ class MainWindow(QMainWindow):
                         "Local correction preview is ready."
                     )
                     self._guided_preview_source_status_label.setText(
-                        "Ready to preview the selected ROI and segment."
+                        "Ready to preview the selected ROI and analysis window."
+                        if continuous
+                        else "Ready to preview the selected ROI and segment."
                     )
                     self._guided_preview_source_status_label.setToolTip("")
                     self._refresh_guided_preview_enablement()
                     return
                 self._guided_preview_loaded_run_dir = ""
-                self._guided_preview_source_reason = (
-                    status.message
-                    if getattr(
-                        self, "_guided_diagnostic_cache_record", None
+                if continuous and included_rois:
+                    self._guided_preview_source_reason = (
+                        "The analysis window is longer than this recording. "
+                        "Choose a shorter analysis window on Recording "
+                        "structure."
+                        if self._guided_continuous_rwd_accepted_plan()
+                        is not None
+                        else "Waiting for the recording check to finish "
+                        "before correction evidence can be built."
                     )
-                    is not None
-                    else "Complete ROI selection before generating a local "
-                    "correction preview."
-                )
+                else:
+                    self._guided_preview_source_reason = (
+                        status.message
+                        if getattr(
+                            self, "_guided_diagnostic_cache_record", None
+                        )
+                        is not None
+                        else "Complete ROI selection before generating a local "
+                        "correction preview."
+                    )
                 self._guided_preview_source_status_label.setText(
                     self._guided_preview_source_reason
                 )
@@ -9295,7 +9434,18 @@ class MainWindow(QMainWindow):
                     "_guided_workflow",
                     "local_previews",
                 )
-                if segment["input_format"] == "rwd":
+                continuous_window_index = segment.get(
+                    "continuous_window_index"
+                )
+                if continuous_window_index is not None:
+                    # One continuous recording: the reader settings come from
+                    # the recording already accepted by the recording check.
+                    # Never infer them by parsing the whole recording
+                    # (CR1-F1-D).
+                    config_overrides = (
+                        self._guided_continuous_preview_config_overrides()
+                    )
+                elif segment["input_format"] == "rwd":
                     local_contract = self._infer_rwd_chunk_contract(
                         str(segment["source_path"])
                     )
@@ -9347,8 +9497,18 @@ class MainWindow(QMainWindow):
                     "preview_id": preview_id,
                     "config_overrides": config_overrides,
                 }
-                if str(segment["input_format"]).lower() == "npm":
-                    self._start_guided_npm_correction_preview(
+                if continuous_window_index is not None:
+                    preview_kwargs["continuous_window_index"] = int(
+                        continuous_window_index
+                    )
+                if (
+                    str(segment["input_format"]).lower() == "npm"
+                    or continuous_window_index is not None
+                ):
+                    # Planning and reading one window of a long recording must
+                    # not block the GUI, so it uses the same preview worker
+                    # NPM already does (CR1-F1-D).
+                    self._start_guided_threaded_correction_preview(
                         preview_args,
                         preview_kwargs,
                         source_type=source_type,
@@ -9509,7 +9669,7 @@ class MainWindow(QMainWindow):
         elif not running:
             self._refresh_guided_preview_enablement()
 
-    def _start_guided_npm_correction_preview(
+    def _start_guided_threaded_correction_preview(
         self,
         args: tuple,
         kwargs: dict[str, object],
@@ -9520,6 +9680,12 @@ class MainWindow(QMainWindow):
         chunk: int,
         segment: dict[str, object],
     ) -> None:
+        """Run one local correction preview off the GUI thread.
+
+        Used where reading the selected segment is slow enough to freeze the
+        window: NPM dataset-contract inference, and one analysis window of a
+        long continuous recording (CR1-F1-D).
+        """
         if getattr(self, "_guided_correction_preview_running", False):
             return
         self._guided_correction_preview_context = {
@@ -9553,9 +9719,9 @@ class MainWindow(QMainWindow):
         self._guided_correction_preview_worker = worker
         thread.started.connect(worker.run)
         worker.succeeded.connect(
-            self._on_guided_npm_correction_preview_succeeded
+            self._on_guided_threaded_correction_preview_succeeded
         )
-        worker.failed.connect(self._on_guided_npm_correction_preview_failed)
+        worker.failed.connect(self._on_guided_threaded_correction_preview_failed)
         worker.succeeded.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.succeeded.connect(worker.deleteLater)
@@ -9567,7 +9733,7 @@ class MainWindow(QMainWindow):
         self._set_guided_correction_preview_running(True)
         thread.start()
 
-    def _on_guided_npm_correction_preview_succeeded(
+    def _on_guided_threaded_correction_preview_succeeded(
         self, result: dict[str, object]
     ) -> None:
         context = dict(
@@ -9582,7 +9748,7 @@ class MainWindow(QMainWindow):
             chunk=int(context.get("chunk") or 0),
         )
 
-    def _on_guided_npm_correction_preview_failed(
+    def _on_guided_threaded_correction_preview_failed(
         self, failure: dict[str, object]
     ) -> None:
         self._set_guided_correction_preview_running(False)
@@ -11554,6 +11720,23 @@ class MainWindow(QMainWindow):
             preview_ready or local_confirmation_ready or not new_analysis
         )
         self._guided_preview_locked_label.setVisible(not preview_unlocked)
+        if not preview_unlocked:
+            # Only name the earlier steps while they really are unfinished;
+            # otherwise say what the preview is actually waiting for
+            # (CR1-F1-D).
+            prerequisites_done = bool(
+                new_analysis
+                and included_rois
+                and self._guided_select_data_readiness()[0]
+            )
+            reason = str(
+                getattr(self, "_guided_preview_source_reason", "") or ""
+            ).strip()
+            self._guided_preview_locked_label.setText(
+                reason
+                if prerequisites_done and reason
+                else GUIDED_PREVIEW_MISSING_PREREQUISITES_TEXT
+            )
         for widget in getattr(self, "_guided_preview_gated_widgets", ()):
             widget.setVisible(preview_unlocked)
         self._guided_confirm_locked_label.setVisible(not strategy_unlocked)

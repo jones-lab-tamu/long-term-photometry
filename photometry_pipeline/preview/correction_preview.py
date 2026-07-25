@@ -41,7 +41,10 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     load_cache_chunk_attrs,
     open_phasic_cache,
 )
-from photometry_pipeline.io.adapters import load_chunk
+from photometry_pipeline.io.adapters import (
+    load_chunk,
+    plan_continuous_windows_for_source,
+)
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
 from photometry_pipeline.run_completion_contract import classify_run_terminal_state
 from photometry_pipeline.signal_only_f0 import compute_signal_only_f0_dff
@@ -1906,6 +1909,40 @@ def run_guided_correction_preview_comparison(
     }
 
 
+def _select_continuous_preview_window(
+    source_path: str,
+    input_format: str,
+    base_cfg: Config,
+    window_index: int,
+    source_cache: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one planned continuous analysis window, bounded to its own rows.
+
+    Uses the same window plan the production continuous run uses, so a preview
+    window is a real analysis window and not a separately invented segment.
+    Planning streams the time column only; the returned descriptor carries the
+    row bounds ``load_chunk`` needs to read that window alone. ``source_cache``
+    is the adapter's own per-call dictionary, shared with the load that
+    follows so this preview scans the time column once rather than twice.
+    """
+    if input_format not in {"rwd", "custom_tabular"}:
+        raise GuidedCorrectionPreviewError(
+            "Continuous correction previews are supported for RWD recordings only."
+        )
+    windows = plan_continuous_windows_for_source(
+        source_path, input_format, base_cfg, source_cache=source_cache
+    )
+    full_windows = [
+        window for window in windows if not window.get("is_partial_final_window")
+    ]
+    if window_index < 0 or window_index >= len(full_windows):
+        raise GuidedCorrectionPreviewError(
+            "The selected analysis window is no longer part of this recording. "
+            "Choose another window."
+        )
+    return full_windows[window_index]
+
+
 def run_guided_local_correction_preview(
     source_file: str | os.PathLike[str],
     preview_output_dir: str | os.PathLike[str],
@@ -1920,12 +1957,20 @@ def run_guided_local_correction_preview(
     include_signal_only_f0_preview: bool = True,
     preview_id: str | None = None,
     config_overrides: dict[str, Any] | None = None,
+    continuous_window_index: int | None = None,
 ) -> dict[str, Any]:
     """Run preview-only correction methods on one raw source segment.
 
     This pathway intentionally does not accept or produce a phasic cache. It
-    loads one discovered source session, extracts one ROI, and writes only
+    loads one segment of the source, extracts one ROI, and writes only
     preview-scoped traces and provenance.
+
+    The segment is one discovered recording session by default. For one
+    uninterrupted continuous recording there are no sessions, so
+    ``continuous_window_index`` selects one of the equal, non-overlapping
+    analysis windows the production continuous path itself plans
+    (``plan_continuous_windows_for_source``), and only that window's rows are
+    read (CR1-F1-D). The full recording is never materialized.
     """
     pid = preview_id or make_guided_preview_id("local_correction_preview")
     source_path = _resolve_path(source_file)
@@ -2006,6 +2051,18 @@ def run_guided_local_correction_preview(
         load_kwargs = {}
         if str(input_format).strip().lower() == "npm":
             load_kwargs["selected_roi"] = str(roi)
+        selected_window = None
+        if continuous_window_index is not None:
+            source_cache: dict[str, Any] = {}
+            selected_window = _select_continuous_preview_window(
+                source_path,
+                str(input_format).strip().lower(),
+                base_cfg,
+                int(continuous_window_index),
+                source_cache,
+            )
+            load_kwargs["continuous_window"] = selected_window
+            load_kwargs["source_cache"] = source_cache
         raw_chunk = load_chunk(
             source_path,
             str(input_format).strip().lower(),
@@ -2020,8 +2077,14 @@ def run_guided_local_correction_preview(
         roi_index = raw_chunk.channel_names.index(roi)
         time_sec = np.asarray(raw_chunk.time_sec, dtype=float).reshape(-1)
         segment_start = float(time_sec[0])
-        segment_end = segment_start + float(base_cfg.chunk_duration_sec)
-        segment_mask = (time_sec >= segment_start) & (time_sec < segment_end)
+        if selected_window is not None:
+            # The loaded chunk is already exactly the one planned analysis
+            # window, resampled onto the production cadence. The window plan,
+            # not chunk_duration_sec (a session-length setting), bounds it.
+            segment_mask = np.ones(time_sec.shape, dtype=bool)
+        else:
+            segment_end = segment_start + float(base_cfg.chunk_duration_sec)
+            segment_mask = (time_sec >= segment_start) & (time_sec < segment_end)
         if int(np.count_nonzero(segment_mask)) < 3:
             raise GuidedCorrectionPreviewError(
                 "Selected preview segment contains too few samples."
@@ -2111,7 +2174,11 @@ def run_guided_local_correction_preview(
         "source_type": "local_raw_segment",
         "preview_id": pid,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "local_preview_scope": "single_discovered_session_single_roi",
+        "local_preview_scope": (
+            "single_continuous_analysis_window_single_roi"
+            if selected_window is not None
+            else "single_discovered_session_single_roi"
+        ),
         "selected_roi": str(roi),
         "selected_chunk": int(chunk_index),
         "selected_segment_index": int(chunk_index),
@@ -2137,7 +2204,11 @@ def run_guided_local_correction_preview(
             "filter_order": int(base_cfg.filter_order),
         },
         "baseline_scope": "not_computed_delta_f_preview",
-        "reference_fit_scope": "selected_session",
+        "reference_fit_scope": (
+            "selected_continuous_analysis_window"
+            if selected_window is not None
+            else "selected_session"
+        ),
         "pipeline_run_executed": False,
         "feature_extraction_run": False,
         "strategy_recommendation": None,
@@ -2149,6 +2220,18 @@ def run_guided_local_correction_preview(
             "recomputes correction using the full selected recordings."
         ),
     }
+    if selected_window is not None:
+        provenance["continuous_analysis_window"] = {
+            "window_index": int(selected_window["window_index"]),
+            "window_start_sec": float(selected_window["window_start_sec"]),
+            "window_end_sec": float(selected_window["window_end_sec"]),
+            "window_duration_sec": float(selected_window["window_duration_sec"]),
+            "row_start": int(selected_window["row_start"]),
+            "row_stop": int(selected_window["row_stop"]),
+            "original_file_duration_sec": float(
+                selected_window["original_file_duration_sec"]
+            ),
+        }
     if signal_only_f0_preview is not None:
         provenance["signal_only_f0_preview_evidence"] = (
             _signal_only_f0_preview_metadata(signal_only_f0_preview)
@@ -2216,6 +2299,10 @@ def run_guided_local_correction_preview(
         },
         "source_file": source_path,
     }
+    if selected_window is not None:
+        result["continuous_analysis_window"] = dict(
+            provenance["continuous_analysis_window"]
+        )
     if signal_only_f0_preview is not None:
         result["signal_only_f0_preview_evidence"] = (
             signal_only_f0_preview
