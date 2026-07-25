@@ -716,27 +716,61 @@ def test_analysis_selection_helper_maps_execution_intent_directly(accepted_case)
 
 
 # ---------------------------------------------------------------------------
-# Guided continuous Run remains disabled -- no ordinary call site wires
-# continuous_execution
+# Only the live continuous-RWD Run path wires continuous_execution
 # ---------------------------------------------------------------------------
 
 
-def test_no_existing_call_site_passes_continuous_execution():
-    """Proves the execution branch exists and is directly callable/testable
-    without changing today's enablement state: no real call site in
-    main_window.py outside this worker's own definition passes
-    `continuous_execution=` to `_GuidedRunExecutionWorker`."""
+def test_only_the_continuous_run_path_supplies_continuous_execution():
+    """CR1-E3 connected the live continuous Run action to this branch. Exactly
+    one production path may supply `continuous_execution`: the continuous
+    Run handler, through `_start_guided_run_execution_worker`. Every other
+    Guided path -- intermittent RWD, NPM, custom tabular -- must still reach
+    the ordinary wrapper execution with it left None.
+
+    This replaces CR1-E2's `test_no_existing_call_site_passes_continuous_
+    execution`, which asserted the (then intentional) absence of any caller.
+    """
+    import inspect as _inspect
+
+    from gui.main_window import MainWindow
+
+    # The single worker construction site forwards the parameter it is given.
+    construction = _inspect.getsource(
+        MainWindow._start_guided_run_execution_worker
+    )
+    assert "continuous_execution=continuous_execution" in construction
+
+    starter_signature = _inspect.signature(
+        MainWindow._start_guided_run_execution_worker
+    )
+    assert starter_signature.parameters[
+        "continuous_execution"
+    ].default is None
+
     source_path = main_window_module.__file__
     with open(source_path, "r", encoding="utf-8") as handle:
         source = handle.read()
     call_sites = [
-        line
+        line.strip()
         for line in source.splitlines()
-        if "_GuidedRunExecutionWorker(" in line and "class " not in line
+        if "_start_guided_run_execution_worker(" in line
+        and "def " not in line
     ]
-    assert call_sites, "expected at least one _GuidedRunExecutionWorker(...) call site"
-    for line in call_sites:
-        assert "continuous_execution" not in line
+    assert call_sites, "expected at least one starter call site"
+    supplying = [line for line in call_sites if "continuous_execution" in line]
+    assert len(supplying) == 1, supplying
+
+    # ...and that one call site belongs to the continuous Run handler.
+    continuous_handler = _inspect.getsource(
+        MainWindow._on_guided_continuous_rwd_run_clicked
+    )
+    assert supplying[0] in " ".join(continuous_handler.split("\n"))
+
+    # The intermittent/NPM/custom-tabular Run guard never supplies it.
+    intermittent_handler = _inspect.getsource(
+        MainWindow._on_guided_run_clicked_backend_guarded
+    )
+    assert "continuous_execution" not in intermittent_handler
 
 
 def test_guided_run_execution_worker_default_continuous_execution_is_none():

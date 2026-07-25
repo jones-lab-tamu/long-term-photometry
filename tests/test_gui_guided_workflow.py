@@ -1920,7 +1920,9 @@ def test_full_control_select_data_syncs_to_guided_display(window, tmp_path):
 def test_guided_recording_structure_syncs_to_full_control_state(window):
     idx = window._guided_acquisition_mode_combo.findData("intermittent")
     assert idx >= 0
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    # CR1-E3 added the continuous choice; intermittent remains the default
+    # and syncs to Full Control exactly as before.
+    assert window._guided_acquisition_mode_combo.findData("continuous") >= 0
     window._guided_acquisition_mode_combo.setCurrentIndex(idx)
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("300")
@@ -2065,7 +2067,9 @@ def test_guided_recording_mode_visibility_is_intermittent_only(window):
         window._guided_incomplete_final_rwd_help_label.text()
     )
 
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    # This incomplete-final-session control belongs to intermittent recording,
+    # which is still what Guided is planning here.
+    assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
 
 
 def test_guided_roi_discovery_failure_hides_parser_internals(window):
@@ -2347,7 +2351,16 @@ def test_guided_recording_requiredness_updates_with_format_and_mode(window):
         window._guided_recording_structure_help_label.text()
     )
 
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    # CR1-E3: continuous is offered only for RWD, so for custom_tabular the
+    # choice is present but greyed out rather than selectable.
+    continuous_index = window._guided_acquisition_mode_combo.findData("continuous")
+    assert continuous_index >= 0
+    assert (
+        window._guided_acquisition_mode_combo.model()
+        .item(continuous_index)
+        .isEnabled()
+        is False
+    )
 
 
 def test_guided_recording_structure_text_is_user_safe(window):
@@ -2382,8 +2395,10 @@ def test_full_control_continuous_mode_does_not_enter_guided_display(window):
     window._allow_partial_final_window_cb.setChecked(True)
 
     assert window._selected_acquisition_mode() == "continuous"
+    # Guided keeps its own selection: choosing continuous in Full Control does
+    # not change what Guided is planning (CR1-E3 made continuous selectable in
+    # Guided, but only by an explicit Guided choice).
     assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
     assert float(window._guided_continuous_window_sec_spin.value()) == 1200.0
     assert window._guided_allow_partial_final_window_cb.isChecked() is True
 
@@ -2746,7 +2761,16 @@ def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_
     assert window._sph_edit.text() == "4"
     assert window._duration_edit.text() == "600"
 
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    # CR1-E3: continuous is offered only for RWD, so it stays greyed out for
+    # this custom_tabular setup.
+    continuous_index = window._guided_acquisition_mode_combo.findData("continuous")
+    assert continuous_index >= 0
+    assert (
+        window._guided_acquisition_mode_combo.model()
+        .item(continuous_index)
+        .isEnabled()
+        is False
+    )
 
 
 def test_guided_setup_summary_state_is_read_only_and_tracks_current_state(window, tmp_path):
@@ -2869,7 +2893,11 @@ def test_guided_and_full_control_continuous_setup_remain_separate(qapp, tmp_path
         full._continuous_window_sec_spin.setValue(900.0)
         full._allow_partial_final_window_cb.setChecked(True)
 
-        assert guided._guided_acquisition_mode_combo.findData("continuous") == -1
+        # Guided's own selection is unaffected by Full Control's continuous
+        # choice, even though CR1-E3 made continuous selectable in Guided.
+        assert (
+            guided._guided_acquisition_mode_combo.currentData() == "intermittent"
+        )
         assert full._acquisition_mode_combo.findData("continuous") >= 0
         assert _state_for_equivalence(guided)["acquisition_mode"] == "intermittent"
         assert full._selected_acquisition_mode() == "continuous"

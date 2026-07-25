@@ -46,8 +46,13 @@ def test_guided_capability_contract_is_narrow_immutable_and_not_environment_driv
 ):
     monkeypatch.setenv("GUIDED_CONTINUOUS_ENABLED", "1")
 
+    # CR1-E3 added continuous to the production contract, at the point where
+    # Guided can genuinely select, check, prepare, execute, complete, and
+    # open a continuous-RWD recording end to end. The contract is still a
+    # closed, immutable list -- not an environment switch.
     assert guided_capabilities.GUIDED_PRODUCTION_ACQUISITION_MODES == (
         "intermittent",
+        "continuous",
     )
     assert isinstance(
         guided_capabilities.GUIDED_PRODUCTION_ACQUISITION_MODES,
@@ -56,8 +61,11 @@ def test_guided_capability_contract_is_narrow_immutable_and_not_environment_driv
     assert guided_capabilities.is_guided_production_acquisition_mode(
         "intermittent"
     )
-    assert not guided_capabilities.is_guided_production_acquisition_mode(
+    assert guided_capabilities.is_guided_production_acquisition_mode(
         "continuous"
+    )
+    assert not guided_capabilities.is_guided_production_acquisition_mode(
+        "unsupported_mode"
     )
     source = inspect.getsource(guided_capabilities)
     assert "getenv" not in source
@@ -71,9 +79,11 @@ def test_guided_selector_uses_capability_contract_and_full_control_stays_separat
 
     assert _combo_values(window._guided_acquisition_mode_combo) == expected
     assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    assert window._guided_acquisition_mode_combo.findData("continuous") >= 0
     assert window._acquisition_mode_combo.findData("continuous") >= 0
 
+    # Guided and Full Control remain separate selections: changing Full
+    # Control does not change what Guided is planning.
     full_continuous = window._acquisition_mode_combo.findData("continuous")
     window._acquisition_mode_combo.setCurrentIndex(full_continuous)
 
@@ -85,6 +95,50 @@ def test_guided_selector_uses_capability_contract_and_full_control_stays_separat
     )
 
 
+def test_guided_continuous_selection_produces_a_continuous_draft(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("rwd")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+    window._guided_continuous_window_sec_spin.setValue(600.0)
+
+    assert window._guided_selected_acquisition_mode() == "continuous"
+    draft = window._build_guided_new_analysis_draft_plan()
+    assert draft.acquisition_mode == "continuous"
+    assert draft.input_format == "rwd"
+    assert draft.continuous_window_sec == 600.0
+    assert draft.continuous_step_sec == 600.0
+    # The session-timing questions do not apply to one long recording.
+    assert window._guided_sessions_per_hour_edit.isHidden() is True
+    assert window._guided_session_duration_edit.isHidden() is True
+    assert window._guided_continuous_window_sec_spin.isHidden() is False
+    assert window._guided_recording_structure_readiness() == (
+        True,
+        "Recording structure is ready.",
+    )
+
+
+@pytest.mark.parametrize("source_format", ["npm", "custom_tabular"])
+def test_guided_continuous_is_refused_for_non_rwd_input(window, source_format):
+    """The complete continuous production path exists only for RWD. The
+    older chunked custom_tabular continuous-output workflow must not be
+    reachable through this selection."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText(source_format)
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+
+    ready, reason = window._guided_recording_structure_readiness()
+
+    assert ready is False
+    assert "RWD" in reason
+    assert window._maybe_start_guided_continuous_rwd_recording_check() is False
+    assert window._maybe_start_guided_continuous_rwd_preparation() is False
+    assert window._guided_continuous_rwd_live_draft() is None
+
+
 def test_unsupported_guided_widget_state_fails_closed(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_sessions_per_hour_edit.setText("6")
@@ -92,10 +146,10 @@ def test_unsupported_guided_widget_state_fails_closed(window):
 
     window._guided_acquisition_mode_combo.addItem(
         "Injected unsupported mode",
-        "continuous",
+        "episodic_unsupported",
     )
     window._guided_acquisition_mode_combo.setCurrentIndex(
-        window._guided_acquisition_mode_combo.findData("continuous")
+        window._guided_acquisition_mode_combo.findData("episodic_unsupported")
     )
 
     ready, reason = window._guided_recording_structure_readiness()
@@ -103,7 +157,7 @@ def test_unsupported_guided_widget_state_fails_closed(window):
 
     assert ready is False
     assert reason == "Select an acquisition mode to continue."
-    assert draft.acquisition_mode == "continuous"
+    assert draft.acquisition_mode == "episodic_unsupported"
     assert draft.acquisition_structure_status == "unknown"
 
 

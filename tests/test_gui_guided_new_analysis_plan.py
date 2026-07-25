@@ -2191,7 +2191,16 @@ def test_new_analysis_dataset_contract_npm_has_no_continuous_choice(window, tmp_
     window._guided_format_combo.setCurrentText("npm")
     plan = window._build_guided_new_analysis_draft_plan()
 
-    assert window._guided_acquisition_mode_combo.findData("continuous") == -1
+    # CR1-E3 added continuous to the Guided acquisition contract, but the
+    # complete continuous production path exists only for RWD. For NPM the
+    # choice is offered greyed out rather than silently accepted and then
+    # refused later.
+    continuous_index = window._guided_acquisition_mode_combo.findData("continuous")
+    assert continuous_index >= 0
+    continuous_item = window._guided_acquisition_mode_combo.model().item(
+        continuous_index
+    )
+    assert continuous_item.isEnabled() is False
     assert plan.acquisition_mode == "intermittent"
 
 

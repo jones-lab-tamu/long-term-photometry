@@ -173,6 +173,25 @@ def _resolve_segment_correction_settings(
     return config, identity
 
 
+def resolve_guided_continuous_rwd_correction_settings(
+    startup_mapping_contract: object,
+) -> tuple[Config, str]:
+    """Public accessor for the accepted base correction settings.
+
+    Returns exactly what this module already resolves for its own C4b
+    correction work -- the same ``(Config, identity)`` pair, computed by the
+    same function, with no additional behavior. It exists so a caller that
+    must build the run-level ``Config`` handed to the accepted continuous-RWD
+    backends (see ``photometry_pipeline.guided_continuous_rwd_run_config``)
+    can start from the accepted base instead of reaching into a private name
+    or hand-transcribing the setting list.
+
+    Correction itself never consumes the caller's ``Config``: it resolves
+    these settings internally, from the same contract, on every segment.
+    """
+    return _resolve_segment_correction_settings(startup_mapping_contract)
+
+
 REFERENCE_FITTED_CONTROL = "fitted_control"
 REFERENCE_SIGNAL_DERIVED_F0 = "signal_derived_time_varying_f0"
 

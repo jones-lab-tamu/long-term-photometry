@@ -890,6 +890,164 @@ class _GuidedContinuousRwdExecutionRequest:
     cancellation_requested: Callable[[], bool] | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _GuidedContinuousRwdPreparedRun:
+    """One prepared continuous-RWD run, bound to the plan it was built for.
+
+    ``plan_identity`` is the accepted draft's own canonical identity
+    (``guided_plan_identity.compute_guided_new_analysis_draft_plan_identity``),
+    which is also what the review binding carries as ``draft_plan_identity``.
+    Readiness re-derives the live identity and refuses to run unless it still
+    matches this one, so a prepared run can never be executed against a plan
+    the scientist has since changed -- even if an invalidation hook were
+    missed.
+    """
+
+    request: "_GuidedContinuousRwdExecutionRequest"
+    plan_identity: str
+    output_base: str
+
+
+class _GuidedContinuousRwdPreparationWorker(QObject):
+    """Build the accepted continuous-RWD execution authorities off the GUI thread.
+
+    Preparation is expensive (the dynamic-F0 authority traverses the whole
+    recording), so it must not run inside a navigation callback or the Run
+    handler. Every input is captured on the GUI thread and handed in at
+    construction; this worker holds no reference to ``MainWindow``, reads no
+    widget, and calls no ``MainWindow`` method.
+
+    It calls the same accepted builders the continuous-RWD backend tests use,
+    in the same order, and produces the exact
+    ``_GuidedContinuousRwdExecutionRequest`` CR1-E2 already consumes. It
+    builds no scientific object of its own.
+
+    ``cancel_event`` is checked only between accepted builder calls -- the
+    natural boundaries these builders already expose. No scientific helper is
+    modified to add finer-grained interruption.
+    """
+
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        review_binding,
+        accepted_draft,
+        plan_identity: str,
+        output_base: str,
+        cancel_event,
+    ):
+        super().__init__()
+        self._review_binding = review_binding
+        self._accepted_draft = accepted_draft
+        self._plan_identity = str(plan_identity)
+        self._output_base = str(output_base)
+        self._cancel_event = cancel_event
+
+    def _cancelled(self) -> bool:
+        event = self._cancel_event
+        return bool(event is not None and event.is_set())
+
+    def run(self) -> None:
+        from photometry_pipeline.guided_continuous_rwd_block_plan import (
+            build_guided_continuous_rwd_block_plan,
+        )
+        from photometry_pipeline.guided_continuous_rwd_correction_segments import (
+            build_guided_continuous_rwd_correction_segment_plan,
+            prepare_guided_continuous_rwd_dynamic_f0_authority,
+        )
+        from photometry_pipeline.guided_continuous_rwd_run_config import (
+            GuidedContinuousRwdRunConfigError,
+            build_guided_continuous_rwd_run_config,
+        )
+        from photometry_pipeline.guided_continuous_rwd_target_grid import (
+            build_guided_continuous_rwd_target_grid,
+        )
+        from photometry_pipeline.guided_execution_payloads import (
+            build_guided_execution_startup_mapping_contract,
+        )
+        from photometry_pipeline.io.rwd_continuous_projection_reader import (
+            iter_project_guided_continuous_rwd_blocks,
+        )
+
+        binding = self._review_binding
+        draft = self._accepted_draft
+        try:
+            if self._cancelled():
+                self.failed.emit("cancelled: preparation was cancelled.")
+                return
+            startup_mapping_contract = (
+                build_guided_execution_startup_mapping_contract()
+            )
+            target_grid = build_guided_continuous_rwd_target_grid(
+                binding.recording, binding.continuity_evaluation
+            )
+            if self._cancelled():
+                self.failed.emit("cancelled: preparation was cancelled.")
+                return
+            block_plan = build_guided_continuous_rwd_block_plan(target_grid)
+            segment_plan = build_guided_continuous_rwd_correction_segment_plan(
+                binding,
+                target_grid,
+                accepted_draft=draft,
+                startup_mapping_contract=startup_mapping_contract,
+            )
+            if self._cancelled():
+                self.failed.emit("cancelled: preparation was cancelled.")
+                return
+            config = build_guided_continuous_rwd_run_config(
+                draft, startup_mapping_contract
+            )
+            dynamic_f0_authority = (
+                prepare_guided_continuous_rwd_dynamic_f0_authority(
+                    binding,
+                    target_grid,
+                    block_plan,
+                    segment_plan,
+                    iter_project_guided_continuous_rwd_blocks(
+                        binding, target_grid, block_plan
+                    ),
+                    accepted_draft=draft,
+                    startup_mapping_contract=startup_mapping_contract,
+                )
+            )
+            if self._cancelled():
+                self.failed.emit("cancelled: preparation was cancelled.")
+                return
+        except GuidedContinuousRwdRunConfigError as exc:
+            # Already scientist-facing text (see
+            # guided_continuous_rwd_run_config); the "reason:" prefix marks it
+            # as safe to show, as opposed to the "internal:" form below, which
+            # is only ever logged.
+            self.failed.emit(f"reason: {exc}")
+            return
+        except Exception as exc:
+            self.failed.emit(f"internal: {type(exc).__name__}: {exc}")
+            return
+
+        request = _GuidedContinuousRwdExecutionRequest(
+            review_binding=binding,
+            target_grid=target_grid,
+            block_plan=block_plan,
+            segment_plan=segment_plan,
+            dynamic_f0_authority=dynamic_f0_authority,
+            accepted_draft=draft,
+            startup_mapping_contract=startup_mapping_contract,
+            output_base=self._output_base,
+            config=config,
+            cancellation_requested=None,
+        )
+        self.succeeded.emit(
+            _GuidedContinuousRwdPreparedRun(
+                request=request,
+                plan_identity=self._plan_identity,
+                output_base=self._output_base,
+            )
+        )
+
+
 def _guided_continuous_rwd_analysis_selection(accepted_draft) -> tuple[bool, bool]:
     """Derive ``(tonic_analysis, phasic_analysis)`` from the accepted
     execution intent already carried by Guided review -- the same
@@ -2978,6 +3136,21 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_check_snapshot = None
         self._guided_continuous_rwd_check_terminal_token = None
         self._guided_continuous_rwd_check_closing = False
+        # CR1-E3 continuous-RWD execution state. The prepared run and its
+        # status are session-scoped GUI state only: nothing here is persisted,
+        # cached to disk, or shared between plans.
+        self._guided_continuous_rwd_prepared_run = None
+        self._guided_continuous_rwd_prepare_thread = None
+        self._guided_continuous_rwd_prepare_worker = None
+        self._guided_continuous_rwd_prepare_token = 0
+        self._guided_continuous_rwd_prepare_active_token = None
+        self._guided_continuous_rwd_prepare_cancel_event = None
+        self._guided_continuous_rwd_prepare_closing = False
+        self._guided_continuous_rwd_prepare_failed_identity = None
+        self._guided_continuous_rwd_status_message = ""
+        self._guided_continuous_rwd_execution_active = False
+        self._guided_continuous_rwd_execution_cancel_event = None
+        self._guided_continuous_rwd_completed_run_dir = None
         self._guided_startup_authority = None
         self._guided_execution_payload_result = None
         self._guided_run_readiness = None
@@ -3367,6 +3540,7 @@ class MainWindow(QMainWindow):
         self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
         acquisition_mode_labels = {
             "intermittent": "Intermittent/session-based recording",
+            "continuous": "Continuous/one long recording",
         }
         for acquisition_mode in GUIDED_PRODUCTION_ACQUISITION_MODES:
             self._guided_acquisition_mode_combo.addItem(
@@ -3374,7 +3548,8 @@ class MainWindow(QMainWindow):
                 acquisition_mode,
             )
         self._guided_acquisition_mode_combo.setToolTip(
-            "Use this mode when the recording is saved as repeated sessions."
+            "Choose how your recording was saved: as repeated sessions, or as "
+            "one long continuous recording."
         )
         self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
@@ -3391,6 +3566,19 @@ class MainWindow(QMainWindow):
         )
         self._guided_intermittent_explanation_label.setWordWrap(True)
         form.addRow("", self._guided_intermittent_explanation_label)
+        self._guided_continuous_explanation_label = QLabel(
+            "Use this mode when your recording is saved as one long "
+            "recording instead of repeated sessions. The app reads the whole "
+            "recording and reports results in equal windows of the length "
+            "you choose below. Continuous recordings are supported for RWD "
+            "data."
+        )
+        self._guided_continuous_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_continuous_explanation_label.setWordWrap(True)
+        self._guided_continuous_explanation_label.setVisible(False)
+        form.addRow("", self._guided_continuous_explanation_label)
         self._guided_recording_timing_inference_label = QLabel(
             "Session timing has not been detected yet."
         )
@@ -3886,6 +4074,28 @@ class MainWindow(QMainWindow):
                 self._guided_format_combo.currentText(),
             )
         ).strip().lower()
+        if mode == "continuous":
+            # A continuous recording has no sessions, so the session timing
+            # questions below do not apply and are hidden. Only the window
+            # length the results are reported in matters here.
+            if resolved_format != "rwd":
+                return (
+                    False,
+                    "Continuous recordings are supported for RWD data. "
+                    "Choose RWD, or choose the intermittent recording mode.",
+                )
+            window_spin = getattr(
+                self, "_guided_continuous_window_sec_spin", None
+            )
+            window_sec = (
+                float(window_spin.value()) if window_spin is not None else 0.0
+            )
+            if window_sec <= 0:
+                return (
+                    False,
+                    "Enter a window length greater than 0 seconds to continue.",
+                )
+            return True, "Recording structure is ready."
         sessions_text = self._guided_sessions_per_hour_edit.text().strip()
         duration_text = self._guided_session_duration_edit.text().strip()
         if not sessions_text or not duration_text:
@@ -3979,6 +4189,12 @@ class MainWindow(QMainWindow):
         if not self._guided_recording_structure_ready_to_continue():
             self._refresh_guided_navigation_state()
             return
+        # The recording structure is now settled, so a continuous recording
+        # has everything the accepted recording check needs (source, included
+        # ROIs, and window length). Start it here rather than at Run, so the
+        # check overlaps the correction and feature steps instead of making
+        # the scientist wait later.
+        self._maybe_start_guided_continuous_rwd_recording_check()
         self._reach_guided_step("Correction approach")
         self._guided_workflow_stepper.setCurrentRow(
             self._guided_step_index("Correction approach")
@@ -4185,6 +4401,16 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.setCurrentRow(
             self._guided_step_index("Run")
         )
+        # The whole continuous plan is accepted at this point (recording,
+        # ROIs, correction choices, confirmed Feature Detection settings, and
+        # output destination), so this is the earliest safe moment to build
+        # its execution authorities. If the recording still needs checking --
+        # for example because the ROI selection changed after the earlier
+        # check -- start that instead; preparation follows once the review
+        # binding is current again.
+        if self._guided_continuous_rwd_live_draft() is not None:
+            if not self._maybe_start_guided_continuous_rwd_recording_check():
+                self._maybe_start_guided_continuous_rwd_preparation()
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
         text = str(path or "").strip()
@@ -4345,6 +4571,16 @@ class MainWindow(QMainWindow):
                 self._set_guided_workflow_mode("new_analysis")
         self._guided_workflow_stack.setCurrentIndex(idx)
         self._refresh_guided_mode_display()
+        if (
+            GUIDED_WORKFLOW_STEPS[idx] == "Run"
+            and getattr(self, "_guided_workflow_mode", "start") == "new_analysis"
+            and self._guided_continuous_rwd_live_draft() is not None
+        ):
+            # Reaching Run by any route (Continue, or the stepper directly)
+            # prepares the accepted continuous plan. Idempotent: it does not
+            # restart preparation for a plan already prepared, preparing, or
+            # already failed to prepare.
+            self._maybe_start_guided_continuous_rwd_preparation()
         if (
             GUIDED_WORKFLOW_STEPS[idx] == "Correction approach"
             and getattr(
@@ -4712,6 +4948,35 @@ class MainWindow(QMainWindow):
         except OSError:
             return False
 
+    def _sync_guided_continuous_mode_availability(self, resolved_format: str) -> None:
+        """Offer the continuous choice only for the input format that has a
+        complete continuous production path.
+
+        That path (recording check -> review binding -> authority preparation
+        -> one accepted continuous-RWD backend -> continuous Results) exists
+        only for RWD, so the choice is greyed out for anything else rather
+        than offered and then refused. ``_guided_recording_structure_
+        readiness`` stays the fail-closed authority either way, including for
+        a selection made before the format resolved.
+        """
+        combo = getattr(self, "_guided_acquisition_mode_combo", None)
+        if combo is None:
+            return
+        index = combo.findData("continuous")
+        if index < 0:
+            return
+        model = combo.model()
+        item = model.item(index) if hasattr(model, "item") else None
+        if item is None:
+            return
+        supported = str(resolved_format or "").strip().lower() == "rwd"
+        item.setEnabled(supported)
+        item.setToolTip(
+            ""
+            if supported
+            else "Continuous recordings are supported for RWD data."
+        )
+
     def _sync_guided_setup_from_full(self) -> None:
         """Refresh Guided setup controls from the existing Full Control widgets."""
         if getattr(self, "_guided_setup_syncing", False):
@@ -4788,6 +5053,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setVisible(not continuous)
         for widget in (
+            getattr(self, "_guided_continuous_explanation_label", None),
             getattr(self, "_guided_continuous_window_label", None),
             getattr(self, "_guided_continuous_window_sec_spin", None),
             getattr(
@@ -4807,6 +5073,7 @@ class MainWindow(QMainWindow):
             self._guided_incomplete_final_rwd_group.setVisible(
                 not continuous and resolved_format == "rwd"
             )
+        self._sync_guided_continuous_mode_availability(resolved_format)
         self._refresh_guided_use_detected_timing_action()
         if continuous:
             self._guided_session_duration_label.setText(
@@ -4819,9 +5086,9 @@ class MainWindow(QMainWindow):
                 self._duration_edit.toolTip()
             )
             self._guided_recording_structure_help_label.setText(
-                "Continuous mode uses one uninterrupted recording split into "
-                "non-overlapping analysis windows. Continuous acquisition is "
-                "outside the current Guided Run scope."
+                "Continuous mode reads one uninterrupted recording and "
+                "reports results in equal, non-overlapping windows of the "
+                "length you choose."
             )
             self._refresh_guided_navigation_state()
             return
@@ -5240,6 +5507,21 @@ class MainWindow(QMainWindow):
                 recording_check_thread.quit()
             self._set_guided_continuous_rwd_check_status(
                 "Cancelling the recording check before closing…", active=True
+            )
+            event.ignore()
+            return
+        if self._guided_continuous_rwd_preparation_thread_is_running():
+            # Cooperative only. Ask preparation to stop at its next accepted
+            # boundary and wait for the thread to finish rather than letting
+            # a running QThread be destroyed.
+            self._guided_continuous_rwd_prepare_closing = True
+            cancel_event = getattr(
+                self, "_guided_continuous_rwd_prepare_cancel_event", None
+            )
+            if cancel_event is not None:
+                cancel_event.set()
+            self._set_guided_continuous_rwd_status(
+                "Stopping preparation before closing…"
             )
             event.ignore()
             return
@@ -12581,6 +12863,11 @@ class MainWindow(QMainWindow):
                 self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
         self._refresh_guided_backend_validation_display()
+        # A prepared continuous run belongs to the plan it was prepared for.
+        # Discard it here, at the single existing invalidation hook every
+        # genuine setup change already reaches, before the review binding is
+        # refreshed against the new draft.
+        self._invalidate_guided_continuous_rwd_preparation(reason)
         self._refresh_guided_continuous_rwd_review_binding_for_current_draft()
 
     def _set_guided_continuous_rwd_check_status(
@@ -12935,6 +13222,619 @@ class MainWindow(QMainWindow):
             return
         if stepper.currentItem().data(Qt.UserRole) == "Draft plan":
             self._refresh_guided_draft_run_plan_preview()
+
+    # ------------------------------------------------------------------
+    # CR1-E3: live continuous-RWD preparation, readiness, and execution
+    # ------------------------------------------------------------------
+
+    def _guided_continuous_rwd_live_draft(self):
+        """Return the live draft when it describes one continuous RWD
+        recording, otherwise ``None``.
+
+        ``acquisition_mode == "continuous"`` alone is not sufficient: the
+        older chunked custom_tabular continuous-output workflow also declares
+        it. ``input_format == "rwd"`` is required in addition, matching the
+        identical discriminant used by ``_execute_guided_continuous_rwd`` and
+        ``gui.run_report_parser.is_continuous_rwd_run_mode``.
+        """
+        try:
+            draft = self._build_guided_new_analysis_draft_plan()
+        except Exception:
+            return None
+        if (
+            getattr(draft, "input_format", None) != "rwd"
+            or getattr(draft, "acquisition_mode", None) != "continuous"
+        ):
+            return None
+        return draft
+
+    def _guided_continuous_rwd_accepted_plan(self):
+        """Return ``(draft, binding, plan_identity)`` when the accepted
+        continuous review authority is still current for the live draft.
+
+        Returns ``None`` when this is not a continuous-RWD plan, when no
+        recording check has produced a review binding, or when the binding
+        belongs to a different plan than the one on screen now.
+        """
+        draft = self._guided_continuous_rwd_live_draft()
+        if draft is None:
+            return None
+        binding = getattr(self, "_guided_continuous_rwd_review_binding", None)
+        if binding is None:
+            return None
+        from photometry_pipeline.guided_plan_identity import (
+            compute_guided_new_analysis_draft_plan_identity,
+        )
+
+        try:
+            identity = compute_guided_new_analysis_draft_plan_identity(draft)
+        except Exception:
+            return None
+        if identity != getattr(binding, "draft_plan_identity", None):
+            return None
+        return draft, binding, identity
+
+    def _guided_continuous_rwd_output_base(self, draft) -> str:
+        return str(getattr(draft, "output_base_path", "") or "").strip()
+
+    def _maybe_start_guided_continuous_rwd_recording_check(self) -> bool:
+        """Start the accepted recording check when the live continuous plan
+        needs one and nothing is already running.
+
+        Called only from explicit forward navigation, never from a display
+        refresh, so a scientist never triggers repeated recording reads by
+        moving around the workflow.
+        """
+        if self._guided_continuous_rwd_live_draft() is None:
+            return False
+        if self._guided_continuous_rwd_accepted_plan() is not None:
+            # A current review binding already covers this exact plan.
+            return False
+        if getattr(self, "_guided_continuous_rwd_check_worker", None) is not None:
+            return False
+        return bool(self._start_guided_continuous_rwd_recording_check())
+
+    def _set_guided_continuous_rwd_status(self, message: str) -> None:
+        """Record and display the one scientist-facing continuous status."""
+        self._guided_continuous_rwd_status_message = str(message or "")
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText(self._guided_continuous_rwd_status_message)
+
+    def _guided_continuous_rwd_preparation_active(self) -> bool:
+        return (
+            getattr(self, "_guided_continuous_rwd_prepare_active_token", None)
+            is not None
+        )
+
+    def _invalidate_guided_continuous_rwd_preparation(self, reason: str) -> None:
+        """Discard any prepared continuous run and stop a running preparation.
+
+        Called from the one central Guided invalidation hook
+        (``_invalidate_guided_backend_validation``), so every existing setup
+        change that already invalidates Guided validation -- source, ROIs,
+        window/timing, correction choices, feature settings, output
+        destination, execution intent, a new analysis, or loading another
+        completed run -- also invalidates the prepared run. A preparation
+        still in flight is marked stale by bumping the token: its eventual
+        result is discarded rather than installed.
+        """
+        had_state = bool(
+            getattr(self, "_guided_continuous_rwd_prepared_run", None)
+            is not None
+            or self._guided_continuous_rwd_preparation_active()
+        )
+        self._guided_continuous_rwd_prepared_run = None
+        self._guided_continuous_rwd_prepare_failed_identity = None
+        # The completed-run handoff belongs to the plan that produced it. A
+        # genuine setup change means the offered run is no longer this plan's
+        # result, so stop offering it -- matching how the intermittent path
+        # discards its own execution result. The run itself is never touched.
+        if getattr(self, "_guided_continuous_rwd_completed_run_dir", None):
+            self._guided_continuous_rwd_completed_run_dir = None
+            self._refresh_guided_review_handoff_display()
+        if self._guided_continuous_rwd_preparation_active():
+            self._guided_continuous_rwd_prepare_token = (
+                int(getattr(self, "_guided_continuous_rwd_prepare_token", 0)) + 1
+            )
+            self._guided_continuous_rwd_prepare_active_token = None
+            cancel_event = getattr(
+                self, "_guided_continuous_rwd_prepare_cancel_event", None
+            )
+            if cancel_event is not None:
+                cancel_event.set()
+            self._set_guided_continuous_rwd_status(
+                "The analysis setup changed. Preparing continuous analysis "
+                "was stopped."
+            )
+        elif getattr(self, "_guided_continuous_rwd_status_message", ""):
+            self._set_guided_continuous_rwd_status("")
+        if had_state:
+            self._append_log(
+                f"Continuous analysis preparation invalidated: {reason}"
+            )
+
+    def _guided_continuous_rwd_prepare_callback_is_current(
+        self, token: int, worker
+    ) -> bool:
+        return bool(
+            not getattr(self, "_guided_continuous_rwd_prepare_closing", False)
+            and token
+            == getattr(
+                self, "_guided_continuous_rwd_prepare_active_token", None
+            )
+            and worker
+            is getattr(self, "_guided_continuous_rwd_prepare_worker", None)
+        )
+
+    def _maybe_start_guided_continuous_rwd_preparation(self) -> bool:
+        """Prepare the accepted continuous run, off the GUI thread.
+
+        Refuses to start unless the whole plan is accepted and current: a
+        continuous-RWD draft, a current review binding, an output
+        destination, and a plan this live workflow may actually run (see
+        ``_guided_continuous_rwd_analysis_supported``). Never starts a second
+        preparation for a plan that is already prepared, already preparing, or
+        already failed to prepare.
+        """
+        if getattr(self, "_guided_continuous_rwd_prepare_closing", False):
+            return False
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return False
+        if getattr(self, "_guided_continuous_rwd_prepare_worker", None) is not None:
+            if not self._guided_continuous_rwd_preparation_active():
+                # A superseded preparation is still winding down at its next
+                # accepted stopping point. Say so instead of silently doing
+                # nothing.
+                self._set_guided_continuous_rwd_status(
+                    "Finishing the previous preparation. Wait for it to stop, "
+                    "then continue again to prepare the current setup."
+                )
+            return False
+        current = self._guided_continuous_rwd_accepted_plan()
+        if current is None:
+            return False
+        draft, binding, plan_identity = current
+        prepared = getattr(self, "_guided_continuous_rwd_prepared_run", None)
+        if (
+            prepared is not None
+            and prepared.plan_identity == plan_identity
+        ):
+            return False
+        if (
+            getattr(
+                self, "_guided_continuous_rwd_prepare_failed_identity", None
+            )
+            == plan_identity
+        ):
+            # Preparation already failed for this exact plan; do not spend
+            # minutes repeating it until something actually changes.
+            return False
+        output_base = self._guided_continuous_rwd_output_base(draft)
+        if not output_base:
+            self._set_guided_continuous_rwd_status(
+                "Choose where to save results before running."
+            )
+            return False
+        supported, refusal = self._guided_continuous_rwd_analysis_supported(draft)
+        if not supported:
+            self._set_guided_continuous_rwd_status(refusal)
+            return False
+
+        self._guided_continuous_rwd_prepare_token += 1
+        token = self._guided_continuous_rwd_prepare_token
+        cancel_event = threading.Event()
+        thread = QThread(self)
+        worker = _GuidedContinuousRwdPreparationWorker(
+            review_binding=binding,
+            accepted_draft=draft,
+            plan_identity=plan_identity,
+            output_base=output_base,
+            cancel_event=cancel_event,
+        )
+        worker.moveToThread(thread)
+        self._guided_continuous_rwd_prepare_thread = thread
+        self._guided_continuous_rwd_prepare_worker = worker
+        self._guided_continuous_rwd_prepare_active_token = token
+        self._guided_continuous_rwd_prepare_cancel_event = cancel_event
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(
+            lambda prepared_run, t=token, w=worker: (
+                self._on_guided_continuous_rwd_preparation_succeeded(
+                    t, w, prepared_run
+                )
+            )
+        )
+        worker.failed.connect(
+            lambda message, t=token, w=worker: (
+                self._on_guided_continuous_rwd_preparation_failed(
+                    t, w, message
+                )
+            )
+        )
+        for terminal_signal in (worker.succeeded, worker.failed):
+            terminal_signal.connect(worker.deleteLater)
+            terminal_signal.connect(thread.quit)
+        # Cleanup is connected before deleteLater so the retained attributes
+        # are cleared while the QThread wrapper is still valid.
+        thread.finished.connect(
+            lambda w=worker, th=thread: (
+                self._cleanup_guided_continuous_rwd_preparation(w, th)
+            )
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._set_guided_continuous_rwd_status(
+            "Preparing continuous analysis… This can take several minutes "
+            "for a long recording."
+        )
+        self._refresh_guided_run_readiness_display()
+        thread.start()
+        return True
+
+    def _on_guided_continuous_rwd_preparation_succeeded(
+        self, token: int, worker, prepared_run
+    ) -> None:
+        if not self._guided_continuous_rwd_prepare_callback_is_current(
+            token, worker
+        ):
+            return
+        self._guided_continuous_rwd_prepare_active_token = None
+        if not isinstance(prepared_run, _GuidedContinuousRwdPreparedRun):
+            self._guided_continuous_rwd_prepared_run = None
+            self._set_guided_continuous_rwd_status(
+                "Continuous analysis could not be prepared."
+            )
+            self._refresh_guided_run_readiness_display()
+            return
+        current = self._guided_continuous_rwd_accepted_plan()
+        if current is None or current[2] != prepared_run.plan_identity:
+            # The plan changed while preparation was running. Never present
+            # a prepared run from a plan the scientist has moved away from.
+            self._guided_continuous_rwd_prepared_run = None
+            self._set_guided_continuous_rwd_status(
+                "The analysis setup changed while it was being prepared. "
+                "Continue again to prepare the current setup."
+            )
+            self._refresh_guided_run_readiness_display()
+            return
+        self._guided_continuous_rwd_prepared_run = prepared_run
+        self._guided_continuous_rwd_prepare_failed_identity = None
+        self._set_guided_continuous_rwd_status(
+            "Continuous analysis is ready to run."
+        )
+        self._refresh_guided_run_readiness_display()
+
+    def _on_guided_continuous_rwd_preparation_failed(
+        self, token: int, worker, message: str
+    ) -> None:
+        if not self._guided_continuous_rwd_prepare_callback_is_current(
+            token, worker
+        ):
+            return
+        self._guided_continuous_rwd_prepare_active_token = None
+        self._guided_continuous_rwd_prepared_run = None
+        text = str(message or "")
+        self._append_log(f"Continuous analysis preparation failed: {text}")
+        if text.startswith("cancelled:"):
+            self._set_guided_continuous_rwd_status(
+                "Preparing continuous analysis was cancelled."
+            )
+            self._refresh_guided_run_readiness_display()
+            return
+        current = self._guided_continuous_rwd_accepted_plan()
+        if current is not None:
+            self._guided_continuous_rwd_prepare_failed_identity = current[2]
+        # Only a reason the accepted builders themselves wrote for a scientist
+        # (marked "reason:") is shown. An unexpected internal error is logged
+        # above and never shown as the primary message.
+        detail = text[len("reason:"):].strip() if text.startswith("reason:") else ""
+        self._set_guided_continuous_rwd_status(
+            "Continuous analysis could not be prepared."
+            + (f" {detail}" if detail else "")
+            + " Check your setup, then continue again."
+        )
+        self._refresh_guided_run_readiness_display()
+
+    def _guided_continuous_rwd_preparation_thread_is_running(self) -> bool:
+        """Whether a continuous preparation thread is genuinely still running.
+
+        The retained ``QThread`` is deleted by its own ``deleteLater`` once it
+        finishes, which can leave this attribute holding a stale Python
+        wrapper until the queued cleanup slot runs. Probing such a wrapper
+        raises ``RuntimeError``, so a stale wrapper is treated as "not
+        running" and dropped here rather than being allowed to propagate --
+        notably out of ``closeEvent``, where it would otherwise stop the
+        scientist from closing the window at all.
+        """
+        thread = getattr(self, "_guided_continuous_rwd_prepare_thread", None)
+        if thread is None:
+            return False
+        try:
+            return bool(thread.isRunning())
+        except RuntimeError:
+            self._guided_continuous_rwd_prepare_thread = None
+            self._guided_continuous_rwd_prepare_worker = None
+            self._guided_continuous_rwd_prepare_cancel_event = None
+            return False
+
+    def _cleanup_guided_continuous_rwd_preparation(self, worker, thread) -> None:
+        if (
+            worker
+            is not getattr(self, "_guided_continuous_rwd_prepare_worker", None)
+            or thread
+            is not getattr(self, "_guided_continuous_rwd_prepare_thread", None)
+        ):
+            return
+        self._guided_continuous_rwd_prepare_worker = None
+        self._guided_continuous_rwd_prepare_thread = None
+        self._guided_continuous_rwd_prepare_cancel_event = None
+        self._guided_continuous_rwd_prepare_closing = False
+        self._refresh_guided_run_readiness_display()
+
+    def _guided_continuous_rwd_analysis_supported(self, draft) -> tuple[bool, str]:
+        """Whether the accepted plan is a runnable live Guided analysis.
+
+        One Guided analysis always produces both tonic and phasic outputs.
+        Guided has no analysis-family control: the draft builder sets
+        ``execution_intent.execution_mode`` to ``"both"`` unconditionally (see
+        ``_build_guided_new_analysis_draft_plan``), and Full Control's own
+        Mode combo is never read there. So any other value on a live draft is
+        not a scientist choice -- it means the plan reaching this point is
+        malformed or stale, and it fails closed here, before any authority is
+        prepared, any Config is built, Run is offered, or a backend runs.
+
+        The lower-level continuous backend and its E2 selector still support
+        correction-only, tonic-only, and phasic-only execution; this gate is
+        only about what the live Guided workflow may request.
+
+        Because every live Guided run includes phasic analysis, current
+        confirmed Feature Detection settings are always required.
+        """
+        from photometry_pipeline.guided_backend_validation_request import (
+            is_saved_feature_event_profile_current,
+        )
+
+        execution_intent = getattr(draft, "execution_intent", None)
+        if getattr(execution_intent, "execution_mode", None) != "both":
+            return (
+                False,
+                "This Guided analysis is not configured correctly. Return to "
+                "Setup and review the analysis plan.",
+            )
+        if not is_saved_feature_event_profile_current(
+            getattr(draft, "feature_event_profile_status", ""),
+            bool(getattr(draft, "feature_event_explicitly_applied", False)),
+        ):
+            return (
+                False,
+                "Confirm the Feature Detection settings before running.",
+            )
+        return True, ""
+
+    def _guided_continuous_rwd_run_readiness(self) -> tuple[bool, str]:
+        """Fail-closed readiness for the live continuous Run control."""
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return False, "Running continuous analysis…"
+        if getattr(self, "_guided_continuous_rwd_check_worker", None) is not None:
+            return False, "Checking continuous recording…"
+        if self._guided_continuous_rwd_preparation_active():
+            return (
+                False,
+                "Preparing continuous analysis… This can take several "
+                "minutes for a long recording.",
+            )
+        current = self._guided_continuous_rwd_accepted_plan()
+        if current is None:
+            return (
+                False,
+                "Continue through the earlier steps so the recording can be "
+                "checked before running.",
+            )
+        draft, _binding, plan_identity = current
+        supported, refusal = self._guided_continuous_rwd_analysis_supported(draft)
+        if not supported:
+            return False, refusal
+        output_base = self._guided_continuous_rwd_output_base(draft)
+        if not output_base:
+            return False, "Choose where to save results before running."
+        prepared = getattr(self, "_guided_continuous_rwd_prepared_run", None)
+        if prepared is None or prepared.plan_identity != plan_identity:
+            return (
+                False,
+                self._guided_continuous_rwd_status_message
+                or "Continuous analysis is not prepared yet.",
+            )
+        if prepared.output_base != output_base:
+            return False, "Choose where to save results before running."
+        return True, "Continuous analysis is ready to run."
+
+    def _refresh_guided_continuous_rwd_run_readiness_display(self) -> bool:
+        """Render the continuous Run affordance. Returns True when this
+        display owns the Run control for the current plan."""
+        if (
+            self._guided_continuous_rwd_live_draft() is None
+            and not getattr(self, "_guided_continuous_rwd_execution_active", False)
+        ):
+            return False
+        ready, summary = self._guided_continuous_rwd_run_readiness()
+        button = getattr(self, "_guided_run_btn", None)
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if button is not None:
+            button.setEnabled(bool(ready))
+            button.setToolTip(
+                "Continuous analysis is ready to run." if ready else summary
+            )
+        if label is not None:
+            label.setText(summary)
+        cancel_btn = getattr(self, "_guided_continuous_rwd_cancel_btn", None)
+        if cancel_btn is not None:
+            stoppable = bool(
+                getattr(self, "_guided_continuous_rwd_execution_active", False)
+                or self._guided_continuous_rwd_preparation_active()
+            )
+            cancel_btn.setVisible(stoppable)
+            cancel_btn.setEnabled(stoppable)
+        return True
+
+    def _on_guided_continuous_rwd_cancel_clicked(self) -> None:
+        if self._request_guided_continuous_rwd_cancellation():
+            cancel_btn = getattr(
+                self, "_guided_continuous_rwd_cancel_btn", None
+            )
+            if cancel_btn is not None:
+                cancel_btn.setEnabled(False)
+
+    def _on_guided_continuous_rwd_run_clicked(self) -> None:
+        """Start the prepared continuous run through the existing worker.
+
+        Rechecks currency here rather than trusting the button's enabled
+        state, then hands the already-prepared authorities to the accepted
+        CR1-E2 execution branch. No authority is rebuilt: only the
+        cooperative cancellation callable is attached, leaving every
+        scientific field the identical object preparation produced.
+        """
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return
+        ready, summary = self._guided_continuous_rwd_run_readiness()
+        if not ready:
+            button = getattr(self, "_guided_run_btn", None)
+            if button is not None:
+                button.setEnabled(False)
+            self._set_guided_continuous_rwd_status(summary)
+            return
+        prepared = getattr(self, "_guided_continuous_rwd_prepared_run", None)
+        if prepared is None:
+            return
+        cancel_event = threading.Event()
+        self._guided_continuous_rwd_execution_cancel_event = cancel_event
+        request = dataclasses.replace(
+            prepared.request,
+            cancellation_requested=cancel_event.is_set,
+        )
+        self._guided_continuous_rwd_execution_active = True
+        self._guided_backend_execution_active = True
+        self._guided_continuous_rwd_completed_run_dir = None
+        self._refresh_guided_review_handoff_display()
+        button = getattr(self, "_guided_run_btn", None)
+        if button is not None:
+            button.setEnabled(False)
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(False)
+        details_label = getattr(
+            self, "_guided_run_execution_details_label", None
+        )
+        if details_label is not None:
+            details_label.setText(
+                "Do not close this window until the analysis finishes."
+            )
+        self._set_guided_continuous_rwd_status("Running continuous analysis…")
+        self._start_guided_run_execution_worker(None, continuous_execution=request)
+
+    def _on_guided_continuous_rwd_execution_succeeded(self, result) -> None:
+        """GUI-thread slot: an accepted continuous backend returned a result.
+
+        A returned object is not by itself proof of a completed analysis:
+        the run directory must independently classify as a current success
+        through the existing completion contract before anything is
+        presented as completed or offered for review.
+        """
+        from photometry_pipeline.run_completion_contract import (
+            TERMINAL_SUCCESS_CURRENT,
+            classify_run_terminal_state,
+        )
+
+        self._guided_continuous_rwd_finish_execution()
+        run_dir = str(getattr(result, "run_dir", "") or "")
+        classification = None
+        if run_dir:
+            try:
+                classification = classify_run_terminal_state(run_dir)
+            except Exception as exc:
+                self._append_log(
+                    f"Continuous analysis completion check failed: {exc}"
+                )
+        if (
+            classification is None
+            or getattr(classification, "state", None) != TERMINAL_SUCCESS_CURRENT
+        ):
+            self._append_log(
+                "Continuous analysis did not classify as a completed run: "
+                f"run_dir={run_dir!r}"
+            )
+            self._set_guided_continuous_rwd_status(
+                "Continuous analysis could not be completed."
+            )
+            self._refresh_guided_run_readiness_display()
+            return
+        self._guided_continuous_rwd_completed_run_dir = run_dir
+        # The prepared run has been consumed: its output directory is
+        # allocated and its results are written. Require a fresh preparation
+        # before another run rather than reusing consumed authorities.
+        self._guided_continuous_rwd_prepared_run = None
+        self._set_guided_continuous_rwd_status("Continuous analysis completed.")
+        self._refresh_guided_review_handoff_display()
+        self._refresh_guided_run_readiness_display()
+
+    def _on_guided_continuous_rwd_execution_failed(self, message: str) -> None:
+        """GUI-thread slot: the accepted backend raised, or was cancelled.
+
+        Cancellation is classified by the accepted backends themselves (see
+        ``_guided_continuous_rwd_execution_is_cancellation``) and is never
+        reported as a failure or as a success. Neither outcome retries, calls
+        another backend, or falls back to the intermittent path.
+        """
+        self._guided_continuous_rwd_finish_execution()
+        text = str(message or "")
+        self._append_log(f"Continuous analysis ended: {text}")
+        self._guided_continuous_rwd_prepared_run = None
+        if text.startswith("cancelled:"):
+            self._set_guided_continuous_rwd_status(
+                "Continuous analysis was cancelled."
+            )
+        else:
+            self._set_guided_continuous_rwd_status(
+                "Continuous analysis could not be completed."
+            )
+        self._refresh_guided_run_readiness_display()
+
+    def _guided_continuous_rwd_finish_execution(self) -> None:
+        self._guided_continuous_rwd_execution_active = False
+        self._guided_backend_execution_active = False
+        self._guided_continuous_rwd_execution_cancel_event = None
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(True)
+
+    def _request_guided_continuous_rwd_cancellation(self) -> bool:
+        """Ask the active continuous preparation or run to stop.
+
+        Cooperative only: no thread is terminated. Preparation checks the
+        flag between accepted builder calls; execution forwards it to the
+        accepted backends' own cancellation contract.
+        """
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            event = getattr(
+                self, "_guided_continuous_rwd_execution_cancel_event", None
+            )
+            if event is not None:
+                event.set()
+                self._set_guided_continuous_rwd_status(
+                    "Stopping continuous analysis…"
+                )
+                return True
+            return False
+        if self._guided_continuous_rwd_preparation_active():
+            event = getattr(
+                self, "_guided_continuous_rwd_prepare_cancel_event", None
+            )
+            if event is not None:
+                event.set()
+                self._set_guided_continuous_rwd_status(
+                    "Stopping preparation…"
+                )
+                return True
+        return False
 
     @staticmethod
     def _format_guided_continuous_duration(duration_seconds: float) -> str:
@@ -13601,6 +14501,14 @@ class MainWindow(QMainWindow):
         ):
             self._clear_guided_npm_completed_output_handoff(clear_details=True)
 
+        # CR1-E3: a continuous-RWD plan has no candidate-session manifest,
+        # run authorization, or startup payload, so the intermittent
+        # readiness evaluation below can never describe it. Continuous owns
+        # its own fail-closed readiness instead; the intermittent evaluation
+        # is left exactly as it was.
+        if self._refresh_guided_continuous_rwd_run_readiness_display():
+            return
+
         from photometry_pipeline.guided_run_readiness import (
             evaluate_guided_run_readiness,
         )
@@ -13812,6 +14720,12 @@ class MainWindow(QMainWindow):
         startup-request/orchestration path RWD does -- the former
         diversion into the bespoke NPM worker (_on_guided_npm_run_clicked)
         is no longer reached from here."""
+        # CR1-E3: a live continuous-RWD plan runs one accepted continuous
+        # backend from its already-prepared authorities, not the intermittent
+        # startup-request path below.
+        if self._guided_continuous_rwd_live_draft() is not None:
+            self._on_guided_continuous_rwd_run_clicked()
+            return
         self._refresh_guided_run_readiness_display()
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
@@ -13908,17 +14822,28 @@ class MainWindow(QMainWindow):
         self._start_guided_run_live_status(request.planned_allocated_run_dir)
         self._start_guided_run_execution_worker(request)
 
-    def _start_guided_run_execution_worker(self, request) -> None:
+    def _start_guided_run_execution_worker(
+        self, request, *, continuous_execution=None
+    ) -> None:
         """Run the backend execution adapter on a worker thread.
 
         The immutable request and the optional low-level runner override
         are both read here, on the GUI thread, before the worker starts.
         The worker itself receives only these plain values and never holds
         a reference to `self` / MainWindow.
+
+        `continuous_execution` (CR1-E3) is the already-prepared
+        `_GuidedContinuousRwdExecutionRequest` for a live continuous-RWD
+        run. It is supplied only by
+        `_on_guided_continuous_rwd_run_clicked`; every other Guided path
+        (intermittent RWD, NPM, custom tabular) leaves it None and is
+        unaffected.
         """
         runner = getattr(self, "_guided_backend_execution_runner", None)
         thread = QThread(self)
-        worker = _GuidedRunExecutionWorker(request, runner)
+        worker = _GuidedRunExecutionWorker(
+            request, runner, continuous_execution=continuous_execution
+        )
         worker.moveToThread(thread)
         self._guided_run_execution_thread = thread
         self._guided_run_execution_worker = worker
@@ -13935,6 +14860,13 @@ class MainWindow(QMainWindow):
 
     def _on_guided_run_execution_succeeded(self, result) -> None:
         """GUI-thread slot: worker returned a normal execution result."""
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            # Continuous-RWD results implement none of the wrapper result
+            # contract this handler and
+            # _finish_guided_backend_execution_with_result read, so they must
+            # never be routed through it.
+            self._on_guided_continuous_rwd_execution_succeeded(result)
+            return
         self._guided_backend_execution_active = False
         self._stop_guided_run_live_status()
         validate_btn = getattr(self, "_guided_backend_validate_btn", None)
@@ -13944,6 +14876,9 @@ class MainWindow(QMainWindow):
 
     def _on_guided_run_execution_failed(self, _message: str) -> None:
         """GUI-thread slot: worker raised an unexpected exception."""
+        if getattr(self, "_guided_continuous_rwd_execution_active", False):
+            self._on_guided_continuous_rwd_execution_failed(_message)
+            return
         self._guided_backend_execution_active = False
         self._stop_guided_run_live_status()
         validate_btn = getattr(self, "_guided_backend_validate_btn", None)
@@ -14520,6 +15455,18 @@ class MainWindow(QMainWindow):
         )
         if button is None:
             return
+        # CR1-E3: a completed continuous-RWD run is offered for review from
+        # its own already-classified run directory. Continuous results carry
+        # none of the wrapper fields the intermittent gate below reads.
+        continuous_run_dir = getattr(
+            self, "_guided_continuous_rwd_completed_run_dir", None
+        )
+        if continuous_run_dir:
+            loading = getattr(self, "_guided_completed_review_loading", False)
+            button.setVisible(True)
+            button.setEnabled(not loading)
+            button.setToolTip("Open the completed continuous analysis.")
+            return
         result = getattr(self, "_guided_backend_execution_result", None)
         ready = bool(
             result is not None
@@ -14551,8 +15498,17 @@ class MainWindow(QMainWindow):
         """Loader-gate an explicit Guided transition into Review."""
         if getattr(self, "_guided_completed_review_loading", False):
             return
-        result = getattr(self, "_guided_backend_execution_result", None)
         label = getattr(self, "_guided_run_readiness_label", None)
+        continuous_run_dir = str(
+            getattr(self, "_guided_continuous_rwd_completed_run_dir", None) or ""
+        )
+        if continuous_run_dir:
+            # Same loader, same continuous Results branch as reopening any
+            # other completed continuous run (see
+            # _GuidedCompletedReviewLoadWorker).
+            self._start_guided_completed_review_load(continuous_run_dir)
+            return
+        result = getattr(self, "_guided_backend_execution_result", None)
         if (
             result is None
             or getattr(result, "status", "")
@@ -14579,6 +15535,15 @@ class MainWindow(QMainWindow):
                     "Guided Run did not provide a completed-run candidate."
                 )
             return
+        self._start_guided_completed_review_load(candidate)
+
+    def _start_guided_completed_review_load(self, candidate: str) -> None:
+        """Load one completed run for Review on a worker thread.
+
+        Shared by the intermittent completed-run handoff and the CR1-E3
+        continuous handoff: both reach the identical loader, which routes
+        continuous runs to the accepted continuous Results branch.
+        """
         thread = QThread(self)
         worker = _GuidedCompletedReviewLoadWorker(candidate)
         worker.moveToThread(thread)
@@ -18885,6 +19850,25 @@ class MainWindow(QMainWindow):
             self._on_guided_run_clicked_backend_guarded
         )
         run_layout.addWidget(self._guided_run_btn, alignment=Qt.AlignLeft)
+        # CR1-E3: shown only while a continuous recording is being prepared
+        # or run, both of which can take minutes. Cooperative stop only: it
+        # asks the accepted builders/backends to stop at their own next
+        # boundary and never terminates a thread.
+        self._guided_continuous_rwd_cancel_btn = QPushButton("Stop")
+        self._guided_continuous_rwd_cancel_btn.setObjectName(
+            "guidedContinuousRwdCancelButton"
+        )
+        self._guided_continuous_rwd_cancel_btn.setToolTip(
+            "Stop the continuous analysis. It stops at the next safe point, "
+            "so this can take a moment."
+        )
+        self._guided_continuous_rwd_cancel_btn.setVisible(False)
+        self._guided_continuous_rwd_cancel_btn.clicked.connect(
+            self._on_guided_continuous_rwd_cancel_clicked
+        )
+        run_layout.addWidget(
+            self._guided_continuous_rwd_cancel_btn, alignment=Qt.AlignLeft
+        )
         self._guided_run_readiness_label = QLabel("")
         self._guided_run_readiness_label.setObjectName(
             "guidedRunReadinessStatus"
