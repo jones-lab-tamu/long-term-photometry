@@ -718,7 +718,7 @@ class GuidedContinuousRwdRoiDiscoveryError(RuntimeError):
 
 
 def _discover_continuous_rwd_rois(
-    snapshot: dict[str, object], diag=None
+    snapshot: dict[str, object], diag=None, phase=None
 ) -> dict[str, object]:
     """Identify the canonical ROIs of one continuous RWD recording (CR1-F1-A).
 
@@ -772,6 +772,86 @@ def _discover_continuous_rwd_rois(
     }
 
 
+_GUIDED_STRUCTURE_PROBE_HEADER_ROWS = 60
+
+
+def _guided_bounded_rwd_header_columns(csv_path: str) -> list[str] | None:
+    """Return the RWD header columns of one file, reading only its first rows.
+
+    Bounded by construction (CR1-F1-C): it stops after
+    ``_GUIDED_STRUCTURE_PROBE_HEADER_ROWS`` rows, so its cost does not depend
+    on the size of the recording. This exists because the full contract
+    inference used previously does ``rows = list(reader)`` -- it pulls an
+    entire CSV into memory, which is 11 s on this project's 266 MB reference
+    recording and unbounded in general. A structural probe must never do that.
+
+    Returns the header columns, or ``None`` when no recognizable RWD header
+    appears within the bounded window.
+    """
+    time_candidates = ("TimeStamp", "Time(s)", "Timestamp", "Time")
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.reader(handle)
+            for _index, row in zip(range(_GUIDED_STRUCTURE_PROBE_HEADER_ROWS), reader):
+                columns = [str(cell).strip().lstrip("﻿") for cell in row]
+                if any(candidate in columns for candidate in time_candidates):
+                    return columns
+    except OSError:
+        return None
+    return None
+
+
+def _guided_probe_intermittent_rwd_structure(input_dir: str) -> bool:
+    """Whether the folder has the supported intermittent RWD *shape*.
+
+    Bounded: one directory scan through the accepted
+    ``io.adapters.discover_rwd_chunks`` (which also applies the accepted
+    session-name chronology policy), then a header-only read of a single
+    representative session file. No file is read in full, no RunSpec is built,
+    and no discovery subprocess is launched.
+
+    This answers only "does this look like repeated sessions?" -- the real
+    intermittent discovery still runs afterwards for the winning
+    interpretation and remains the authority on format and ROIs.
+    """
+    from photometry_pipeline.io.adapters import discover_rwd_chunks
+
+    try:
+        chunk_files = discover_rwd_chunks(input_dir)
+    except Exception:
+        # No session-folder structure (or its chronology is not acceptable).
+        return False
+    if not chunk_files:
+        return False
+    columns = _guided_bounded_rwd_header_columns(chunk_files[0])
+    if not columns:
+        return False
+    return MainWindow._infer_rwd_suffixes_from_header(columns) is not None
+
+
+def _guided_probe_continuous_rwd_structure(input_dir: str) -> bool:
+    """Whether the folder has the supported continuous RWD *shape*.
+
+    Bounded: the accepted continuous inspector's own precondition -- exactly
+    one ``Fluorescence.csv`` directly in the selected folder -- plus a
+    header-only read. The full continuous inspection (two passes over the
+    recording) runs later, and only for the winning interpretation.
+    """
+    from photometry_pipeline.io.rwd_continuous_source import _matching_fluorescence
+
+    try:
+        entries = tuple(Path(input_dir).iterdir())
+    except OSError:
+        return False
+    matches = _matching_fluorescence(entries)
+    if len(matches) != 1:
+        return False
+    columns = _guided_bounded_rwd_header_columns(str(matches[0]))
+    if not columns:
+        return False
+    return MainWindow._infer_rwd_suffixes_from_header(columns) is not None
+
+
 class _GuidedRoiDiscoveryWorker(QObject):
     """Run one already-snapshotted ROI discovery off the GUI thread.
 
@@ -787,6 +867,10 @@ class _GuidedRoiDiscoveryWorker(QObject):
     succeeded = Signal(object, int)
     failed = Signal(str, int)
     diagnostic = Signal(object)
+    # CR1-F1-C: truthful high-level phase text. Separate from `diagnostic`
+    # because that channel is silent unless discovery diagnostics are enabled,
+    # while the scientist must always see what the app is doing.
+    phase_changed = Signal(str)
 
     def __init__(
         self,
@@ -817,12 +901,17 @@ class _GuidedRoiDiscoveryWorker(QObject):
             }
         )
 
+    def _phase(self, message: str) -> None:
+        self.phase_changed.emit(str(message))
+
     def run(self) -> None:
         self._diag("worker_run_entered")
         try:
             started = time.monotonic()
             self._diag("run_discovery_start")
-            result = self._discovery_runner(self._snapshot, self._diag)
+            result = self._discovery_runner(
+                self._snapshot, self._diag, self._phase
+            )
             self._diag(
                 "run_discovery_end",
                 duration_sec=time.monotonic() - started,
@@ -5358,6 +5447,18 @@ class MainWindow(QMainWindow):
             str(event.get("label") or "worker_event"), **fields
         )
 
+    def _on_guided_discovery_phase_changed(self, message: str) -> None:
+        """GUI-thread slot: show what discovery is currently doing.
+
+        Only while discovery is actually running -- a phase that arrives after
+        a superseded request must not overwrite the settled text (CR1-F1-C).
+        """
+        if not getattr(self, "_guided_roi_discovery_running", False):
+            return
+        text = str(message or "").strip()
+        if text:
+            self._guided_discovery_summary_label.setText(text)
+
     def _set_guided_roi_discovery_running(
         self, running: bool, *, succeeded: bool | None = None
     ) -> None:
@@ -5377,7 +5478,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not running)
         if running:
             self._guided_discovery_summary_label.setText(
-                "Discovering ROIs..."
+                "Checking data format…"
             )
         elif succeeded is False:
             self._guided_discovery_summary_label.setText(
@@ -5464,6 +5565,7 @@ class MainWindow(QMainWindow):
         worker.diagnostic.connect(
             self._on_guided_discovery_diag_event
         )
+        worker.phase_changed.connect(self._on_guided_discovery_phase_changed)
         # Bound methods only: Qt queues these to the GUI thread because the
         # receiver is this QObject. Connecting a lambda here would make the
         # connection direct and run GUI population on the worker thread.
@@ -27404,7 +27506,7 @@ class MainWindow(QMainWindow):
         ).strip().lower()
 
         def run_intermittent(
-            captured: dict[str, object], diag=None
+            captured: dict[str, object], diag=None, phase=None
         ) -> dict[str, object]:
             if diag is not None:
                 diag("worker_build_spec_start")
@@ -27427,16 +27529,28 @@ class MainWindow(QMainWindow):
             return run_intermittent
 
         def run_auto_structure(
-            captured: dict[str, object], diag=None
+            captured: dict[str, object], diag=None, phase=None
         ) -> dict[str, object]:
             return self._resolve_guided_rwd_structure(
-                captured, run_intermittent, diag=diag
+                captured, run_intermittent, diag=diag, phase=phase
             )
 
         return run_auto_structure
 
+    def _emit_guided_discovery_phase(self, message: str, phase=None) -> None:
+        """Report one truthful high-level discovery phase (CR1-F1-C).
+
+        Runs on the discovery worker thread, so it must not touch widgets: it
+        emits through the worker's existing diagnostic signal, which is already
+        queued to the GUI thread and applied by
+        ``_on_guided_discovery_phase_changed``. No progress framework, no
+        percentages, no estimated completion, no file-by-file counters.
+        """
+        if phase is not None:
+            phase(str(message))
+
     def _resolve_guided_rwd_structure(
-        self, snapshot: dict[str, object], run_intermittent, diag=None
+        self, snapshot: dict[str, object], run_intermittent, diag=None, phase=None
     ) -> dict[str, object]:
         """Resolve repeated sessions versus one continuous recording, by
         validating the source with both accepted readers (CR1-F1-B).
@@ -27446,67 +27560,64 @@ class MainWindow(QMainWindow):
         and when both readings are genuinely valid the scientist is asked to
         choose rather than one being picked arbitrarily.
 
-        NPM and custom tabular resolve as soon as the accepted format
-        discovery identifies them: they have one structure, and the continuous
-        RWD inspector is never run for them.
+        CR1-F1-C: classification is now done with *bounded* probes -- a
+        directory scan plus a header-only read for each candidate structure --
+        instead of running a full discovery to find out. Only the winning
+        interpretation then does real work, so the losing one can never cost
+        more than a few kilobytes of reading. The previous design used the
+        full intermittent discovery as the probe, whose contract inference
+        pulls whole CSVs into memory (11 s on this project's 266 MB reference
+        recording) and can go on to launch a discovery subprocess.
+
+        NPM and custom tabular have no RWD structure to tell apart, so they
+        fall through to the existing accepted Auto-format discovery and the
+        continuous inspector is never run for them.
         """
-        intermittent_result: dict[str, object] | None = None
-        intermittent_error: Exception | None = None
+        input_dir = str(snapshot.get("input_dir", "") or "")
+
+        self._emit_guided_discovery_phase("Checking recording structure…", phase)
         if diag is not None:
-            diag("auto_structure_intermittent_start")
-        try:
-            # The intermittent validator must judge the source as repeated
-            # sessions, whatever a previous explicit choice left behind.
-            intermittent_snapshot = dict(snapshot)
-            intermittent_snapshot["acquisition_mode"] = "intermittent"
-            intermittent_result = run_intermittent(intermittent_snapshot, diag)
-        except Exception as exc:
-            intermittent_error = exc
+            diag("auto_structure_probe_start")
+        looks_intermittent = _guided_probe_intermittent_rwd_structure(input_dir)
+        looks_continuous = _guided_probe_continuous_rwd_structure(input_dir)
         if diag is not None:
             diag(
-                "auto_structure_intermittent_end",
-                ok=intermittent_result is not None,
+                "auto_structure_probe_end",
+                intermittent=looks_intermittent,
+                continuous=looks_continuous,
             )
 
-        if intermittent_result is not None:
-            resolved_format = str(
-                intermittent_result.get("resolved_format", "") or ""
-            ).strip().lower()
-            if resolved_format in {"npm", "custom_tabular"}:
-                resolved = dict(intermittent_result)
-                resolved["acquisition_mode"] = "intermittent"
-                return resolved
-
-        continuous_result: dict[str, object] | None = None
-        if diag is not None:
-            diag("auto_structure_continuous_start")
-        try:
-            continuous_result = _discover_continuous_rwd_rois(snapshot, diag)
-        except Exception:
-            continuous_result = None
-        if diag is not None:
-            diag(
-                "auto_structure_continuous_end",
-                ok=continuous_result is not None,
-            )
-
-        if intermittent_result is not None and continuous_result is not None:
+        if looks_intermittent and looks_continuous:
             raise GuidedContinuousRwdRoiDiscoveryError(
                 "This folder can be read either as repeated sessions or as "
                 "one continuous recording. Choose the recording structure, "
                 "then select ROIs again."
             )
-        if continuous_result is not None:
-            return continuous_result
-        if intermittent_result is not None:
-            resolved = dict(intermittent_result)
-            resolved.setdefault("acquisition_mode", "intermittent")
-            return resolved
-        raise GuidedContinuousRwdRoiDiscoveryError(
-            "This folder could not be read as supported RWD data. Check that "
-            "you selected the recording folder, or choose the data format and "
-            "recording structure yourself."
-        ) from intermittent_error
+
+        if looks_continuous:
+            # The accepted inspector both validates and reports the ROIs, so
+            # one pass answers the whole question.
+            self._emit_guided_discovery_phase(
+                "Checking continuous recording…", phase
+            )
+            return _discover_continuous_rwd_rois(snapshot, diag)
+
+        # Repeated sessions, or a format that has only that structure (NPM,
+        # custom tabular). Either way the existing accepted discovery is the
+        # authority on format and ROIs, and it runs exactly once.
+        self._emit_guided_discovery_phase("Discovering ROIs…", phase)
+        intermittent_snapshot = dict(snapshot)
+        intermittent_snapshot["acquisition_mode"] = "intermittent"
+        try:
+            resolved = dict(run_intermittent(intermittent_snapshot, diag))
+        except Exception as exc:
+            raise GuidedContinuousRwdRoiDiscoveryError(
+                "This folder could not be read as supported data. Check that "
+                "you selected the recording folder, or choose the data format "
+                "and recording structure yourself."
+            ) from exc
+        resolved.setdefault("acquisition_mode", "intermittent")
+        return resolved
 
     def _build_discovery_spec_from_snapshot(
         self,

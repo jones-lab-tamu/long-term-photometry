@@ -103,7 +103,7 @@ def _stub_intermittent(window, monkeypatch, result=None, error=None):
     """Replace only the intermittent discovery seam, leaving routing real."""
     calls: list[dict] = []
 
-    def fake_runner(captured, diag=None):
+    def fake_runner(captured, diag=None, phase=None):
         calls.append(dict(captured))
         if error is not None:
             raise error
@@ -116,9 +116,9 @@ def _stub_intermittent(window, monkeypatch, result=None, error=None):
         if getattr(chosen, "__name__", "") == "run_intermittent":
             return fake_runner
         if getattr(chosen, "__name__", "") == "run_auto_structure":
-            def auto(captured, diag=None):
+            def auto(captured, diag=None, phase=None):
                 return window._resolve_guided_rwd_structure(
-                    captured, fake_runner, diag=diag
+                    captured, fake_runner, diag=diag, phase=phase
                 )
 
             return auto
@@ -285,13 +285,22 @@ def test_intermittent_only_valid_resolves_intermittent(
     assert window._guided_select_data_ready_to_continue() is True
 
 
-def test_both_valid_refuses_to_guess(window, qapp, tmp_path, monkeypatch):
-    """A source both readers accept is handed back to the scientist."""
-    folder = _continuous_folder(tmp_path / "rec")
-    _select_data(window, folder)
-    _stub_intermittent(
-        window, monkeypatch, result=_fake_intermittent_result("rwd")
+def test_both_valid_refuses_to_guess(window, qapp, tmp_path):
+    """A source both readings accept is handed back to the scientist.
+
+    CR1-F1-C decides this from the bounded structure probes, so the folder
+    must genuinely have both shapes: timestamped session subfolders *and* a
+    Fluorescence.csv directly inside.
+    """
+    folder = _continuous_folder(tmp_path / "both")
+    session = folder / "2026_03_16-10_00_00"
+    session.mkdir()
+    (session / "fluorescence.csv").write_text(
+        (folder / "Fluorescence.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+        newline="",
     )
+    _select_data(window, folder)
 
     window._on_guided_discover_rois()
     _pump_discovery(window, qapp)
@@ -331,7 +340,7 @@ def test_neither_valid_message_has_no_parser_detail(window, tmp_path):
         "acquisition_mode": "intermittent",
     }
 
-    def failing_intermittent(captured, diag=None):
+    def failing_intermittent(captured, diag=None, phase=None):
         raise ValueError(
             "No valid UV/SIG channel suffix pair found in header: X\\Events.csv"
         )
@@ -340,7 +349,9 @@ def test_neither_valid_message_has_no_parser_detail(window, tmp_path):
         window._resolve_guided_rwd_structure(snapshot, failing_intermittent)
 
     message = str(excinfo.value)
-    assert "could not be read as supported RWD data" in message
+    # CR1-F1-C widened this to "supported data": the same fall-through now
+    # also covers NPM and custom tabular, which are not RWD.
+    assert "could not be read as supported data" in message
     for forbidden in ("Traceback", "ValueError", "UV/SIG", "Events.csv"):
         assert forbidden not in message
 
