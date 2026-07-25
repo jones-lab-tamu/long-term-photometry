@@ -448,8 +448,12 @@ def test_recording_check_is_not_repeated_for_an_already_checked_plan(
     folder = tmp_path / "no_repeat"
     source = _write_source(folder)
     draft = _draft_for(folder, source)
-    _install_plan(window, monkeypatch, draft, source)
+    # The recording structure is chosen first (CR1-F1-A moved that choice into
+    # Select data). Choosing it *after* installing a binding would correctly
+    # invalidate that binding, which is a different behavior -- covered by
+    # tests/test_gui_guided_recording_structure_before_discovery.py.
     _select_continuous_rwd_setup(window, folder)
+    _install_plan(window, monkeypatch, draft, source)
 
     window._on_guided_continue_to_correction_approach()
     window._on_guided_continue_to_correction_approach()

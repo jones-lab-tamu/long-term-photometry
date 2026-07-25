@@ -27,6 +27,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
 )
 from tests.test_gui_guided_workflow import (
     _configure_guided_raw_cache_setup,
+    _populate_fake_discovery,
     _generate_ready_guided_correction_preview,
     _label_texts,
     _load_preview_completed_run,
@@ -227,6 +228,12 @@ def _configure_complete_guided_new_analysis_draft(
         )
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+        # CR1-F1-A: the recording structure is now chosen before the source is
+        # read, and changing it discards ROIs discovered under the previous
+        # structure. Re-run discovery here so this fixture reflects the real
+        # order (choose structure -> discover) instead of relying on ROIs that
+        # were discovered before the choice.
+        _populate_fake_discovery(window)
     if acquisition_mode == "intermittent":
         window._guided_sessions_per_hour_edit.setText("6")
         window._guided_session_duration_edit.setText(

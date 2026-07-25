@@ -702,24 +702,101 @@ class _GuidedContinuousRwdRecordingCheckWorker(QObject):
         self._cancel_event.set()
 
 
+class GuidedContinuousRwdRoiDiscoveryError(RuntimeError):
+    """The selected folder cannot be read as one continuous RWD recording.
+
+    The message is scientist-facing: it comes from the accepted continuous
+    source inspector's own ``scientist_summary``, never from a parser class,
+    traceback, or internal contract name.
+    """
+
+
+def _discover_continuous_rwd_rois(
+    snapshot: dict[str, object], diag=None
+) -> dict[str, object]:
+    """Identify the canonical ROIs of one continuous RWD recording (CR1-F1-A).
+
+    Reuses the accepted continuous source inspector
+    (``photometry_pipeline.io.rwd_continuous_source.
+    inspect_continuous_rwd_acquisition_folder``) -- the same reader the later
+    continuous recording check already builds its recording description from
+    -- so there is exactly one continuous parsing implementation. It
+    deliberately stops at ROI identity: no target grid, block plan, segment
+    plan, dynamic-F0 authority, or execution Config is built here.
+
+    Takes only plain snapshot values and touches no widget, so it is safe to
+    call from the discovery worker thread. Returns the same discovery-result
+    shape the intermittent path returns, with no sessions: a continuous
+    recording is one recording, not a set of sessions.
+    """
+    from photometry_pipeline.io.rwd_continuous_source import (
+        inspect_continuous_rwd_acquisition_folder,
+    )
+
+    input_dir = str(snapshot["input_dir"])
+    if diag is not None:
+        diag("continuous_source_inspection_start")
+    inspection = inspect_continuous_rwd_acquisition_folder(input_dir)
+    if diag is not None:
+        diag("continuous_source_inspection_end")
+    if not inspection.inspection_completed:
+        summary = str(getattr(inspection, "scientist_summary", "") or "").strip()
+        raise GuidedContinuousRwdRoiDiscoveryError(
+            summary
+            or (
+                "This folder could not be read as a continuous RWD "
+                "recording. Check that you selected the recording folder "
+                "containing the expected Fluorescence.csv data."
+            )
+        )
+    channels = getattr(inspection, "channels", None)
+    roi_pairs = tuple(getattr(channels, "roi_pairs", ()) or ())
+    if not roi_pairs:
+        raise GuidedContinuousRwdRoiDiscoveryError(
+            "No usable signal/reference channel pairs were found in this "
+            "continuous recording."
+        )
+    return {
+        "resolved_format": "rwd",
+        "acquisition_mode": "continuous",
+        "rois": [{"roi_id": pair.roi_id} for pair in roi_pairs],
+        "sessions": [],
+        "n_total_discovered": 0,
+        "n_preview": 0,
+    }
+
+
 class _GuidedRoiDiscoveryWorker(QObject):
-    succeeded = Signal(object)
-    failed = Signal(str)
+    """Run one already-snapshotted ROI discovery off the GUI thread.
+
+    ``discovery_runner`` is chosen on the GUI thread from the explicit
+    recording-structure choice captured in ``snapshot`` (CR1-F1-A) and
+    consumes only that immutable snapshot. The worker never re-reads the
+    acquisition-mode combo, and never routes by itself.
+    """
+
+    # The discovery generation travels with the result rather than being bound
+    # into a lambda: a lambda has no QObject receiver, so Qt would connect it
+    # DIRECTLY and run the GUI-thread slot on this worker thread.
+    succeeded = Signal(object, int)
+    failed = Signal(str, int)
     diagnostic = Signal(object)
 
     def __init__(
         self,
         snapshot: dict[str, object],
-        spec_builder,
+        discovery_runner,
         *,
         start_monotonic: float,
         gui_thread_id: int,
+        generation: int = 0,
     ):
         super().__init__()
         self._snapshot = dict(snapshot)
-        self._spec_builder = spec_builder
+        self._discovery_runner = discovery_runner
         self._start_monotonic = float(start_monotonic)
         self._gui_thread_id = int(gui_thread_id)
+        self._generation = int(generation)
 
     def _diag(self, label: str, **fields) -> None:
         if not GUIDED_DISCOVERY_DIAGNOSTICS:
@@ -737,16 +814,9 @@ class _GuidedRoiDiscoveryWorker(QObject):
     def run(self) -> None:
         self._diag("worker_run_entered")
         try:
-            build_started = time.monotonic()
-            self._diag("worker_build_spec_start")
-            spec = self._spec_builder(self._snapshot)
-            self._diag(
-                "worker_build_spec_end",
-                duration_sec=time.monotonic() - build_started,
-            )
             started = time.monotonic()
             self._diag("run_discovery_start")
-            result = spec.run_discovery()
+            result = self._discovery_runner(self._snapshot, self._diag)
             self._diag(
                 "run_discovery_end",
                 duration_sec=time.monotonic() - started,
@@ -755,14 +825,19 @@ class _GuidedRoiDiscoveryWorker(QObject):
                 resolved_format=result.get("resolved_format", ""),
             )
             self._diag("worker_emit_success")
-            self.succeeded.emit(result)
+            self.succeeded.emit(result, self._generation)
+        except GuidedContinuousRwdRoiDiscoveryError as exc:
+            # Already scientist-facing; marked so the GUI shows it directly
+            # instead of the generic intermittent guidance.
+            self._diag("worker_failure", exception_type=type(exc).__name__, message=str(exc))
+            self.failed.emit(f"reason: {exc}", self._generation)
         except Exception as exc:
             self._diag(
                 "worker_failure",
                 exception_type=type(exc).__name__,
                 message=str(exc),
             )
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit(f"{type(exc).__name__}: {exc}", self._generation)
 
 
 class _GuidedCorrectionPreviewWorker(QObject):
@@ -3054,6 +3129,10 @@ class MainWindow(QMainWindow):
         self._guided_recording_timing_applying = False
         self._guided_recording_timing_inference = None
         self._guided_roi_discovery_running = False
+        # CR1-F1-A: bumped whenever the recording structure changes, so a
+        # discovery still running under the previous structure cannot install
+        # its ROIs afterwards.
+        self._guided_discovery_generation = 0
         self._guided_roi_discovery_thread = None
         self._guided_roi_discovery_worker = None
         self._guided_roi_discovery_diag_start = None
@@ -3372,6 +3451,70 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
 
+        # CR1-F1-A: format and recording structure come first. Reading the
+        # source correctly depends on both, so the scientist states them
+        # before choosing the folder and before ROI discovery interprets it.
+        self._guided_format_combo = QComboBox()
+        self._guided_format_combo.setObjectName("guidedFormatCombo")
+        self._guided_format_combo.addItems(list(FORMAT_CHOICES))
+        self._guided_format_combo.setToolTip(self._format_combo.toolTip())
+        self._guided_format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_format_combo.setMinimumContentsLength(8)
+        self._make_guided_widget_shrinkable(self._guided_format_combo)
+        form.addRow("Format:", self._guided_format_combo)
+
+        self._guided_format_help_label = QLabel(
+            "Auto will detect the data format when you select ROIs."
+        )
+        self._guided_format_help_label.setObjectName("guidedFormatHelp")
+        self._guided_format_help_label.setProperty("guidedMutedText", True)
+        self._guided_format_help_label.setWordWrap(True)
+        form.addRow("", self._guided_format_help_label)
+
+        self._guided_acquisition_mode_combo = QComboBox()
+        self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
+        acquisition_mode_labels = {
+            "intermittent": "Intermittent/session-based recording",
+            "continuous": "Continuous/one long recording",
+        }
+        for acquisition_mode in GUIDED_PRODUCTION_ACQUISITION_MODES:
+            self._guided_acquisition_mode_combo.addItem(
+                acquisition_mode_labels[acquisition_mode],
+                acquisition_mode,
+            )
+        self._guided_acquisition_mode_combo.setToolTip(
+            "Choose how your recording was saved: as repeated sessions, or as "
+            "one long continuous recording."
+        )
+        self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
+        self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
+        form.addRow("Recording structure:", self._guided_acquisition_mode_combo)
+
+        self._guided_intermittent_explanation_label = QLabel(
+            "Use this mode when your recording is saved as repeated "
+            "sessions. The app can usually detect how many sessions occur "
+            "per hour and how long each session lasts."
+        )
+        self._guided_intermittent_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_intermittent_explanation_label.setWordWrap(True)
+        form.addRow("", self._guided_intermittent_explanation_label)
+        self._guided_continuous_explanation_label = QLabel(
+            "Use this mode when your recording is saved as one long "
+            "recording instead of repeated sessions. The app reads the whole "
+            "recording and reports results in equal windows whose length you "
+            "choose in the next step. Continuous recordings are supported for "
+            "RWD data."
+        )
+        self._guided_continuous_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_continuous_explanation_label.setWordWrap(True)
+        self._guided_continuous_explanation_label.setVisible(False)
+        form.addRow("", self._guided_continuous_explanation_label)
+
         self._guided_input_dir_edit = QLineEdit()
         self._guided_input_dir_edit.setObjectName("guidedInputDirectory")
         self._guided_input_dir_edit.setToolTip(self._input_dir.toolTip())
@@ -3408,23 +3551,6 @@ class MainWindow(QMainWindow):
         output_help_label.setProperty("guidedMutedText", True)
         output_help_label.setWordWrap(True)
         form.addRow("", output_help_label)
-
-        self._guided_format_combo = QComboBox()
-        self._guided_format_combo.setObjectName("guidedFormatCombo")
-        self._guided_format_combo.addItems(list(FORMAT_CHOICES))
-        self._guided_format_combo.setToolTip(self._format_combo.toolTip())
-        self._guided_format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self._guided_format_combo.setMinimumContentsLength(8)
-        self._make_guided_widget_shrinkable(self._guided_format_combo)
-        form.addRow("Format:", self._guided_format_combo)
-
-        self._guided_format_help_label = QLabel(
-            "Auto will detect the data format when you select ROIs."
-        )
-        self._guided_format_help_label.setObjectName("guidedFormatHelp")
-        self._guided_format_help_label.setProperty("guidedMutedText", True)
-        self._guided_format_help_label.setWordWrap(True)
-        form.addRow("", self._guided_format_help_label)
 
         roi_group = QGroupBox("ROI discovery and selection")
         roi_group.setObjectName("guidedRoiDiscoveryGroup")
@@ -3536,49 +3662,10 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
 
-        self._guided_acquisition_mode_combo = QComboBox()
-        self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
-        acquisition_mode_labels = {
-            "intermittent": "Intermittent/session-based recording",
-            "continuous": "Continuous/one long recording",
-        }
-        for acquisition_mode in GUIDED_PRODUCTION_ACQUISITION_MODES:
-            self._guided_acquisition_mode_combo.addItem(
-                acquisition_mode_labels[acquisition_mode],
-                acquisition_mode,
-            )
-        self._guided_acquisition_mode_combo.setToolTip(
-            "Choose how your recording was saved: as repeated sessions, or as "
-            "one long continuous recording."
-        )
-        self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
-        self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
-        form.addRow("Acquisition mode:", self._guided_acquisition_mode_combo)
-
-        self._guided_intermittent_explanation_label = QLabel(
-            "Use this mode when your recording is saved as repeated "
-            "sessions. The app can usually detect how many sessions occur "
-            "per hour and how long each session lasts."
-        )
-        self._guided_intermittent_explanation_label.setProperty(
-            "guidedSecondaryText", True
-        )
-        self._guided_intermittent_explanation_label.setWordWrap(True)
-        form.addRow("", self._guided_intermittent_explanation_label)
-        self._guided_continuous_explanation_label = QLabel(
-            "Use this mode when your recording is saved as one long "
-            "recording instead of repeated sessions. The app reads the whole "
-            "recording and reports results in equal windows of the length "
-            "you choose below. Continuous recordings are supported for RWD "
-            "data."
-        )
-        self._guided_continuous_explanation_label.setProperty(
-            "guidedSecondaryText", True
-        )
-        self._guided_continuous_explanation_label.setWordWrap(True)
-        self._guided_continuous_explanation_label.setVisible(False)
-        form.addRow("", self._guided_continuous_explanation_label)
+        # CR1-F1-A: the recording-structure choice itself now lives in Select
+        # data (see _build_guided_select_data_step), because ROI discovery has
+        # to know it before it can read the source. This step keeps only the
+        # settings specific to the structure the scientist already chose.
         self._guided_recording_timing_inference_label = QLabel(
             "Session timing has not been detected yet."
         )
@@ -3854,6 +3941,11 @@ class MainWindow(QMainWindow):
                 self._acquisition_mode_combo,
                 self._guided_acquisition_mode_combo.currentData(),
             )
+        )
+        # CR1-F1-A: ROIs discovered by reading the source one way must never be
+        # carried over and used as if the source had been read the other way.
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._discard_guided_discovery_for_structure_change()
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._refresh_guided_navigation_state()
@@ -4788,6 +4880,11 @@ class MainWindow(QMainWindow):
             return
         self._discovery_cache = None
         self._rwd_contract_cache = None
+        # CR1-F1-A: continuous exists only for RWD. Moving to a format that
+        # cannot do it must not leave an unrunnable continuous plan behind, so
+        # the structure returns to intermittent before anything reads the
+        # source again.
+        self._return_guided_structure_to_intermittent_if_unsupported()
         if hasattr(self, "_guided_format_help_label"):
             selected = self._guided_format_combo.currentText().strip().lower()
             self._guided_format_help_label.setText(
@@ -5308,9 +5405,10 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = _GuidedRoiDiscoveryWorker(
             snapshot,
-            self._build_discovery_spec_from_snapshot,
+            self._guided_discovery_runner_for_snapshot(snapshot),
             start_monotonic=self._guided_roi_discovery_diag_start,
             gui_thread_id=self._guided_roi_discovery_gui_thread_id,
+            generation=int(getattr(self, "_guided_discovery_generation", 0)),
         )
         worker.moveToThread(thread)
         self._guided_roi_discovery_thread = thread
@@ -5319,6 +5417,9 @@ class MainWindow(QMainWindow):
         worker.diagnostic.connect(
             self._on_guided_discovery_diag_event
         )
+        # Bound methods only: Qt queues these to the GUI thread because the
+        # receiver is this QObject. Connecting a lambda here would make the
+        # connection direct and run GUI population on the worker thread.
         worker.succeeded.connect(
             self._on_guided_roi_discovery_succeeded
         )
@@ -5335,9 +5436,24 @@ class MainWindow(QMainWindow):
         thread.start()
         self._guided_roi_discovery_diag("thread_start_after")
 
+    def _guided_discovery_result_is_current(self, generation: int | None) -> bool:
+        """Whether a discovery result still describes the chosen structure."""
+        if generation is None:
+            return True
+        return int(generation) == int(
+            getattr(self, "_guided_discovery_generation", 0)
+        )
+
     def _on_guided_roi_discovery_succeeded(
-        self, discovery: dict[str, object]
+        self, discovery: dict[str, object], generation: int | None = None
     ) -> None:
+        if not self._guided_discovery_result_is_current(generation):
+            # Discovered under a recording structure the scientist has since
+            # changed; those ROI identities must not be installed.
+            self._guided_roi_discovery_diag("stale_success_discarded")
+            self._set_guided_roi_discovery_running(False, succeeded=False)
+            self._refresh_guided_navigation_state()
+            return
         self._guided_roi_discovery_diag(
             "success_slot_entered",
             sessions=len(discovery.get("sessions", [])),
@@ -5395,7 +5511,16 @@ class MainWindow(QMainWindow):
         )
         self._guided_roi_discovery_diag("success_slot_exiting")
 
-    def _on_guided_roi_discovery_failed(self, message: str) -> None:
+    def _on_guided_roi_discovery_failed(
+        self, message: str, generation: int | None = None
+    ) -> None:
+        if not self._guided_discovery_result_is_current(generation):
+            # A failure produced under the previous recording structure is not
+            # this structure's failure; showing it would be misleading.
+            self._guided_roi_discovery_diag("stale_failure_discarded")
+            self._set_guided_roi_discovery_running(False, succeeded=False)
+            self._refresh_guided_navigation_state()
+            return
         self._guided_roi_discovery_diag(
             "failure_slot_entered", message=message
         )
@@ -5435,8 +5560,16 @@ class MainWindow(QMainWindow):
 
         The full parser error remains in the application log for support,
         but it is not useful as the primary instruction in a blocking dialog.
+
+        A ``reason:``-prefixed message was already written for a scientist by
+        the accepted continuous source inspector (CR1-F1-A) and is shown as
+        it stands -- the session-oriented guidance below would be actively
+        misleading for one continuous recording.
         """
-        lowered = str(message or "").lower()
+        text = str(message or "")
+        if text.startswith("reason:"):
+            return text[len("reason:"):].strip()
+        lowered = text.lower()
         if "no recognizable rwd header" in lowered or "header row" in lowered:
             return (
                 "The selected recording does not contain a recognizable "
@@ -5785,14 +5918,89 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _guided_discovery_status_text(disco: dict) -> str:
-        """Plain-language ROI discovery status; independent of Full Control's label."""
+        """Plain-language ROI discovery status; independent of Full Control's label.
+
+        A continuous recording is one recording, not a set of sessions, so it
+        is never described with a session count (CR1-F1-A).
+        """
         fmt = str(disco.get("resolved_format", "") or "").strip().upper() or "the detected"
+        if str(disco.get("acquisition_mode", "") or "").strip().lower() == "continuous":
+            return (
+                f"Detected {fmt} data as one continuous recording. "
+                "Channels detected below."
+            )
         n_total = int(disco.get("n_total_discovered", 0) or 0)
         session_word = "session" if n_total == 1 else "sessions"
         return (
             f"Detected {fmt} data with {n_total} recording {session_word}. "
             "Channels detected below."
         )
+
+    def _return_guided_structure_to_intermittent_if_unsupported(self) -> None:
+        """Put the structure back to repeated sessions when the chosen input
+        format has no continuous production path.
+
+        Only RWD has one, so selecting NPM or custom tabular while continuous
+        was chosen would otherwise leave a plan that can never run. Setting
+        the combo fires the ordinary structure-change handling, which clears
+        the stale discovery and the continuous review binding.
+        """
+        combo = getattr(self, "_guided_acquisition_mode_combo", None)
+        format_combo = getattr(self, "_guided_format_combo", None)
+        if combo is None or format_combo is None:
+            return
+        if str(combo.currentData() or "").strip().lower() != "continuous":
+            return
+        if str(format_combo.currentText() or "").strip().lower() == "rwd":
+            return
+        intermittent_index = combo.findData("intermittent")
+        if intermittent_index >= 0:
+            combo.setCurrentIndex(intermittent_index)
+
+    def _discard_guided_discovery_for_structure_change(self) -> None:
+        """Drop ROIs discovered under the previous recording structure.
+
+        Changing between one long recording and repeated sessions changes how
+        the source is read, so the ROI identities found under the old reading
+        are no longer meaningful. They are cleared rather than reused, a fresh
+        discovery is required before Continue re-enables, and the continuous
+        review binding and any prepared continuous run are invalidated through
+        the existing central Guided hook (CR1-F1-A).
+
+        A stale discovery still in flight is discarded by the existing token,
+        which the bumped generation below invalidates.
+        """
+        if getattr(self, "_guided_discovery_generation", None) is None:
+            self._guided_discovery_generation = 0
+        self._guided_discovery_generation += 1
+        had_discovery = bool(
+            getattr(self, "_discovery_cache", None) is not None
+            or (
+                hasattr(self, "_guided_roi_list")
+                and self._guided_roi_list.count()
+            )
+        )
+        self._discovery_cache = None
+        if hasattr(self, "_guided_roi_list"):
+            self._guided_roi_list.clear()
+        if hasattr(self, "_roi_list"):
+            self._roi_list.clear()
+        if hasattr(self, "_sessions_list"):
+            self._sessions_list.clear()
+        if hasattr(self, "_roi_selection_container"):
+            self._roi_selection_container.setVisible(False)
+        summary = getattr(self, "_guided_discovery_summary_label", None)
+        if summary is not None:
+            summary.setText(
+                "Select ROIs to read this folder as the recording structure "
+                "you chose."
+            )
+        self._clear_guided_continuous_rwd_review_binding()
+        if had_discovery:
+            self._invalidate_guided_backend_validation(
+                "recording structure changed"
+            )
+        self._refresh_guided_navigation_state()
 
     def _guided_roi_list_state(self) -> dict[str, bool]:
         """{roi_id: checked} snapshot of the current Guided ROI checklist."""
@@ -27049,6 +27257,38 @@ class MainWindow(QMainWindow):
                 self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
             ),
         }
+
+    def _guided_discovery_runner_for_snapshot(self, snapshot: dict[str, object]):
+        """Pick the discovery implementation from the explicit choices.
+
+        Routes on the recording structure the scientist actually chose in
+        Select data, captured in the immutable snapshot on the GUI thread
+        (CR1-F1-A). There is no heuristic: the source is never sniffed by path
+        name or file count, intermittent discovery is never attempted first,
+        and an intermittent failure is never silently reinterpreted as
+        continuous.
+
+        The intermittent RWD path infers a per-session chunk contract from the
+        CSVs in the folder, which is exactly what fails on a continuous
+        acquisition folder: it has no session chunks, and its non-fluorescence
+        CSVs (``Events.csv``, ``Outputs.csv``) are not recordings.
+        """
+        input_format = str(snapshot.get("format", "")).strip().lower()
+        acquisition_mode = str(snapshot.get("acquisition_mode", "")).strip().lower()
+        if input_format == "rwd" and acquisition_mode == "continuous":
+            return _discover_continuous_rwd_rois
+
+        def run_intermittent(
+            captured: dict[str, object], diag=None
+        ) -> dict[str, object]:
+            if diag is not None:
+                diag("worker_build_spec_start")
+            spec = self._build_discovery_spec_from_snapshot(captured)
+            if diag is not None:
+                diag("worker_build_spec_end")
+            return spec.run_discovery()
+
+        return run_intermittent
 
     def _build_discovery_spec_from_snapshot(
         self,
