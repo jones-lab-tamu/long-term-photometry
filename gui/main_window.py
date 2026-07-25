@@ -3319,6 +3319,14 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_check_active_token = None
         self._guided_continuous_rwd_check_snapshot = None
         self._guided_continuous_rwd_check_terminal_token = None
+        # How the last recording check ended, so pages that depend on it can
+        # say what really happened (CR1-F1-E). "" means no check has finished.
+        self._guided_continuous_rwd_check_outcome = ""
+        self._guided_continuous_rwd_check_outcome_message = ""
+        # This window is built on the GUI thread, so this is the thread its
+        # widgets belong to. Recorded here so worker callbacks can tell
+        # whether they need to hand their work back to it (CR1-F1-E).
+        self._gui_thread_ident = threading.get_ident()
         self._guided_continuous_rwd_check_closing = False
         # CR1-E3 continuous-RWD execution state. The prepared run and its
         # status are session-scoped GUI state only: nothing here is persisted,
@@ -7890,6 +7898,62 @@ class MainWindow(QMainWindow):
             )
         return segments
 
+    def _guided_continuous_recording_check_running(self) -> bool:
+        """Whether a recording check is running for the plan on screen now."""
+        return (
+            getattr(self, "_guided_continuous_rwd_check_active_token", None)
+            is not None
+        )
+
+    def _guided_continuous_recording_check_message(self) -> str:
+        """Say what the recording check is actually doing (CR1-F1-E).
+
+        Every branch is derived from live state, so the page can never report
+        a check as still running once it has stopped. It is only reached when
+        no usable analysis window is available yet.
+        """
+        if self._guided_continuous_recording_check_running():
+            return "Checking the continuous recording…"
+        if self._guided_continuous_rwd_accepted_plan() is not None:
+            # Checked and accepted, so the only thing left that can withhold a
+            # window is the window length itself.
+            return (
+                "The analysis window is longer than this recording. Choose a "
+                "shorter analysis window on Recording structure."
+            )
+        outcome = str(
+            getattr(self, "_guided_continuous_rwd_check_outcome", "") or ""
+        )
+        if outcome == "failed":
+            reason = str(
+                getattr(
+                    self, "_guided_continuous_rwd_check_outcome_message", ""
+                )
+                or ""
+            ).strip()
+            return (
+                f"{reason or 'The recording could not be checked.'} "
+                "Go back to Recording structure and continue again to check "
+                "the recording."
+            )
+        if (
+            outcome == "succeeded"
+            or getattr(self, "_guided_continuous_rwd_review_binding", None)
+            is not None
+        ):
+            # A check did succeed, but for a different set of choices than the
+            # ones on screen now -- so this plan has no accepted recording. Its
+            # binding may already have been dropped, which is why the outcome
+            # is what distinguishes this from never having checked at all.
+            return (
+                "Recording settings changed. Go back to Recording structure "
+                "and continue again to check the recording."
+            )
+        return (
+            "This recording has not been checked yet. Go back to Recording "
+            "structure and continue again to check it."
+        )
+
     def _guided_continuous_preview_config_overrides(self) -> dict[str, object]:
         """Reader settings for a continuous preview window.
 
@@ -8039,13 +8103,7 @@ class MainWindow(QMainWindow):
                 self._guided_preview_loaded_run_dir = ""
                 if continuous and included_rois:
                     self._guided_preview_source_reason = (
-                        "The analysis window is longer than this recording. "
-                        "Choose a shorter analysis window on Recording "
-                        "structure."
-                        if self._guided_continuous_rwd_accepted_plan()
-                        is not None
-                        else "Waiting for the recording check to finish "
-                        "before correction evidence can be built."
+                        self._guided_continuous_recording_check_message()
                     )
                 else:
                     self._guided_preview_source_reason = (
@@ -11720,7 +11778,11 @@ class MainWindow(QMainWindow):
             preview_ready or local_confirmation_ready or not new_analysis
         )
         self._guided_preview_locked_label.setVisible(not preview_unlocked)
-        if not preview_unlocked:
+        if preview_unlocked:
+            # Nothing is blocking the preview, so the label must not keep the
+            # last reason it was blocked for (CR1-F1-E).
+            self._guided_preview_locked_label.setText("")
+        else:
             # Only name the earlier steps while they really are unfinished;
             # otherwise say what the preview is actually waiting for
             # (CR1-F1-D).
@@ -13538,26 +13600,40 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_check_active_token = token
         self._guided_continuous_rwd_check_snapshot = snapshot
         self._guided_continuous_rwd_check_terminal_token = None
+        # A new check supersedes whatever the last one concluded.
+        self._guided_continuous_rwd_check_outcome = ""
+        self._guided_continuous_rwd_check_outcome_message = ""
 
+        # These signals are emitted from the worker's own thread, and a lambda
+        # has no receiver object for Qt to take a thread from, so Qt runs it
+        # right there on the worker thread. Everything the handlers touch --
+        # status text, the accepted binding, the correction page -- belongs to
+        # the GUI thread, so each handler call is posted back to this window
+        # rather than made directly (CR1-F1-E). The captured token and worker
+        # keep the currency checks exactly as they were.
         thread.started.connect(worker.run)
         worker.stage_changed.connect(
-            lambda stage, t=token, w=worker: (
-                self._on_guided_continuous_rwd_check_stage(t, w, stage)
+            lambda stage, t=token, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_continuous_rwd_check_stage(t, w, stage)
             )
         )
         worker.succeeded.connect(
-            lambda result, t=token, w=worker: (
-                self._on_guided_continuous_rwd_check_succeeded(t, w, result)
+            lambda result, t=token, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_continuous_rwd_check_succeeded(
+                    t, w, result
+                )
             )
         )
         worker.failed.connect(
-            lambda failure, t=token, w=worker: (
-                self._on_guided_continuous_rwd_check_failed(t, w, failure)
+            lambda failure, t=token, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_continuous_rwd_check_failed(
+                    t, w, failure
+                )
             )
         )
         worker.cancelled.connect(
-            lambda t=token, w=worker: (
-                self._on_guided_continuous_rwd_check_cancelled(t, w)
+            lambda t=token, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_continuous_rwd_check_cancelled(t, w)
             )
         )
         for terminal_signal in (
@@ -13567,9 +13643,18 @@ class MainWindow(QMainWindow):
         ):
             terminal_signal.connect(worker.deleteLater)
             terminal_signal.connect(thread.quit)
+        # QThread.finished is emitted from inside the worker thread too, and
+        # this cleanup hides the progress bar and sets status text, so it is
+        # posted back the same way (CR1-F1-E).
         thread.finished.connect(
             lambda t=token, w=worker, th=thread: (
-                self._cleanup_guided_continuous_rwd_recording_check(t, w, th)
+                self._post_to_guided_gui_thread(
+                    lambda: (
+                        self._cleanup_guided_continuous_rwd_recording_check(
+                            t, w, th
+                        )
+                    )
+                )
             )
         )
         thread.finished.connect(thread.deleteLater)
@@ -13577,6 +13662,10 @@ class MainWindow(QMainWindow):
             "Inspecting recording…", active=True
         )
         thread.start()
+        # The scientist is about to land on Correction approach, so that page
+        # has to say a check is running rather than keep the state it was
+        # built with before this started (CR1-F1-E).
+        self._refresh_guided_continuous_rwd_check_dependent_views()
         return True
 
     def _cancel_guided_continuous_rwd_recording_check(self) -> None:
@@ -13594,6 +13683,20 @@ class MainWindow(QMainWindow):
             "Recording check cancelled.", active=False
         )
 
+    def _post_to_guided_gui_thread(self, callback) -> None:
+        """Run ``callback`` on the GUI thread (CR1-F1-E).
+
+        Called from the recording-check worker's thread, this hands the work
+        to this window instead of doing it there; posted calls keep their
+        order, so a success still installs its binding before the thread's own
+        cleanup runs. Called from the GUI thread it simply runs the callback,
+        so a signal emitted there stays as immediate as it has always been.
+        """
+        if threading.get_ident() == getattr(self, "_gui_thread_ident", None):
+            callback()
+            return
+        QTimer.singleShot(0, self, callback)
+
     def _on_guided_continuous_rwd_check_stage(
         self, token: int, worker, stage: str
     ) -> None:
@@ -13608,15 +13711,41 @@ class MainWindow(QMainWindow):
         )
 
     def _retire_guided_continuous_rwd_check(
-        self, token: int, worker, message: str
+        self, token: int, worker, message: str, *, succeeded: bool = False
     ) -> bool:
         if not self._guided_continuous_rwd_check_callback_is_current(token, worker):
             return False
         self._guided_continuous_rwd_check_terminal_token = token
         self._guided_continuous_rwd_check_active_token = None
         self._guided_continuous_rwd_check_snapshot = None
+        # What actually happened, so Correction approach can say so instead of
+        # reporting a check that is no longer running as still running
+        # (CR1-F1-E).
+        self._guided_continuous_rwd_check_outcome = (
+            "succeeded" if succeeded else "failed"
+        )
+        self._guided_continuous_rwd_check_outcome_message = str(message or "")
         self._set_guided_continuous_rwd_check_status(message, active=False)
+        # A successful check installs its binding immediately after this and
+        # refreshes again; refreshing here is what makes a failed or cancelled
+        # check visible without the scientist navigating away and back.
+        self._refresh_guided_continuous_rwd_check_dependent_views()
         return True
+
+    def _refresh_guided_continuous_rwd_check_dependent_views(self) -> None:
+        """Update the pages whose content depends on the recording check.
+
+        The check finishes on its own, long after the click that started it,
+        so whatever is on screen has to be brought up to date here. Without
+        this, Correction approach keeps showing the state it was built with
+        when the scientist arrived -- for a successful check, that is a
+        permanent "still checking" message (CR1-F1-E).
+        """
+        if not hasattr(self, "_guided_preview_source_status_label"):
+            return
+        self._refresh_guided_diagnostics_panel()
+        self._refresh_guided_correction_next_action()
+        self._refresh_guided_navigation_state()
 
     def _on_guided_continuous_rwd_check_succeeded(
         self, token: int, worker, success
@@ -13672,15 +13801,20 @@ class MainWindow(QMainWindow):
             return
 
         if not self._retire_guided_continuous_rwd_check(
-            token, worker, "Recording check completed."
+            token, worker, "Recording check completed.", succeeded=True
         ):
             return
         try:
             self._set_guided_continuous_rwd_review_binding(binding)
         except (AttributeError, TypeError, ValueError):
+            self._guided_continuous_rwd_check_outcome = "failed"
+            self._guided_continuous_rwd_check_outcome_message = (
+                "The recording could not be prepared for Review."
+            )
             self._set_guided_continuous_rwd_check_status(
                 "The recording could not be prepared for Review.", active=False
             )
+            self._refresh_guided_continuous_rwd_check_dependent_views()
 
     def _on_guided_continuous_rwd_check_failed(
         self, token: int, worker, failure
@@ -13745,6 +13879,10 @@ class MainWindow(QMainWindow):
             "continuous RWD Review binding changed"
         )
         self._refresh_guided_continuous_rwd_review_if_visible()
+        # Correction approach builds its analysis-window choices from this
+        # binding, so it has to be rebuilt the moment the binding arrives
+        # (CR1-F1-E).
+        self._refresh_guided_continuous_rwd_check_dependent_views()
 
     def _clear_guided_continuous_rwd_review_binding(
         self, *, invalidate_validation: bool = True
