@@ -310,6 +310,12 @@ _CONSERVATIVE_EVENT_DEFAULTS = {
     "peak_min_prominence_k": 2.0,
     "peak_min_width_sec": 0.3,
 }
+# CR1-F1-B: the Select-data recording-structure control's "decide for me"
+# value. It is never an acquisition mode: discovery resolves it to
+# "intermittent" or "continuous", and only the resolved value reaches a draft
+# (see MainWindow._guided_effective_acquisition_mode).
+GUIDED_STRUCTURE_CHOICE_AUTO = "auto"
+
 GUIDED_WORKFLOW_STEPS = (
     "Start",
     "Select data",
@@ -3133,6 +3139,9 @@ class MainWindow(QMainWindow):
         # discovery still running under the previous structure cannot install
         # its ROIs afterwards.
         self._guided_discovery_generation = 0
+        # CR1-F1-B: what "Detect automatically" resolved to for the current
+        # source, or None while unresolved.
+        self._guided_resolved_acquisition_mode = None
         self._guided_roi_discovery_thread = None
         self._guided_roi_discovery_worker = None
         self._guided_roi_discovery_diag_start = None
@@ -3473,6 +3482,14 @@ class MainWindow(QMainWindow):
 
         self._guided_acquisition_mode_combo = QComboBox()
         self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
+        # CR1-F1-B: "Detect automatically" is the default, so a scientist can
+        # leave Format and Recording structure alone and let the app work out
+        # both from the selected folder. It is a Select-data choice only: it is
+        # resolved to a real structure by discovery and never reaches a draft
+        # or a backend (see _guided_effective_acquisition_mode).
+        self._guided_acquisition_mode_combo.addItem(
+            "Detect automatically", GUIDED_STRUCTURE_CHOICE_AUTO
+        )
         acquisition_mode_labels = {
             "intermittent": "Intermittent/session-based recording",
             "continuous": "Continuous/one long recording",
@@ -3483,8 +3500,9 @@ class MainWindow(QMainWindow):
                 acquisition_mode,
             )
         self._guided_acquisition_mode_combo.setToolTip(
-            "Choose how your recording was saved: as repeated sessions, or as "
-            "one long continuous recording."
+            "How was your recording saved? Leave this on Detect automatically "
+            "to let the app work it out from the folder you select, or choose "
+            "repeated sessions or one long continuous recording yourself."
         )
         self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
@@ -3997,6 +4015,11 @@ class MainWindow(QMainWindow):
         self._guided_input_dir_edit.textChanged.connect(
             self._clear_guided_missing_session_approvals_for_source_change
         )
+        # CR1-F1-B: a different folder is a different recording, so whatever
+        # the previous folder resolved to no longer applies.
+        self._guided_input_dir_edit.textChanged.connect(
+            lambda _text: self._clear_guided_resolved_structure_for_source_change()
+        )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._invalidate_guided_backend_validation(
                 "acquisition mode changed"
@@ -4067,7 +4090,7 @@ class MainWindow(QMainWindow):
             "output_dir": self._output_dir.text().strip(),
             "format": self._format_combo.currentText(),
             "resolved_format": resolved_format,
-            "acquisition_mode": self._guided_selected_acquisition_mode(),
+            "acquisition_mode": self._guided_effective_acquisition_mode(),
             "sessions_per_hour": self._sph_edit.text().strip(),
             "session_duration_s": self._duration_edit.text().strip(),
             "continuous_window_sec": float(self._continuous_window_sec_spin.value()),
@@ -4135,6 +4158,11 @@ class MainWindow(QMainWindow):
             return False, default_reason
         if not self._guided_selected_roi_ids()[1]:
             return False, default_reason
+        # CR1-F1-B: "Detect automatically" never travels onward as if it were a
+        # real structure -- ``_guided_effective_acquisition_mode`` resolves it
+        # from what discovery established (repeated sessions when a producer
+        # states nothing, which is what every non-continuous producer means).
+        # Requiring a successful discovery above is therefore sufficient here.
         return True, "Data selection is ready."
 
     def _guided_select_data_ready_to_continue(self) -> bool:
@@ -4152,9 +4180,11 @@ class MainWindow(QMainWindow):
                 False,
                 "Complete required recording structure fields to continue.",
             )
-        mode = str(
-            self._guided_acquisition_mode_combo.currentData() or ""
-        ).strip().lower()
+        # CR1-F1-B: "Detect automatically" is resolved by discovery; this step
+        # reads the resolved structure so it can ask the questions that
+        # actually apply. An unresolved choice cannot reach this step, because
+        # Select data requires a successful discovery first.
+        mode = self._guided_effective_acquisition_mode()
         if not is_guided_production_acquisition_mode(mode):
             return (
                 False,
@@ -4879,6 +4909,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_guided_setup_syncing", False):
             return
         self._discovery_cache = None
+        self._guided_resolved_acquisition_mode = None
         self._rwd_contract_cache = None
         # CR1-F1-A: continuous exists only for RWD. Moving to a format that
         # cannot do it must not leave an unrunnable continuous plan behind, so
@@ -5046,33 +5077,49 @@ class MainWindow(QMainWindow):
             return False
 
     def _sync_guided_continuous_mode_availability(self, resolved_format: str) -> None:
-        """Offer the continuous choice only for the input format that has a
-        complete continuous production path.
+        """Offer each recording-structure choice only where it can be honoured.
 
-        That path (recording check -> review binding -> authority preparation
-        -> one accepted continuous-RWD backend -> continuous Results) exists
-        only for RWD, so the choice is greyed out for anything else rather
-        than offered and then refused. ``_guided_recording_structure_
-        readiness`` stays the fail-closed authority either way, including for
-        a selection made before the format resolved.
+        Continuous exists only for RWD, and only RWD has two structures to
+        tell apart, so (CR1-F1-B):
+
+        * ``auto`` format -- all three choices, including Detect automatically,
+          because the format itself is still to be resolved;
+        * ``rwd`` -- all three choices;
+        * ``npm`` / ``custom_tabular`` -- repeated sessions only; Detect
+          automatically would have nothing to decide and continuous has no
+          production path, so both are greyed out.
+
+        ``_guided_recording_structure_readiness`` stays the fail-closed
+        authority either way, including for a choice made before the format
+        resolved.
         """
         combo = getattr(self, "_guided_acquisition_mode_combo", None)
         if combo is None:
             return
-        index = combo.findData("continuous")
-        if index < 0:
-            return
         model = combo.model()
-        item = model.item(index) if hasattr(model, "item") else None
-        if item is None:
+        if not hasattr(model, "item"):
             return
-        supported = str(resolved_format or "").strip().lower() == "rwd"
-        item.setEnabled(supported)
-        item.setToolTip(
-            ""
-            if supported
-            else "Continuous recordings are supported for RWD data."
-        )
+        normalized = str(resolved_format or "").strip().lower()
+        structure_is_decidable = normalized in {"auto", "rwd", ""}
+        for data, tooltip in (
+            (
+                GUIDED_STRUCTURE_CHOICE_AUTO,
+                "Automatic detection applies to RWD data, which can be saved "
+                "either way.",
+            ),
+            (
+                "continuous",
+                "Continuous recordings are supported for RWD data.",
+            ),
+        ):
+            index = combo.findData(data)
+            if index < 0:
+                continue
+            item = model.item(index)
+            if item is None:
+                continue
+            item.setEnabled(structure_is_decidable)
+            item.setToolTip("" if structure_is_decidable else tooltip)
 
     def _sync_guided_setup_from_full(self) -> None:
         """Refresh Guided setup controls from the existing Full Control widgets."""
@@ -5136,7 +5183,7 @@ class MainWindow(QMainWindow):
     def _sync_guided_recording_visibility(self) -> None:
         if not hasattr(self, "_guided_recording_structure_help_label"):
             return
-        continuous = self._guided_selected_acquisition_mode() == "continuous"
+        continuous = self._guided_effective_acquisition_mode() == "continuous"
         for widget in (
             getattr(self, "_guided_intermittent_explanation_label", None),
             getattr(
@@ -5460,6 +5507,19 @@ class MainWindow(QMainWindow):
             rois=len(discovery.get("rois", [])),
         )
         self._discovery_cache = discovery
+        # CR1-F1-B: record what the accepted readers actually established, so
+        # "Detect automatically" resolves to a real structure for the draft.
+        # Only the continuous route reports "continuous"; every other accepted
+        # discovery producer describes repeated sessions, so a result that
+        # states no structure is intermittent by construction.
+        resolved_structure = str(
+            discovery.get("acquisition_mode", "") or ""
+        ).strip().lower()
+        self._guided_resolved_acquisition_mode = (
+            resolved_structure
+            if resolved_structure in {"intermittent", "continuous"}
+            else "intermittent"
+        )
         resolved_format = str(
             discovery.get("resolved_format") or ""
         ).strip().lower()
@@ -5525,6 +5585,7 @@ class MainWindow(QMainWindow):
             "failure_slot_entered", message=message
         )
         self._discovery_cache = None
+        self._guided_resolved_acquisition_mode = None
         self._discovery_summary.setText("Discovery failed.")
         self._sessions_list.clear()
         self._roi_list.clear()
@@ -5957,6 +6018,33 @@ class MainWindow(QMainWindow):
         if intermittent_index >= 0:
             combo.setCurrentIndex(intermittent_index)
 
+    def _clear_guided_resolved_structure_for_source_change(self) -> None:
+        """Forget what the previous folder's structure resolved to.
+
+        A different folder is a different recording, so an automatically
+        resolved structure cannot carry over, and a discovery still in flight
+        for the old folder must not install its result -- hence the generation
+        bump (CR1-F1-B).
+
+        Deliberately narrower than
+        ``_discard_guided_discovery_for_structure_change``: it does not clear
+        the ROI checklist, because changing the folder does not reinterpret
+        already-listed ROIs the way changing the recording structure does, and
+        the existing Select-data flow already requires a fresh discovery before
+        Continue re-enables.
+        """
+        if getattr(self, "_guided_resolved_acquisition_mode", None) is None and (
+            getattr(self, "_guided_discovery_generation", None) is not None
+        ):
+            # Nothing resolved to forget, but a running discovery must still be
+            # superseded so its result cannot install for the previous folder.
+            self._guided_discovery_generation += 1
+            return
+        if getattr(self, "_guided_discovery_generation", None) is None:
+            self._guided_discovery_generation = 0
+        self._guided_discovery_generation += 1
+        self._guided_resolved_acquisition_mode = None
+
     def _discard_guided_discovery_for_structure_change(self) -> None:
         """Drop ROIs discovered under the previous recording structure.
 
@@ -5981,6 +6069,7 @@ class MainWindow(QMainWindow):
             )
         )
         self._discovery_cache = None
+        self._guided_resolved_acquisition_mode = None
         if hasattr(self, "_guided_roi_list"):
             self._guided_roi_list.clear()
         if hasattr(self, "_roi_list"):
@@ -12489,7 +12578,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_discovery_cache", None) is not None:
             resolved_format = str(self._discovery_cache.get("resolved_format", "") or "")
         resolved_format = resolved_format.strip().lower()
-        acq_mode = self._guided_selected_acquisition_mode()
+        acq_mode = self._guided_effective_acquisition_mode()
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
             text = self._guided_sessions_per_hour_edit.text().strip()
@@ -15878,7 +15967,7 @@ class MainWindow(QMainWindow):
             else "auto"
         )
         input_format = str(input_format or "").strip().lower()
-        acq_mode = self._guided_selected_acquisition_mode()
+        acq_mode = self._guided_effective_acquisition_mode()
         
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
@@ -17133,7 +17222,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = self._guided_selected_acquisition_mode()
+        current_acq_mode = self._guided_effective_acquisition_mode()
 
         stale_reasons = []
         if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid"):
@@ -18447,7 +18536,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = self._guided_selected_acquisition_mode()
+        current_acq_mode = self._guided_effective_acquisition_mode()
 
         if err:
             self._guided_new_analysis_feature_event_profile_status = "invalid"
@@ -18518,7 +18607,7 @@ class MainWindow(QMainWindow):
         baseline_kind = defaults_res.baseline_source_kind
         
         current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
-        current_acq_mode = self._guided_selected_acquisition_mode()
+        current_acq_mode = self._guided_effective_acquisition_mode()
 
         self._guided_new_analysis_feature_event_profile_stale_reasons = []
         self._guided_new_analysis_feature_event_profile_errors = []
@@ -25104,7 +25193,13 @@ class MainWindow(QMainWindow):
         return "continuous" if text.startswith("continuous") else "intermittent"
 
     def _guided_selected_acquisition_mode(self) -> str:
-        """Return the raw normalized mode selected in Guided setup."""
+        """Return the raw normalized recording-structure choice.
+
+        This may be ``GUIDED_STRUCTURE_CHOICE_AUTO`` ("decide for me"), which
+        is a Select-data choice and not an acquisition mode. Use
+        ``_guided_effective_acquisition_mode`` for anything that needs a real
+        structure.
+        """
         combo = getattr(self, "_guided_acquisition_mode_combo", None)
         if combo is None:
             return ""
@@ -25112,6 +25207,28 @@ class MainWindow(QMainWindow):
         if isinstance(data, str) and data.strip():
             return data.strip().lower()
         return combo.currentText().strip().lower()
+
+    def _guided_effective_acquisition_mode(self) -> str:
+        """Return the real recording structure this plan is using.
+
+        An explicit choice is authoritative. "Detect automatically" resolves to
+        whatever discovery actually established for the selected source; until
+        discovery succeeds there is nothing to resolve, and repeated sessions
+        -- the historical default and what the intermittent validator itself
+        assumes -- stands in. That interim value can never be executed: Select
+        data cannot be left until discovery succeeds (see
+        ``_guided_select_data_readiness``), so ``auto`` never reaches a draft,
+        a plan identity, or a backend (CR1-F1-B).
+        """
+        choice = self._guided_selected_acquisition_mode()
+        if choice != GUIDED_STRUCTURE_CHOICE_AUTO:
+            return choice
+        resolved = str(
+            getattr(self, "_guided_resolved_acquisition_mode", "") or ""
+        ).strip().lower()
+        if resolved in {"intermittent", "continuous"}:
+            return resolved
+        return "intermittent"
 
     def _sync_continuous_step_to_window(self, value: float | None = None) -> None:
         """Keep GUI-owned continuous step fixed to the editable window length."""
@@ -27246,6 +27363,10 @@ class MainWindow(QMainWindow):
             "input_dir": self._input_dir.text().strip(),
             "format": self._format_combo.currentText(),
             "acquisition_mode": self._selected_acquisition_mode(),
+            # CR1-F1-B: the Guided recording-structure choice, which may be
+            # "auto". Captured here so the worker routes on the explicit
+            # choice and never re-reads the combo from its own thread.
+            "guided_structure_choice": self._guided_selected_acquisition_mode(),
             "continuous_window_sec": float(
                 self._continuous_window_sec_spin.value()
             ),
@@ -27272,11 +27393,15 @@ class MainWindow(QMainWindow):
         CSVs in the folder, which is exactly what fails on a continuous
         acquisition folder: it has no session chunks, and its non-fluorescence
         CSVs (``Events.csv``, ``Outputs.csv``) are not recordings.
+
+        CR1-F1-B adds the "Detect automatically" structure choice. It resolves
+        the structure by *validating* the source with the accepted readers, not
+        by guessing: see ``_resolve_guided_rwd_structure``.
         """
         input_format = str(snapshot.get("format", "")).strip().lower()
-        acquisition_mode = str(snapshot.get("acquisition_mode", "")).strip().lower()
-        if input_format == "rwd" and acquisition_mode == "continuous":
-            return _discover_continuous_rwd_rois
+        structure_choice = str(
+            snapshot.get("guided_structure_choice", "")
+        ).strip().lower()
 
         def run_intermittent(
             captured: dict[str, object], diag=None
@@ -27286,9 +27411,102 @@ class MainWindow(QMainWindow):
             spec = self._build_discovery_spec_from_snapshot(captured)
             if diag is not None:
                 diag("worker_build_spec_end")
-            return spec.run_discovery()
+            result = dict(spec.run_discovery())
+            result.setdefault("acquisition_mode", "intermittent")
+            return result
 
-        return run_intermittent
+        # Explicit continuous: only the accepted continuous reader runs, for
+        # rwd and for auto alike. An explicit continuous choice must never be
+        # answered by trying NPM or custom tabular.
+        if structure_choice == "continuous":
+            return _discover_continuous_rwd_rois
+        if structure_choice != GUIDED_STRUCTURE_CHOICE_AUTO:
+            return run_intermittent
+        if input_format in {"npm", "custom_tabular"}:
+            # Those formats have exactly one structure; nothing to resolve.
+            return run_intermittent
+
+        def run_auto_structure(
+            captured: dict[str, object], diag=None
+        ) -> dict[str, object]:
+            return self._resolve_guided_rwd_structure(
+                captured, run_intermittent, diag=diag
+            )
+
+        return run_auto_structure
+
+    def _resolve_guided_rwd_structure(
+        self, snapshot: dict[str, object], run_intermittent, diag=None
+    ) -> dict[str, object]:
+        """Resolve repeated sessions versus one continuous recording, by
+        validating the source with both accepted readers (CR1-F1-B).
+
+        This is validation, not fallback. Neither reader's failure is treated
+        as evidence for the other, no folder name or file count is consulted,
+        and when both readings are genuinely valid the scientist is asked to
+        choose rather than one being picked arbitrarily.
+
+        NPM and custom tabular resolve as soon as the accepted format
+        discovery identifies them: they have one structure, and the continuous
+        RWD inspector is never run for them.
+        """
+        intermittent_result: dict[str, object] | None = None
+        intermittent_error: Exception | None = None
+        if diag is not None:
+            diag("auto_structure_intermittent_start")
+        try:
+            # The intermittent validator must judge the source as repeated
+            # sessions, whatever a previous explicit choice left behind.
+            intermittent_snapshot = dict(snapshot)
+            intermittent_snapshot["acquisition_mode"] = "intermittent"
+            intermittent_result = run_intermittent(intermittent_snapshot, diag)
+        except Exception as exc:
+            intermittent_error = exc
+        if diag is not None:
+            diag(
+                "auto_structure_intermittent_end",
+                ok=intermittent_result is not None,
+            )
+
+        if intermittent_result is not None:
+            resolved_format = str(
+                intermittent_result.get("resolved_format", "") or ""
+            ).strip().lower()
+            if resolved_format in {"npm", "custom_tabular"}:
+                resolved = dict(intermittent_result)
+                resolved["acquisition_mode"] = "intermittent"
+                return resolved
+
+        continuous_result: dict[str, object] | None = None
+        if diag is not None:
+            diag("auto_structure_continuous_start")
+        try:
+            continuous_result = _discover_continuous_rwd_rois(snapshot, diag)
+        except Exception:
+            continuous_result = None
+        if diag is not None:
+            diag(
+                "auto_structure_continuous_end",
+                ok=continuous_result is not None,
+            )
+
+        if intermittent_result is not None and continuous_result is not None:
+            raise GuidedContinuousRwdRoiDiscoveryError(
+                "This folder can be read either as repeated sessions or as "
+                "one continuous recording. Choose the recording structure, "
+                "then select ROIs again."
+            )
+        if continuous_result is not None:
+            return continuous_result
+        if intermittent_result is not None:
+            resolved = dict(intermittent_result)
+            resolved.setdefault("acquisition_mode", "intermittent")
+            return resolved
+        raise GuidedContinuousRwdRoiDiscoveryError(
+            "This folder could not be read as supported RWD data. Check that "
+            "you selected the recording folder, or choose the data format and "
+            "recording structure yourself."
+        ) from intermittent_error
 
     def _build_discovery_spec_from_snapshot(
         self,

@@ -75,10 +75,20 @@ def test_guided_capability_contract_is_narrow_immutable_and_not_environment_driv
 def test_guided_selector_uses_capability_contract_and_full_control_stays_separate(
     window,
 ):
-    expected = guided_capabilities.GUIDED_PRODUCTION_ACQUISITION_MODES
+    from gui.main_window import GUIDED_STRUCTURE_CHOICE_AUTO
+
+    # CR1-F1-B: the selector offers "Detect automatically" ahead of the
+    # production acquisition modes, and defaults to it. Auto-detect is a
+    # Select-data choice, not an acquisition mode, so the capability contract
+    # itself still lists only real modes.
+    expected = (
+        GUIDED_STRUCTURE_CHOICE_AUTO,
+    ) + guided_capabilities.GUIDED_PRODUCTION_ACQUISITION_MODES
 
     assert _combo_values(window._guided_acquisition_mode_combo) == expected
-    assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
+    assert window._guided_acquisition_mode_combo.currentData() == (
+        GUIDED_STRUCTURE_CHOICE_AUTO
+    )
     assert window._guided_acquisition_mode_combo.findData("continuous") >= 0
     assert window._acquisition_mode_combo.findData("continuous") >= 0
 
@@ -89,7 +99,12 @@ def test_guided_selector_uses_capability_contract_and_full_control_stays_separat
 
     assert window._selected_acquisition_mode() == "continuous"
     assert _combo_values(window._guided_acquisition_mode_combo) == expected
-    assert window._guided_selected_acquisition_mode() == "intermittent"
+    assert window._guided_selected_acquisition_mode() == (
+        GUIDED_STRUCTURE_CHOICE_AUTO
+    )
+    # Nothing has been discovered, so the structure in force is still the
+    # historical default and Guided is unaffected by Full Control.
+    assert window._guided_effective_acquisition_mode() == "intermittent"
     assert window._guided_setup_summary_state()["acquisition_mode"] == (
         "intermittent"
     )
@@ -165,6 +180,9 @@ def test_unsupported_guided_widget_state_fails_closed(window):
 def test_guided_intermittent_setup_remains_available(window, source_format):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_format_combo.setCurrentText(source_format)
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("120")
 
@@ -178,6 +196,11 @@ def test_guided_intermittent_setup_remains_available(window, source_format):
 
 
 def test_supported_intermittent_sync_does_not_spuriously_invalidate_plan(window):
+    from gui.main_window import GUIDED_STRUCTURE_CHOICE_AUTO
+
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
     assert window._guided_selected_acquisition_mode() == "intermittent"
     revision = window._guided_backend_validation_revision
 
@@ -185,6 +208,7 @@ def test_supported_intermittent_sync_does_not_spuriously_invalidate_plan(window)
 
     assert window._guided_selected_acquisition_mode() == "intermittent"
     assert window._guided_backend_validation_revision == revision
+    assert GUIDED_STRUCTURE_CHOICE_AUTO != "intermittent"
 
 
 def test_direct_continuous_request_remains_refused_by_backend_compiler():

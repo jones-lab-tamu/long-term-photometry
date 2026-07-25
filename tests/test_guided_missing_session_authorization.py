@@ -652,6 +652,12 @@ def _setup_guided_recording(
     acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+        # CR1-F1-B: the structure control defaults to "Detect automatically",
+        # so choosing repeated sessions here discards ROIs discovered under the
+        # previous interpretation. Re-install this test's own discovery,
+        # mirroring the real order (choose structure -> discover).
+        window._discovery_cache = discovery
+        window._populate_discovery_ui(discovery)
     window._guided_sessions_per_hour_edit.setText("1")
     window._guided_session_duration_edit.setText("600")
     window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(

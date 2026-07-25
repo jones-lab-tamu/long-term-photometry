@@ -2397,8 +2397,10 @@ def test_full_control_continuous_mode_does_not_enter_guided_display(window):
     assert window._selected_acquisition_mode() == "continuous"
     # Guided keeps its own selection: choosing continuous in Full Control does
     # not change what Guided is planning (CR1-E3 made continuous selectable in
-    # Guided, but only by an explicit Guided choice).
-    assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
+    # Guided, but only by an explicit Guided choice; CR1-F1-B made Detect
+    # automatically the Guided default).
+    assert window._guided_acquisition_mode_combo.currentData() == "auto"
+    assert window._guided_effective_acquisition_mode() == "intermittent"
     assert float(window._guided_continuous_window_sec_spin.value()) == 1200.0
     assert window._guided_allow_partial_final_window_cb.isChecked() is True
 
@@ -2407,7 +2409,10 @@ def test_full_control_continuous_mode_does_not_enter_guided_display(window):
     window._sph_edit.setText("12")
     window._duration_edit.setText("100")
 
-    assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
+    # Guided still holds its own Detect-automatically choice; Full Control's
+    # session timing values continue to mirror across as before.
+    assert window._guided_acquisition_mode_combo.currentData() == "auto"
+    assert window._guided_effective_acquisition_mode() == "intermittent"
     assert window._guided_sessions_per_hour_edit.text() == "12"
     assert window._guided_session_duration_edit.text() == "100"
 
@@ -2616,6 +2621,10 @@ def test_guided_roi_discovery_restores_busy_state_after_failure(
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     window._guided_input_dir_edit.setText(str(input_dir))
+    # CR1-F1-B: covers the intermittent discovery failure path specifically.
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
 
     class FailingSpec:
         def run_discovery(self):
@@ -2675,6 +2684,12 @@ def test_guided_roi_discovery_worker_spec_build_failure_restores_ui(
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     window._guided_input_dir_edit.setText(str(input_dir))
+    # CR1-F1-B: this test covers the intermittent discovery failure path, so
+    # choose repeated sessions rather than leaving automatic detection, which
+    # reports its own message.
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
 
     def fail_builder(snapshot):
         raise RuntimeError("simulated spec build failure")
@@ -2895,9 +2910,10 @@ def test_guided_and_full_control_continuous_setup_remain_separate(qapp, tmp_path
 
         # Guided's own selection is unaffected by Full Control's continuous
         # choice, even though CR1-E3 made continuous selectable in Guided.
-        assert (
-            guided._guided_acquisition_mode_combo.currentData() == "intermittent"
-        )
+        # CR1-F1-B: Guided's default choice is Detect automatically, which with
+        # nothing discovered means repeated sessions.
+        assert guided._guided_acquisition_mode_combo.currentData() == "auto"
+        assert guided._guided_effective_acquisition_mode() == "intermittent"
         assert full._acquisition_mode_combo.findData("continuous") >= 0
         assert _state_for_equivalence(guided)["acquisition_mode"] == "intermittent"
         assert full._selected_acquisition_mode() == "continuous"

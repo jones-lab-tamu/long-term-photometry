@@ -1548,7 +1548,10 @@ def test_full_control_mode_choice_cannot_change_the_guided_draft(window):
 
 
 def test_intermittent_run_never_reaches_the_continuous_path(window):
-    assert window._guided_selected_acquisition_mode() == "intermittent"
+    # CR1-F1-B made "Detect automatically" the default choice; with nothing
+    # discovered it resolves to repeated sessions, which is not the continuous
+    # path.
+    assert window._guided_effective_acquisition_mode() == "intermittent"
     assert window._guided_continuous_rwd_live_draft() is None
     assert window._refresh_guided_continuous_rwd_run_readiness_display() is False
     # The intermittent readiness evaluation still owns the Run affordance.

@@ -609,6 +609,13 @@ def _configure_real_analysis_duration_new_analysis_draft(
     acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+        # CR1-F1-B: the structure control defaults to "Detect automatically",
+        # so choosing repeated sessions here is a real change and discards ROIs
+        # discovered under the previous interpretation. Re-install this test's
+        # own discovery, mirroring the real order (choose structure ->
+        # discover).
+        window._discovery_cache = discovery
+        window._populate_discovery_ui(discovery)
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText(str(session_duration_sec))
 

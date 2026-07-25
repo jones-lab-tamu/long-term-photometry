@@ -380,6 +380,13 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
     acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+        # CR1-F1-B: the structure control now defaults to "Detect
+        # automatically", so choosing repeated sessions here is a real change
+        # and discards ROIs discovered under the previous interpretation.
+        # Re-install this test's own discovery, mirroring the real order
+        # (choose structure -> discover).
+        window._discovery_cache = discovery
+        window._populate_discovery_ui(discovery)
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("120")
 
@@ -547,6 +554,13 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
     acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+        # CR1-F1-B: the structure control now defaults to "Detect
+        # automatically", so choosing repeated sessions here is a real change
+        # and discards ROIs discovered under the previous interpretation.
+        # Re-install this test's own discovery, mirroring the real order
+        # (choose structure -> discover).
+        window._discovery_cache = discovery
+        window._populate_discovery_ui(discovery)
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("120")
 

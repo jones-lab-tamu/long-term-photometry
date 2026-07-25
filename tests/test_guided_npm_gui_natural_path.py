@@ -130,12 +130,17 @@ def _configure_npm_new_analysis_setup(window, tmp_path, monkeypatch):
         ],
         "rois": [{"roi_id": roi} for roi in NPM_ROIS],
     }
-    window._discovery_cache = discovery
-    window._populate_discovery_ui(discovery)
-
+    # CR1-F1-B: the recording structure is chosen before the source is read
+    # (the control defaults to "Detect automatically", and changing it discards
+    # ROIs discovered under the previous interpretation). Choose repeated
+    # sessions first, then install this NPM discovery result.
     acq_idx = window._guided_acquisition_mode_combo.findData("intermittent")
     assert acq_idx >= 0
     window._guided_acquisition_mode_combo.setCurrentIndex(acq_idx)
+
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
     window._guided_sessions_per_hour_edit.setText("1")
     window._guided_session_duration_edit.setText("3")
 
