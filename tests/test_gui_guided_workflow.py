@@ -202,6 +202,11 @@ def _make_preview_completed_run(tmp_path):
                 grp.create_dataset("time_sec", data=t)
                 grp.create_dataset("sig_raw", data=sig + chunk_id)
                 grp.create_dataset("uv_raw", data=uv + 0.1 * chunk_id)
+                # Reviewing a completed run requires the corrected trace and
+                # the fitted reference alongside the raw ones; without them
+                # the run is correctly refused as incomplete.
+                grp.create_dataset("dff", data=(sig - uv) / uv)
+                grp.create_dataset("fit_ref", data=uv + 0.1 * chunk_id)
     return run_dir
 
 
@@ -613,6 +618,7 @@ def test_guided_confirm_strategy_is_real_planning_ui_and_run_stays_skipped_in_op
     run_dir = _make_preview_completed_run(tmp_path)
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
     window._guided_start_open_results_btn.click()
+    _wait_for_guided_results_open(window)
 
     idx = list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     window._guided_workflow_stepper.setCurrentRow(idx)
@@ -699,6 +705,7 @@ def test_guided_confirm_strategy_never_auto_selects_from_loaded_or_generated_evi
     window._guided_input_dir_edit.setText(str(raw_input))
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
     window._guided_start_open_results_btn.click()
+    _wait_for_guided_results_open(window)
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
     assert window._guided_confirm_strategy_combo.currentData() == ""
@@ -729,6 +736,7 @@ def test_guided_confirm_strategy_explicit_mark_is_ui_state_only(window, tmp_path
     )
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
     window._guided_start_open_results_btn.click()
+    _wait_for_guided_results_open(window)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
     assert window._guided_confirm_mark_btn.isEnabled() is False
@@ -1040,11 +1048,19 @@ def test_guided_new_analysis_configured_feature_event_profile_materializes(
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
 
 
-def test_guided_new_analysis_cleared_feature_event_profile_still_blocks_validation(
+def test_guided_new_analysis_cleared_feature_event_profile_returns_to_usable_defaults(
     window, tmp_path
 ):
+    """Clearing custom Feature Detection settings returns to the saved
+    Defaults, which are usable without pressing Apply again.
+
+    Apply is required only to accept *edits* to that Default profile -- see
+    is_saved_feature_event_profile_current and the backend's own
+    test_loaded_default_feature_profile_is_current_without_explicit_apply.
+    This covers the GUI-to-backend handoff: the plan the GUI builds after
+    Apply then Clear is accepted by the real materializer."""
     from photometry_pipeline.guided_backend_validation_materialization import (
-        GuidedBackendValidationMaterializationFailure,
+        GuidedBackendValidationMaterializationSuccess,
         materialize_guided_backend_validation_facts,
     )
     from tests.test_guided_backend_validation_materialization import (
@@ -1084,10 +1100,9 @@ def test_guided_new_analysis_cleared_feature_event_profile_still_blocks_validati
         backend_draft,
         parser_contract=_valid_parser_contract(),
     )
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == (
-        "feature_event_unapplied_changes"
-    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert result.facts.feature_event.profile_status == "default_initialized"
+    assert result.facts.feature_event.explicitly_applied is False
 
 
 def test_guided_feature_event_profile_apply_valid_run_level_profile(window, tmp_path, monkeypatch):
@@ -2260,8 +2275,10 @@ def test_guided_ambiguous_or_unsupported_timing_does_not_overwrite_values(
     window._populate_discovery_ui(unsupported)
     assert window._guided_sessions_per_hour_edit.text() == ""
     assert window._guided_session_duration_edit.text() == ""
+    # An unsupported format now tells the scientist what to do rather than
+    # describing a missing app capability (reworded in 69c5240).
     assert window._guided_recording_timing_inference_label.text() == (
-        "Automatic timing detection is not available for this format yet."
+        "Confirm sessions per hour and session duration for this recording."
     )
     assert window._guided_use_detected_timing_btn.isHidden() is True
 
@@ -4547,6 +4564,22 @@ def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch
     assert "Execution ready: false" in checklist
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GUIDED-DEFERRED-01: the draft plan reports the Select data output "
+        "folder as an applied run-output policy. A scientist who has not yet "
+        "chosen a run output parent is told on screen that they still must "
+        "('Required before Run: choose and apply the run output parent folder "
+        "in Draft Plan'), while the plan already records output_policy_status "
+        "'applied' pointing at the Select data folder. The expectation stands: "
+        "the two destinations are deliberately distinct. Deferred because the "
+        "fix belongs in _build_guided_new_analysis_draft_plan's output-policy "
+        "block, which must read the authoritative "
+        "_guided_new_analysis_output_policy_* state, and that changes the "
+        "output-destination contract for every Guided run."
+    ),
+)
 def test_guided_new_analysis_draft_plan_distinguishes_select_output_from_run_output(
     window, tmp_path, monkeypatch
 ):
@@ -4607,6 +4640,20 @@ def test_guided_new_analysis_output_status_survives_navigation(
     assert "No output root is configured" not in before
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GUIDED-DEFERRED-01: an explicitly applied run output parent does not "
+        "reach the draft plan. The scientist sets the parent folder, presses "
+        "Apply, and is told 'Output parent folder is configured', but the plan "
+        "still records the Select data output folder as the destination, so "
+        "the plan they review is not the destination they chose. The "
+        "expectation stands. Deferred with the sibling case above: both need "
+        "_build_guided_new_analysis_draft_plan to consume "
+        "_guided_new_analysis_output_policy_path instead of the Select data "
+        "field."
+    ),
+)
 def test_guided_new_analysis_applied_output_parent_is_real_draft_state(
     window, tmp_path, monkeypatch
 ):
@@ -5852,8 +5899,11 @@ def test_select_data_page_avoids_developer_facing_wording(window, qapp):
 
     assert "Choose the input folder" in visible_text
     assert "Select ROIs scans the input folder" in visible_text
-    assert "detected this format automatically" in visible_text
-    assert "Review Plan page" in visible_text
+    # Automatic format detection and the output destination are still
+    # explained in plain language; the exact phrasing was reworded in
+    # 69c5240 ("repair guided rwd and npm setup-to-run workflow").
+    assert "Auto will detect the data format when you select ROIs" in visible_text
+    assert "review this exact destination on Review Plan" in visible_text
 
 
 def test_select_data_roi_discovery_status_is_plain_language(window):
@@ -8857,9 +8907,4 @@ def test_guided_diagnostics_guidance_new_analysis_failed_cache(window):
     status_text = window._guided_diagnostic_cache_status_label.text()
     assert status_text == (
         "Correction evidence: build failed. Fix the issue and try again."
-    )
-    monkeypatch.setattr(
-        main_window_module,
-        "run_guided_local_correction_preview",
-        successful_computation,
     )

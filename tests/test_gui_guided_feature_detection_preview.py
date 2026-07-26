@@ -161,6 +161,22 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
     window._roi_list.addItem(item)
     window._guided_roi_list.addItem(QListWidgetItem(item))
 
+    # The Signal-Only F0 evidence a real local preview produces, in the shape
+    # _guided_signal_only_f0_preview_is_eligible actually requires.
+    signal_f0_evidence = {
+        "valid": valid,
+        "current_or_stale": current_or_stale,
+        "strategy_family": "signal_only_f0",
+        "selected_strategy": "signal_only_f0",
+        "dynamic_fit_mode": None,
+        "preview_only": preview_only,
+        "production_analysis": production_analysis,
+        "time_sec": time_sec,
+        "preview_dff": preview_dff,
+        "parameters": {"fs_hz": 10.0},
+    }
+    selectable = bool(valid is True and current_or_stale == "current")
+
     # Real Step 4 strategy confirmed choice key lookup matching
     choice_key = window._guided_confirm_choice_key(LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, "CH1")
     window._guided_strategy_choices[choice_key] = {
@@ -174,24 +190,35 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
         "production_analysis": False,
         "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
         "setup_signature": "test-setup-sig",
+        # A confirmed Signal-Only F0 choice records which preview it was
+        # confirmed from; _refresh_guided_local_preview_choice_currency
+        # re-checks that this still matches the ROI's locked candidate.
+        "local_preview_evidence": {"preview_id": "test-id"},
     }
 
     # Registry evidence structure
     window._guided_local_preview_evidence_by_roi["CH1"] = {
         "setup_signature": "test-setup-sig",
-        "locked_evidence_candidates": {},
+        "locked_evidence_candidates": {
+            "signal_only_f0": {
+                **signal_f0_evidence,
+                "preview_id": "test-id",
+                "setup_signature": "test-setup-sig",
+                "selectable": selectable,
+                "locked": not selectable,
+                "lock_reason": (
+                    "" if selectable
+                    else "Current valid preview evidence is required."
+                ),
+            }
+        },
         "result": {
+            "preview_id": "test-id",
             "roi": "CH1",
             "source_type": "local_raw_segment",
             "preview_only": preview_only,
             "production_analysis": production_analysis,
-            "signal_only_f0_preview_evidence": {
-                "valid": valid,
-                "current_or_stale": current_or_stale,
-                "time_sec": time_sec,
-                "preview_dff": preview_dff,
-                "parameters": {"fs_hz": 10.0}
-            }
+            "signal_only_f0_preview_evidence": signal_f0_evidence,
         },
         "provenance": {
             "preview_only": preview_only,
@@ -364,11 +391,6 @@ def test_preview_uses_custom_roi_settings_when_customized(window, monkeypatch):
     t = np.arange(100, dtype=float) * 0.1
     y = np.sin(t)
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
-    # This test's minimal evidence mock doesn't populate the full draft-plan
-    # currency shape (locked_evidence_candidates), which is unrelated to
-    # what this test verifies; avoid it marking the mocked correction
-    # choice stale as a side effect of customizing a ROI.
-    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
 
     custom_fields = {
         "event_signal": "dff",
