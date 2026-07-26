@@ -7954,13 +7954,19 @@ class MainWindow(QMainWindow):
             "structure and continue again to check it."
         )
 
-    def _guided_continuous_preview_config_overrides(self) -> dict[str, object]:
-        """Reader settings for a continuous preview window.
+    def _guided_continuous_recording_reader_overrides(self) -> dict[str, object]:
+        """How to read one continuous recording, as the recording establishes.
 
-        Taken from the accepted recording, not inferred from the file: the
-        cadence is the one the production target grid uses, so a preview
-        window is sampled exactly as the final analysis would sample it. The
-        full continuous file is never parsed to work these out.
+        These are detected facts about the source -- its time column, its
+        channel suffixes, and the cadence the production target grid uses --
+        taken from the recording the check already accepted. The full
+        continuous file is never parsed to work them out.
+
+        Deliberately carries no analysis policy. How the recording is divided
+        into windows is the scientist's choice on Recording structure, and how
+        a preview restricts itself is the preview's own business; mixing
+        either in here would let one path's policy silently become another's
+        (CR1-F1-D, CR1-F1-F).
         """
         accepted = self._guided_continuous_rwd_accepted_plan()
         if accepted is None:
@@ -7970,13 +7976,8 @@ class MainWindow(QMainWindow):
         cadence_sec = float(recording.cadence.nominal_cadence_seconds)
         if cadence_sec <= 0.0:
             raise RuntimeError("The recording cadence could not be used.")
-        window_sec = float(self._continuous_window_sec_spin.value())
         overrides: dict[str, object] = {
             "target_fs_hz": 1.0 / cadence_sec,
-            "continuous_window_sec": window_sec,
-            "continuous_step_sec": window_sec,
-            # Only whole windows are offered as preview evidence.
-            "allow_partial_final_window": False,
             "rwd_time_col": str(recording.source.selected_time_column),
         }
         channels = tuple(recording.roi.available_roi_channels)
@@ -7988,6 +7989,27 @@ class MainWindow(QMainWindow):
             if uv_suffix and sig_suffix:
                 overrides["uv_suffix"] = uv_suffix
                 overrides["sig_suffix"] = sig_suffix
+        return overrides
+
+    def _guided_continuous_preview_config_overrides(self) -> dict[str, object]:
+        """Config for reading one correction-preview window.
+
+        The recording's own reader settings, plus the window policy this
+        preview operation uses. The partial-final-window setting here is the
+        preview's alone: a preview is only ever generated from whole windows,
+        which says nothing about whether the final analysis should report a
+        short last window (CR1-F1-D).
+        """
+        overrides = dict(self._guided_continuous_recording_reader_overrides())
+        window_sec = float(self._continuous_window_sec_spin.value())
+        overrides.update(
+            {
+                "continuous_window_sec": window_sec,
+                "continuous_step_sec": window_sec,
+                # Preview-only: whole windows are the only preview evidence.
+                "allow_partial_final_window": False,
+            }
+        )
         return overrides
 
     def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
@@ -13075,6 +13097,19 @@ class MainWindow(QMainWindow):
                     == policy
                 ):
                     inferred = dict(cached_overrides)
+                elif acq == "continuous":
+                    # The RWD contract inference reads a folder of session
+                    # files and checks each against a nominal session length.
+                    # Neither idea fits one continuous recording: the folder
+                    # holds companion CSVs (Events, Outputs) whose headers
+                    # carry no channels, and the single fluorescence file is
+                    # the whole 96-hour recording rather than one session. Take
+                    # the detected reader facts from the recording the check
+                    # already accepted, and read no files here at all. Only
+                    # facts: the window length and partial-final-window choice
+                    # come from the scientist's Recording structure settings
+                    # through ``identity`` below (CR1-F1-F).
+                    inferred = self._guided_continuous_recording_reader_overrides()
                 else:
                     inferred = self._infer_dataset_contract_overrides(fmt)
             except Exception as exc:
@@ -13405,6 +13440,27 @@ class MainWindow(QMainWindow):
 
         return GuidedNewAnalysisDatasetContractSnapshot()
 
+    def _guided_dataset_contract_refusal_text(self) -> str:
+        """One plain sentence explaining why confirmation did not go through.
+
+        Deliberately says nothing about contracts, schemas, suffixes, or file
+        paths: those belong to the Technical details section, which still
+        carries the exact reason (CR1-F1-F).
+        """
+        if self._guided_effective_acquisition_mode() == "continuous" and (
+            self._guided_continuous_rwd_accepted_plan() is None
+        ):
+            return (
+                "This recording has not been checked yet, so its settings "
+                "cannot be confirmed. Go back to Recording structure and "
+                "continue again, then confirm the detected settings here."
+            )
+        return (
+            "The detected settings for this recording could not be "
+            "confirmed. Check the folder selected on Select data, then try "
+            "again. Technical details are in Technical details below."
+        )
+
     def _on_guided_apply_dataset_contract(self) -> None:
         if getattr(self, "_guided_dataset_contract_confirmation_active", False):
             return
@@ -13427,6 +13483,17 @@ class MainWindow(QMainWindow):
                 self._guided_dataset_contract_status_label.setText(
                     label + ("; ".join(candidate.validation_issues) or candidate.status)
                 )
+                # That label lives in the collapsed Technical details section,
+                # so on its own the click looks like it did nothing. Say what
+                # happened where the scientist is already reading, in their
+                # terms; the exact technical reason stays above (CR1-F1-F).
+                next_step_label = getattr(
+                    self, "_guided_review_next_step_label", None
+                )
+                if next_step_label is not None:
+                    next_step_label.setText(
+                        self._guided_dataset_contract_refusal_text()
+                    )
                 return
             stored = getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
             semantic_fields = (

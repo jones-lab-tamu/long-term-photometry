@@ -2465,14 +2465,19 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "This preview is read-only and non-executing." in preview_text
 
 
-def test_new_analysis_first_subset_executable_true_but_spec_preview_unavailable_never_claims_eligible(
+def test_new_analysis_unchecked_continuous_draft_never_claims_eligible(
     window, tmp_path, monkeypatch
 ):
-    """An injected unsupported continuous draft cannot appear eligible.
+    """An injected continuous draft with no checked recording cannot appear
+    eligible, on any surface.
 
-    The production selector has no Continuous item. This test deliberately
-    reconstructs that stale/programmatic value to preserve defense-in-depth at
-    the deeper execution-spec display boundary.
+    This draft carries intermittent-shaped data relabelled as continuous, and
+    no recording check has accepted it. Since CR1-F1-F, confirming detected
+    dataset settings for a continuous plan reads the fluorescence file the
+    accepted recording check identified, so this draft is refused earlier than
+    it used to be -- it is now not even first-subset executable. The invariant
+    this test exists for is unchanged and still checked below: nothing in the
+    display may claim execution is eligible.
     """
     _configure_complete_guided_new_analysis_draft(
         window,
@@ -2490,7 +2495,7 @@ def test_new_analysis_first_subset_executable_true_but_spec_preview_unavailable_
 
     subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
     execution_spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
-    assert subset_readiness.first_subset_executable is True
+    assert subset_readiness.first_subset_executable is False
     assert execution_spec_preview.spec_preview_available is False
     assert (
         window._guided_new_analysis_execution_eligible_for_display(
@@ -2509,10 +2514,7 @@ def test_new_analysis_first_subset_executable_true_but_spec_preview_unavailable_
 
     assert "status: eligible" not in run_preview_text
     assert "validate and run from the Run step" not in run_preview_text
-    assert (
-        "status: subset prerequisites partly satisfied, but execution spec "
-        "is not available for this configuration"
-    ) in run_preview_text
+    assert "unsupported_acquisition_mode_for_rwd_first_subset" in run_preview_text
 
 
 def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_policy(
