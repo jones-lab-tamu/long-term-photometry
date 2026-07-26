@@ -12,14 +12,7 @@ Because the marks are strict, a deferred defect that starts passing reports `XPA
 
 ## A. Deferred Guided product defects (strict xfail)
 
-### GUIDED-DEFERRED-01 — the draft plan records the wrong output destination
-
-- Affected nodes:
-  - `tests/test_gui_guided_workflow.py::test_guided_new_analysis_draft_plan_distinguishes_select_output_from_run_output`
-  - `tests/test_gui_guided_workflow.py::test_guided_new_analysis_applied_output_parent_is_real_draft_state`
-- Scientist-facing defect: the Select data output folder is reported as an applied run-output policy. Before a run output parent is chosen, the page says one is still required while the plan already claims `applied`; after the scientist applies one and is told “Output parent folder is configured”, the plan still records the Select data folder. The plan a scientist reviews is not the destination they chose.
-- Why deferred: `_build_guided_new_analysis_draft_plan` derives the output policy from the Select data field instead of the authoritative `_guided_new_analysis_output_policy_*` state that the status label already uses. Correcting it changes the output-destination contract for every Guided run and needs its own patch with execution-readiness and plan-identity coverage.
-- Expected resolution area: the output-policy block of `_build_guided_new_analysis_draft_plan` in `gui/main_window.py`.
+None currently.
 
 ## C. Known execution-wiring test or fixture failures
 
@@ -60,6 +53,14 @@ Broken tests, repaired:
 - `test_guided_confirm_strategy_is_real_planning_ui_and_run_stays_skipped_in_open_results_mode`, `test_guided_confirm_strategy_never_auto_selects_from_loaded_or_generated_evidence`, `test_guided_confirm_strategy_explicit_mark_is_ui_state_only` — completed-run loading moved onto a worker thread, but these three asserted immediately after clicking Open Results. They now use the existing `_wait_for_guided_results_open` helper, as their passing neighbours already did.
 - `test_full_control_report_viewer_unaffected_by_guided_review_viewer` — `_make_preview_completed_run` wrote only `time_sec`/`sig_raw`/`uv_raw`, so reviewing the run was correctly refused as missing canonical data. The fixture now also writes `dff` and `fit_ref`.
 - `test_preview_uses_custom_roi_settings_when_customized`, `test_preview_uses_effective_settings_for_custom_roi_not_sparse_override`, `test_preview_inactive_absolute_field_does_not_block` — the shared evidence mock seeded an empty `locked_evidence_candidates`, so the real per-ROI currency check correctly marked the mocked Signal-Only F0 choice stale. The mock now builds the candidate the way production does, which also let a `_refresh_guided_draft_run_plan_preview` bypass be removed.
+
+Withdrawn: GUIDED-DEFERRED-01 was a misdiagnosis, not a defect.
+
+- Removed nodes: `test_guided_new_analysis_draft_plan_distinguishes_select_output_from_run_output`, `test_guided_new_analysis_applied_output_parent_is_real_draft_state`.
+- It was recorded as a live defect on the basis that the output status text and the draft plan disagreed about the run destination. They do disagree, but the run-output-parent field, its Apply and Clear buttons, and that status label are all part of `_guided_legacy_output_policy_editor`, which `_refresh_guided_review_plan_display` hides whenever the workflow mode is `new_analysis`. A Guided scientist setting up a new analysis never sees any of them, and the only code path that can set the applied status is the hidden Apply button.
+- So the Select data output folder *is* the intended run destination for Guided new analysis, and the draft builder reading it is correct. Making the draft read the applied-policy state instead leaves the status permanently `missing` — because nothing visible can apply it — and blocks Run for every Guided new-analysis user. That change was attempted and reverted; it broke 25 tests in `test_gui_guided_new_analysis_plan.py` and `test_guided_gui_output_destination_normalization.py`, including the real production path to Run readiness.
+- The two tests drove those hidden legacy controls and then asserted the legacy contract applied in `new_analysis` mode, so they were deleted rather than rewritten. The real contract is already covered by `test_hidden_legacy_output_editor_does_not_replace_select_data_destination` (the plan takes the Select data folder; the legacy editor is hidden) and the surrounding output-policy tests in `test_gui_guided_new_analysis_plan.py`. The developer-terminology guard they carried also survives in `test_guided_new_analysis_feature_event_profile_requires_apply_without_open_results` and `test_guided_confirm_strategy_progress_text_excludes_internal_terms`.
+- Lesson for future triage: two controls contradicting each other is only a defect if a user can see both. Check widget visibility in the mode under test before classifying.
 
 Obsolete expectations, updated to the accepted requirement:
 
