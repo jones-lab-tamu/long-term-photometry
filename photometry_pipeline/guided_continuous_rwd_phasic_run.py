@@ -141,6 +141,9 @@ from photometry_pipeline.guided_new_analysis_plan import (
     build_per_roi_feature_backend_config,
     build_per_roi_feature_event_provenance,
 )
+from photometry_pipeline.guided_continuous_saved_artifacts import (
+    publish_guided_continuous_saved_artifacts,
+)
 from photometry_pipeline.guided_timeline import (
     accepted_continuous_window_timing,
     timeline_provenance_from_intent,
@@ -912,6 +915,14 @@ def execute_guided_continuous_rwd_phasic_run(
         _validate_summary_conserves_events(
             run_dir, relative_paths=phasic_paths, detection=detection
         )
+        saved_artifacts = publish_guided_continuous_saved_artifacts(
+            run_dir,
+            included_roi_ids=included_roi_ids,
+            timeline_contract=timeline_contract,
+            window_timing=window_timing,
+            phasic_analysis=True,
+            tonic_analysis=False,
+        )
         correction_provenance = _per_roi_provenance(cache_path, included_roi_ids, first_chunk_id=0)
 
         total_events = sum(detection.per_roi[roi_id].event_count for roi_id in included_roi_ids)
@@ -965,6 +976,7 @@ def execute_guided_continuous_rwd_phasic_run(
                 "execution_strategy": detection.execution_strategy,
                 "window_summary_provenance": auc_provenance,
             },
+            "saved_artifacts": saved_artifacts,
             "continuous_correction_pass_completion_identity": completion.completion_identity,
         }
         report[REPORT_COMPLETION_KEY] = build_report_completion_block(run_id=run_id)
@@ -976,6 +988,8 @@ def execute_guided_continuous_rwd_phasic_run(
             row_counts_by_family={
                 FAMILY_CONTINUOUS_PHASIC_WINDOW_SUMMARY: dict(phasic_row_counts),
             },
+            saved_artifacts=saved_artifacts["artifacts"],
+            window_timing=saved_artifacts["window_timing"],
         )
         finalized_utc = datetime.now(timezone.utc).isoformat()
         events_relative_path = os.path.join(

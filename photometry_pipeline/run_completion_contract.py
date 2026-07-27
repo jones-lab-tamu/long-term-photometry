@@ -243,6 +243,22 @@ CONTINUOUS_FAMILY_FILENAMES = {
     FAMILY_CONTINUOUS_TONIC_WINDOW_SUMMARY: "continuous_tonic_window_summary.csv",
 }
 
+# Native Guided continuous runs have a saved Results publication stage.  The
+# Full Control continuous wrapper retains its existing optional plot contract.
+GUIDED_CONTINUOUS_RUN_PROFILES = frozenset(
+    {
+        "guided_continuous_rwd_phasic",
+        "guided_continuous_rwd_tonic",
+        "guided_continuous_rwd_combined",
+    }
+)
+GUIDED_CONTINUOUS_IMAGE_SPECS = (
+    (FAMILY_PHASIC_CORRECTION_IMPACT, "phasic_correction_impact.png", "phasic"),
+    (FAMILY_PHASIC_TIMESERIES, "phasic_auc_timeseries.png", "phasic"),
+    (FAMILY_PHASIC_TIMESERIES, "phasic_peak_rate_timeseries.png", "phasic"),
+    (FAMILY_TONIC_OVERVIEW, "tonic_overview.png", "tonic"),
+)
+
 CONTINUOUS_INDEX_KEY = "continuous_window_index"
 
 # Day indices are offsets from the first chunk's own date, so day 000 exists for
@@ -313,6 +329,35 @@ def expected_continuous_families(run_mode: dict[str, Any]) -> list[str]:
     return [family for family in families if family not in skipped]
 
 
+def guided_continuous_saved_artifact_specs(
+    run_mode: dict[str, Any]
+) -> list[tuple[str, str, str]]:
+    """Return required native Guided continuous image specs.
+
+    This is keyed by the executed native Guided profile, so it cannot alter
+    Full Control/legacy continuous completion behavior.
+    """
+    if (
+        run_mode.get("run_profile") not in GUIDED_CONTINUOUS_RUN_PROFILES
+        or run_mode.get("deliverable_profile") != PROFILE_CONTINUOUS
+        or not run_mode.get("continuous_outputs_ran")
+    ):
+        return []
+    specs: list[tuple[str, str, str]] = []
+    if run_mode.get("phasic_analysis") and run_mode.get("feature_extraction_ran"):
+        specs.extend(GUIDED_CONTINUOUS_IMAGE_SPECS[:3])
+    if run_mode.get("tonic_analysis"):
+        specs.append(GUIDED_CONTINUOUS_IMAGE_SPECS[3])
+    skipped = set(run_mode.get("skipped_deliverable_families") or ())
+    return [spec for spec in specs if spec[0] not in skipped]
+
+
+def _is_guided_continuous_saved_image(run_mode: dict[str, Any], rel_path: str) -> bool:
+    if not guided_continuous_saved_artifact_specs(run_mode):
+        return False
+    return str(rel_path).lower().endswith(".png")
+
+
 def required_core_artifacts_for_run_mode(run_mode: dict[str, Any]) -> list[str]:
     """Mandatory internal analysis artifacts implied by the phases that executed."""
     required = [RUN_REPORT_FILENAME]
@@ -366,11 +411,18 @@ def required_deliverables_for_run_mode(run_mode: dict[str, Any]) -> list[str]:
     """
     profile = run_mode.get("deliverable_profile")
     if profile == PROFILE_CONTINUOUS:
-        return [
+        required = [
             f"{roi}/tables/{CONTINUOUS_FAMILY_FILENAMES[family]}"
             for roi in run_mode.get("expected_rois") or []
             for family in expected_continuous_families(run_mode)
         ]
+        image_specs = guided_continuous_saved_artifact_specs(run_mode)
+        required.extend(
+            f"{roi}/summary/{filename}"
+            for roi in run_mode.get("expected_rois") or []
+            for _family, filename, _analysis_family in image_specs
+        )
+        return required
     if profile != PROFILE_FULL_INTERMITTENT:
         return []
 
@@ -436,6 +488,8 @@ def build_continuous_window_index(
     *,
     run_mode: dict[str, Any],
     row_counts_by_family: dict[str, dict[str, int]],
+    saved_artifacts: list[dict[str, Any]] | None = None,
+    window_timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The exhaustive index of continuous window outputs, from the writer's own report.
 
@@ -454,10 +508,15 @@ def build_continuous_window_index(
             },
             "window_row_counts": {str(roi): int(count) for roi, count in counts.items()},
         }
-    return {
+    index = {
         "families": families,
         "skipped_families": list(run_mode.get("skipped_deliverable_families") or []),
     }
+    if saved_artifacts is not None:
+        index["saved_artifacts"] = [dict(record) for record in saved_artifacts]
+    if window_timing is not None:
+        index["window_timing"] = dict(window_timing)
+    return index
 
 
 def input_completeness_error(run_dir: str, run_mode: dict[str, Any]) -> str:
@@ -556,6 +615,49 @@ def continuous_index_error(
                 )
                 if summary_error:
                     return f"{expected_path}: {summary_error}"
+
+    image_specs = guided_continuous_saved_artifact_specs(run_mode)
+    if image_specs:
+        window_timing = index.get("window_timing")
+        if not isinstance(window_timing, dict):
+            return "the continuous window index records no accepted window timing provenance"
+        for timing_key in ("window_length_sec", "window_step_sec"):
+            try:
+                timing_value = float(window_timing[timing_key])
+            except (KeyError, TypeError, ValueError):
+                return f"the continuous window index has no valid {timing_key} provenance"
+            if not math.isfinite(timing_value) or timing_value <= 0:
+                return f"the continuous window index has an invalid {timing_key} provenance"
+        for source_key in ("window_length_source", "window_step_source"):
+            if not str(window_timing.get(source_key, "")).strip():
+                return f"the continuous window index has no {source_key} provenance"
+        saved_artifacts = index.get("saved_artifacts")
+        if not isinstance(saved_artifacts, list):
+            return "the continuous window index records no saved Results artifacts"
+        expected_records = {
+            f"{roi}/summary/{filename}": {
+                "roi": str(roi),
+                "family": family,
+                "analysis_family": analysis_family,
+            }
+            for roi in expected_rois
+            for family, filename, analysis_family in image_specs
+        }
+        observed: dict[str, dict[str, Any]] = {}
+        for record in saved_artifacts:
+            if not isinstance(record, dict):
+                return "the continuous saved-artifact index contains an unreadable entry"
+            path = _to_posix_rel(str(record.get("relative_path", "")))
+            if path in observed:
+                return f"the continuous saved-artifact index duplicates {path}"
+            observed[path] = record
+        for path, expected in expected_records.items():
+            record = observed.get(path)
+            if record is None:
+                return f"the continuous saved-artifact index omits {path}"
+            for key, value in expected.items():
+                if str(record.get(key, "")) != value:
+                    return f"the continuous saved-artifact index mislabels {path} ({key})"
     return ""
 
 
@@ -617,6 +719,19 @@ def build_manifest_completion_block(
         if record is None:
             missing.append(_to_posix_rel(rel_path))
         else:
+            if _is_guided_continuous_saved_image(run_mode, rel_path):
+                try:
+                    from PIL import Image
+
+                    with Image.open(os.path.join(run_dir, _to_os_rel(rel_path))) as image:
+                        image.verify()
+                    with Image.open(os.path.join(run_dir, _to_os_rel(rel_path))) as image:
+                        if image.size[0] <= 0 or image.size[1] <= 0:
+                            raise ValueError("image dimensions are not positive")
+                except Exception as exc:
+                    raise RunCompletionError(
+                        f"Mandatory image output is not a valid decodable image: {rel_path} ({exc})"
+                    ) from exc
             artifacts.append(record)
 
     if missing:
@@ -1448,7 +1563,7 @@ def verify_terminal_set_before_status(
     if unlisted:
         return f"{MANIFEST_FILENAME} omits mandatory outputs: " + ", ".join(unlisted)
 
-    return _verify_recorded_artifacts(run_dir, artifacts)
+    return _verify_recorded_artifacts(run_dir, artifacts, run_mode=run_mode)
 
 
 def review_with_warnings_eligibility(
@@ -1790,7 +1905,9 @@ def _classify_current(
             run_id=run_id,
         )
 
-    verification_error = _verify_recorded_artifacts(run_dir, artifacts)
+    verification_error = _verify_recorded_artifacts(
+        run_dir, artifacts, run_mode=run_mode
+    )
     if verification_error:
         return corrupted(verification_error, run_id=run_id)
 
@@ -1880,7 +1997,12 @@ def _run_mode_disagreement(run_mode: dict[str, Any], status: dict[str, Any]) -> 
     return ""
 
 
-def _verify_recorded_artifacts(run_dir: str, artifacts: list[Any]) -> str:
+def _verify_recorded_artifacts(
+    run_dir: str,
+    artifacts: list[Any],
+    *,
+    run_mode: dict[str, Any] | None = None,
+) -> str:
     """Verify every mandatory artifact the manifest records. Optional ones may be absent."""
     for entry in artifacts:
         if not isinstance(entry, dict):
@@ -1895,6 +2017,22 @@ def _verify_recorded_artifacts(run_dir: str, artifacts: list[Any]) -> str:
             if required:
                 return f"A required output of this run is missing: {rel_path}"
             continue
+
+        if (
+            run_mode is not None
+            and entry.get("required") is True
+            and _is_guided_continuous_saved_image(run_mode, rel_path)
+        ):
+            try:
+                from PIL import Image
+
+                with Image.open(abs_path) as image:
+                    image.verify()
+                with Image.open(abs_path) as image:
+                    if image.size[0] <= 0 or image.size[1] <= 0:
+                        raise ValueError("image dimensions are not positive")
+            except Exception as exc:
+                return f"A required image output is not decodable: {rel_path} ({exc})"
 
         recorded_size = entry.get("size_bytes")
         if isinstance(recorded_size, int) and os.path.getsize(abs_path) != recorded_size:

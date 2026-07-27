@@ -641,6 +641,21 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
     assert os.path.isfile(
         os.path.join(phasic_analysis_dir, "features", "feature_event_provenance.json")
     )
+    for roi in included:
+        for filename in (
+            "phasic_correction_impact.png",
+            "phasic_auc_timeseries.png",
+            "phasic_peak_rate_timeseries.png",
+        ):
+            path = os.path.join(result.run_dir, roi, "summary", filename)
+            assert os.path.isfile(path)
+            assert os.path.getsize(path) > 0
+        assert not os.path.exists(
+            os.path.join(result.run_dir, roi, "summary", "phasic_peak_count_timeseries.png")
+        )
+        assert not os.path.exists(
+            os.path.join(result.run_dir, roi, "summary", "sampled_signal_reference.png")
+        )
 
     classification = classify_run_terminal_state(result.run_dir)
     assert classification.is_success
@@ -660,6 +675,28 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
     assert all(
         settings == auc_provenance["global_defaults"]
         for settings in auc_provenance["effective_settings_by_roi"].values()
+    )
+    saved = report["saved_artifacts"]
+    assert saved["window_timing"]["window_length_sec"] == pytest.approx(90.0)
+    assert saved["window_timing"]["window_step_sec"] == pytest.approx(90.0)
+    assert saved["window_timing"]["window_length_sec"] == saved["window_timing"]["window_step_sec"]
+    manifest = json.loads(
+        (Path(result.run_dir) / "MANIFEST.json").read_text(encoding="utf-8")
+    )
+    indexed = manifest["completion"]["deliverables"]["continuous_window_index"]
+    indexed_paths = {entry["relative_path"] for entry in indexed["saved_artifacts"]}
+    assert indexed_paths == {
+        f"{roi}/summary/{filename}"
+        for roi in included
+        for filename in (
+            "phasic_correction_impact.png",
+            "phasic_auc_timeseries.png",
+            "phasic_peak_rate_timeseries.png",
+        )
+    }
+    assert all(
+        entry["analysis_family"] == "phasic"
+        for entry in indexed["saved_artifacts"]
     )
 
 
@@ -683,6 +720,25 @@ def test_successful_run_detects_each_roi_once_before_publication(
     for roi in inputs[0].recording.roi.included_roi_ids:
         summary = _read_roi_summary(result.run_dir, roi)
         assert int(summary["event_count"].sum()) == result.detection.per_roi[roi].event_count
+
+
+def test_missing_required_saved_figure_cannot_classify_as_success(
+    accepted_case, real_config, tmp_path
+):
+    result = _run(_pass_inputs(accepted_case), real_config, tmp_path)
+    missing_path = (
+        Path(result.run_dir)
+        / "ROI1"
+        / "summary"
+        / "phasic_auc_timeseries.png"
+    )
+    missing_path.unlink()
+
+    classification = classify_run_terminal_state(result.run_dir)
+
+    assert not classification.is_success
+    assert "required output" in classification.reason.lower()
+    assert "phasic_auc_timeseries.png" in classification.reason
 
 
 def test_natural_run_uses_accepted_effective_roi_auc_settings_and_provenance(
@@ -739,6 +795,15 @@ def test_natural_run_uses_accepted_effective_roi_auc_settings_and_provenance(
             "lowpass_hz": config.lowpass_hz,
             "filter_order": config.filter_order,
         }
+    auc_artifacts = {
+        entry["roi"]: entry
+        for entry in report["saved_artifacts"]["artifacts"]
+        if entry.get("plot_metric") == "phasic_signal_auc"
+    }
+    for roi_id in config_by_roi:
+        assert auc_artifacts[roi_id]["auc_units"] == auc_provenance[
+            "effective_settings_by_roi"
+        ][roi_id]["auc_units"]
     assert len(seen_configs) == len(case[0].recording.roi.included_roi_ids)
 
     events = pd.read_csv(result.events_path)
@@ -790,6 +855,15 @@ def test_standalone_provenance_keeps_accepted_window_length_and_step_distinct(
         "accepted_draft.continuous_window_sec"
     )
     assert provenance["window_step_source"] == (
+        "accepted_draft.continuous_step_sec"
+    )
+    saved_timing = report["saved_artifacts"]["window_timing"]
+    assert saved_timing["window_length_sec"] == pytest.approx(90.0)
+    assert saved_timing["window_step_sec"] == pytest.approx(37.5)
+    assert saved_timing["window_length_source"] == (
+        "accepted_draft.continuous_window_sec"
+    )
+    assert saved_timing["window_step_source"] == (
         "accepted_draft.continuous_step_sec"
     )
     manifest = json.loads((Path(result.run_dir) / "MANIFEST.json").read_text(encoding="utf-8"))
@@ -863,6 +937,59 @@ def test_window_summary_conserves_events_and_covers_recording(accepted_case, rea
         ends = df["window_end_sec"].to_numpy()
         gaps = starts[1:] - ends[:-1]
         assert np.allclose(gaps, 0.1, atol=1e-9)
+
+
+def test_natural_saved_phasic_plots_follow_each_accepted_timeline_mode(
+    accepted_case, real_config, tmp_path
+):
+    binding, grid, draft, contract, source = accepted_case
+    cases = {
+        "fixed_daily_anchor": {
+            "fixed_daily_anchor_clock": "07:00",
+            "recording_start_clock": "07:00",
+            "recording_start_clock_source": "user_confirmed",
+        },
+        "civil": {
+            "fixed_daily_anchor_clock": None,
+            "recording_start_clock": "11:00",
+            "recording_start_clock_source": "user_confirmed",
+        },
+        "elapsed": {
+            "fixed_daily_anchor_clock": None,
+            "recording_start_clock": None,
+            "recording_start_clock_source": "not_applicable",
+        },
+    }
+    for mode, values in cases.items():
+        intent = dataclasses.replace(
+            draft.execution_intent,
+            timeline_anchor_mode=mode,
+            **values,
+        )
+        updated_draft = dataclasses.replace(draft, execution_intent=intent)
+        updated_binding = build_guided_continuous_rwd_review_binding(
+            updated_draft,
+            recording=binding.recording,
+            continuity_evaluation=binding.continuity_evaluation,
+            current_source_path=source,
+        )
+        result = _run(
+            _pass_inputs((updated_binding, grid, updated_draft, contract, source)),
+            real_config,
+            tmp_path / mode,
+        )
+        report = json.loads(
+            (Path(result.run_dir) / "run_report.json").read_text(encoding="utf-8")
+        )
+        assert report["timeline"]["timeline_mode"] == mode
+        assert report["saved_artifacts"]["timeline"]["timeline_mode"] == mode
+        first_roi = updated_binding.recording.roi.included_roi_ids[0]
+        assert (
+            Path(result.run_dir)
+            / first_roi
+            / "summary"
+            / "phasic_auc_timeseries.png"
+        ).is_file()
 
 
 def test_final_short_tail_is_included_not_dropped(accepted_case, real_config, tmp_path):

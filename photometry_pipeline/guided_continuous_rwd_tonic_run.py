@@ -109,8 +109,14 @@ from photometry_pipeline.guided_continuous_rwd_target_grid import (
 from photometry_pipeline.guided_execution_payloads import (
     GuidedExecutionStartupMappingContract,
 )
+from photometry_pipeline.guided_continuous_saved_artifacts import (
+    publish_guided_continuous_saved_artifacts,
+)
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
-from photometry_pipeline.guided_timeline import timeline_provenance_from_intent
+from photometry_pipeline.guided_timeline import (
+    accepted_continuous_window_timing,
+    timeline_provenance_from_intent,
+)
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
@@ -190,6 +196,7 @@ def _write_tonic_trace_cache(
     tonic_cache_path: str,
     included_roi_ids: tuple[str, ...],
     config: Config,
+    window_timing: dict | None = None,
 ) -> None:
     """Republish C4b's already-established per-segment ``delta_f`` (the
     native tonic result -- see module docstring) through the existing,
@@ -232,6 +239,17 @@ def _write_tonic_trace_cache(
                             "window_end_sec": float(attrs["window_end_sec"]),
                             "window_duration_sec": float(attrs["window_duration_sec"]),
                         }
+                        if window_timing is not None:
+                            window_meta.update(
+                                {
+                                    "continuous_window_sec": float(
+                                        window_timing["window_length_sec"]
+                                    ),
+                                    "continuous_step_sec": float(
+                                        window_timing["window_step_sec"]
+                                    ),
+                                }
+                            )
                     sig_cols.append(np.asarray(sig, dtype=np.float64))
                     uv_cols.append(np.asarray(uv, dtype=np.float64))
                     delta_cols.append(np.asarray(delta_f, dtype=np.float64))
@@ -380,6 +398,7 @@ def execute_guided_continuous_rwd_tonic_run(
     timeline_contract = timeline_provenance_from_intent(
         accepted_draft.execution_intent
     )
+    window_timing = accepted_continuous_window_timing(accepted_draft)
     run_id, run_dir = _allocate_run_directory(output_base)
     _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
 
@@ -418,6 +437,7 @@ def execute_guided_continuous_rwd_tonic_run(
             tonic_cache_path=tonic_cache_path,
             included_roi_ids=included_roi_ids,
             config=config,
+            window_timing=window_timing,
         )
         _validate_tonic_cache(
             tonic_cache_path, included_roi_ids=included_roi_ids, completion=completion
@@ -426,6 +446,14 @@ def execute_guided_continuous_rwd_tonic_run(
 
         tonic_paths, tonic_row_counts = _generate_tonic_summary(
             run_dir, tonic_out_dir, included_roi_ids
+        )
+        saved_artifacts = publish_guided_continuous_saved_artifacts(
+            run_dir,
+            included_roi_ids=included_roi_ids,
+            timeline_contract=timeline_contract,
+            window_timing=window_timing,
+            phasic_analysis=False,
+            tonic_analysis=True,
         )
         provenance = _per_roi_provenance(cache_path, included_roi_ids, first_chunk_id=0)
 
@@ -466,6 +494,7 @@ def execute_guided_continuous_rwd_tonic_run(
                 "output_relative_paths": tonic_paths,
                 "window_row_counts": tonic_row_counts,
             },
+            "saved_artifacts": saved_artifacts,
             "continuous_correction_pass_completion_identity": completion.completion_identity,
         }
         report[REPORT_COMPLETION_KEY] = build_report_completion_block(run_id=run_id)
@@ -477,6 +506,8 @@ def execute_guided_continuous_rwd_tonic_run(
             row_counts_by_family={
                 FAMILY_CONTINUOUS_TONIC_WINDOW_SUMMARY: dict(tonic_row_counts),
             },
+            saved_artifacts=saved_artifacts["artifacts"],
+            window_timing=saved_artifacts["window_timing"],
         )
         finalized_utc = datetime.now(timezone.utc).isoformat()
         manifest = {

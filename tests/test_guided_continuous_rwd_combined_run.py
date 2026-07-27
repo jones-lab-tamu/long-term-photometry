@@ -156,6 +156,17 @@ def test_successful_multi_chunk_combined_run_publishes_current_success(
     assert os.path.isfile(result.phasic_cache_path)
     assert os.path.isfile(result.features_path)
     assert os.path.isfile(result.events_path)
+    expected_images = {
+        "phasic_correction_impact.png",
+        "phasic_auc_timeseries.png",
+        "phasic_peak_rate_timeseries.png",
+        "tonic_overview.png",
+    }
+    for roi in included:
+        for filename in expected_images:
+            path = os.path.join(result.run_dir, roi, "summary", filename)
+            assert os.path.isfile(path)
+            assert os.path.getsize(path) > 0
 
     classification = classify_run_terminal_state(result.run_dir)
     assert classification.is_success
@@ -173,6 +184,20 @@ def test_successful_multi_chunk_combined_run_publishes_current_success(
     assert "completed" in narrative
     for internal_term in ("d3a", "d3b-a", "d3b-b", "kernel", "storage chunk"):
         assert internal_term not in narrative
+    saved = report["saved_artifacts"]
+    assert saved["window_timing"]["window_length_sec"] == pytest.approx(90.0)
+    assert saved["window_timing"]["window_step_sec"] == pytest.approx(90.0)
+    correction_by_roi = {
+        entry["roi"]: entry
+        for entry in saved["artifacts"]
+        if entry["family"] == "phasic_correction_impact"
+    }
+    for roi in included:
+        assert correction_by_roi[roi]["analysis_family"] == "phasic"
+        assert correction_by_roi[roi]["representative_window"]["roi"] == roi
+        assert correction_by_roi[roi]["representative_window"]["elapsed_end_sec"] >= (
+            correction_by_roi[roi]["representative_window"]["elapsed_start_sec"]
+        )
 
 
 def test_combined_provenance_uses_accepted_window_step_when_distinct(
@@ -235,6 +260,17 @@ def test_combined_provenance_uses_accepted_window_step_when_distinct(
     )
     assert provenance["window_step_source"] == (
         "accepted_draft.continuous_step_sec"
+    )
+    saved_timing = report["saved_artifacts"]["window_timing"]
+    assert saved_timing["window_length_sec"] == pytest.approx(90.0)
+    assert saved_timing["window_step_sec"] == pytest.approx(37.5)
+    assert saved_timing["window_length_sec"] != saved_timing["window_step_sec"]
+    tonic_summary = _read_tonic_summary(result.run_dir, "ROI1")
+    assert tonic_summary["continuous_window_sec"].tolist() == pytest.approx(
+        [90.0] * len(tonic_summary)
+    )
+    assert tonic_summary["continuous_step_sec"].tolist() == pytest.approx(
+        [37.5] * len(tonic_summary)
     )
     with open(os.path.join(result.run_dir, "MANIFEST.json"), encoding="utf-8") as handle:
         manifest = json.load(handle)

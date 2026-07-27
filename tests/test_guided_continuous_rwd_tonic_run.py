@@ -101,6 +101,14 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
         gaps = starts[1:] - ends[:-1]
         assert np.allclose(gaps, 0.1, atol=1e-9)
         assert df["window_index"].tolist() == list(range(len(df)))
+        assert df["continuous_window_sec"].tolist() == pytest.approx([90.0] * len(df))
+        assert df["continuous_step_sec"].tolist() == pytest.approx([90.0] * len(df))
+        overview = os.path.join(result.run_dir, roi, "summary", "tonic_overview.png")
+        assert os.path.isfile(overview)
+        assert os.path.getsize(overview) > 0
+        assert not os.path.exists(
+            os.path.join(result.run_dir, roi, "summary", "sampled_signal_reference.png")
+        )
 
     classification = classify_run_terminal_state(result.run_dir)
     assert classification.is_success
@@ -112,6 +120,20 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
         report = json.load(fh)
     assert "phasic" in report["summary"]["narrative"].lower()
     assert "not been run" in report["summary"]["narrative"].lower()
+    assert report["saved_artifacts"]["window_timing"] == {
+        "window_length_sec": pytest.approx(90.0),
+        "window_step_sec": pytest.approx(90.0),
+        "window_length_source": "accepted_draft.continuous_window_sec",
+        "window_step_source": "accepted_draft.continuous_step_sec",
+    }
+    for roi in included:
+        sampling = report["saved_artifacts"]["tonic_overview_sampling_by_roi"][roi]
+        assert sampling["n_points_plotted"] <= sampling["max_plot_points"]
+        assert sampling["trace_labels"] == [
+            "Raw signal",
+            "Raw reference",
+            "Tonic signal (deltaF)",
+        ]
 
 
 def test_one_chunk_run_is_one_continuous_recording(real_config, tmp_path, tmp_path_factory):
