@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 import photometry_pipeline.guided_backend_validation_request as contracts
-from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_new_analysis_plan import (
+    GuidedNewAnalysisDraftPlan,
+    GuidedNewAnalysisExecutionIntent,
+)
 
 
 _DIGEST_A = "a" * 64
@@ -69,6 +72,8 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         session_duration_sec=120.0,
         timeline_anchor_mode="civil",
         fixed_daily_anchor_clock=None,
+        recording_start_clock="12:00",
+        recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
         exclude_incomplete_final_rwd_chunk=False,
         classification_schema_name=(
@@ -287,6 +292,8 @@ def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
             session_duration_sec=acquisition.session_duration_sec,
             timeline_anchor_mode=acquisition.timeline_anchor_mode,
             fixed_daily_anchor_clock=acquisition.fixed_daily_anchor_clock,
+            recording_start_clock=acquisition.recording_start_clock,
+            recording_start_clock_source=acquisition.recording_start_clock_source,
             allow_partial_final_window=acquisition.allow_partial_final_window,
             exclude_incomplete_final_rwd_chunk=(
                 acquisition.exclude_incomplete_final_rwd_chunk
@@ -834,6 +841,42 @@ def test_complete_facts_compile_populated_request_with_identity():
     )
 
 
+def test_compile_propagates_accepted_timeline_fields_into_execution_request():
+    draft = replace(
+        _compiler_draft(),
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+            recording_start_clock="11:00",
+            recording_start_clock_source="user_confirmed",
+        ),
+    )
+    facts = _complete_facts()
+    facts = replace(
+        facts,
+        acquisition_dataset=replace(
+            facts.acquisition_dataset,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+            recording_start_clock="11:00",
+            recording_start_clock_source="user_confirmed",
+        ),
+    )
+
+    result = contracts.compile_guided_backend_validation_request(
+        draft,
+        facts=facts,
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
+    acquisition = result.request.acquisition_dataset
+    assert acquisition.timeline_anchor_mode == "fixed_daily_anchor"
+    assert acquisition.fixed_daily_anchor_clock == "07:00"
+    assert acquisition.recording_start_clock == "11:00"
+    assert acquisition.recording_start_clock_source == "user_confirmed"
+
+
 def test_compiler_success_is_accepted_by_pure_backend_validator():
     from photometry_pipeline.guided_backend_validator import (
         validate_guided_backend_validation_request,
@@ -1117,7 +1160,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     # were added to GuidedBackendCorrectionRequest's identity fields (see
     # _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS).
     assert first == (
-        "1379976b2494f921e74cf8a39c8d94d12a40e0882203bad6db52a12ee23812be"
+        "7099b56ae8a47571a72aa0a8e1ee0e3aadbdb89075c0a3bf1cb23db31994a610"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
@@ -1160,6 +1203,8 @@ def test_npm_acquisition_request_uses_format_neutral_disposition_policy():
         session_duration_sec=120.0,
         timeline_anchor_mode="civil",
         fixed_daily_anchor_clock=None,
+        recording_start_clock="12:00",
+        recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
         dataset_snapshot_schema_version=(
             "guided_new_analysis_dataset_contract_snapshot.v1"
@@ -1209,6 +1254,8 @@ def test_npm_disposition_policy_is_part_of_parent_request_identity():
         session_duration_sec=120.0,
         timeline_anchor_mode="civil",
         fixed_daily_anchor_clock=None,
+        recording_start_clock="12:00",
+        recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
         dataset_snapshot_schema_version=(
             "guided_new_analysis_dataset_contract_snapshot.v1"

@@ -1305,8 +1305,10 @@ def test_request_ready_enriched_facts_are_complete_and_immutable(tmp_path: Path)
     assert dataset.acquisition_mode == "intermittent"
     assert dataset.sessions_per_hour == 6
     assert dataset.session_duration_sec == pytest.approx(120.0)
-    assert dataset.timeline_anchor_mode == "civil"
-    assert dataset.fixed_daily_anchor_clock is None
+    assert dataset.timeline_anchor_mode == "fixed_daily_anchor"
+    assert dataset.fixed_daily_anchor_clock == "07:00"
+    assert dataset.recording_start_clock == "12:00"
+    assert dataset.recording_start_clock_source == "validated_metadata"
     assert dataset.rwd_time_col == "Time(s)"
     assert dataset.uv_suffix == "-410"
     assert dataset.sig_suffix == "-470"
@@ -1937,6 +1939,10 @@ def test_backend_validation_workflow_accepts_npm_without_rwd_classifier_claims(
     assert acquisition.__class__.__name__ == (
         "GuidedBackendNpmAcquisitionDatasetRequest"
     )
+    assert acquisition.timeline_anchor_mode == "fixed_daily_anchor"
+    assert acquisition.fixed_daily_anchor_clock == "07:00"
+    assert acquisition.recording_start_clock == "12:00"
+    assert acquisition.recording_start_clock_source == "validated_metadata"
     assert acquisition.disposition_policy.admitted_dispositions == ("process",)
     assert acquisition.disposition_policy.missing_session_policy == "unsupported"
     assert not hasattr(acquisition, "classification_schema_name")

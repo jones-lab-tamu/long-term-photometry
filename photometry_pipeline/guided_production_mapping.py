@@ -55,6 +55,11 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GUIDED_SUPPORTED_TONIC_OUTPUT_MODES,
     GUIDED_SUPPORTED_TONIC_TIMELINE_MODES,
 )
+from photometry_pipeline.guided_timeline import (
+    GUIDED_TIMELINE_CLOCK_SOURCE_SET,
+    GUIDED_TIMELINE_MODE_SET,
+    valid_guided_clock,
+)
 from photometry_pipeline.core.types import (
     CORRECTION_STRATEGY_FAMILIES,
     PerRoiCorrectionSpec,
@@ -381,6 +386,8 @@ class GuidedProductionAcquisition:
     session_duration_sec: float
     timeline_anchor_mode: str
     fixed_daily_anchor_clock: str | None
+    recording_start_clock: str | None
+    recording_start_clock_source: str
     allow_partial_final_window: bool
     exclude_incomplete_final_rwd_chunk: bool
     classification_schema_name: str
@@ -653,6 +660,10 @@ class GuidedNpmProductionExecutionIntent:
     source_format: str
     source_root_canonical: str
     acquisition_mode: str
+    timeline_anchor_mode: str
+    fixed_daily_anchor_clock: str | None
+    recording_start_clock: str | None
+    recording_start_clock_source: str
     source_candidate_files: tuple[GuidedProductionSourceCandidate, ...]
     source_snapshot_set_identity: str
     source_snapshot_content_identity: str
@@ -724,6 +735,41 @@ class GuidedNpmProductionExecutionIntent:
                 raise ValueError(f"{name} must be a non-empty string.")
         if self.source_format != "npm" or self.acquisition_mode != "intermittent":
             raise ValueError("NPM production intent has unsupported source facts.")
+        if self.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET:
+            raise ValueError("NPM production intent has an unsupported timeline mode.")
+        if (
+            self.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(self.fixed_daily_anchor_clock)
+        ) or (
+            self.timeline_anchor_mode != "fixed_daily_anchor"
+            and self.fixed_daily_anchor_clock is not None
+        ):
+            raise ValueError("NPM production intent has an invalid plotted-day clock.")
+        if self.recording_start_clock_source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+            raise ValueError("NPM production intent has an invalid clock source.")
+        if self.recording_start_clock is not None and not valid_guided_clock(
+            self.recording_start_clock
+        ):
+            raise ValueError("NPM production intent has an invalid recording-start clock.")
+        if (
+            self.recording_start_clock_source == "not_applicable"
+            and self.recording_start_clock is not None
+        ):
+            raise ValueError("NPM production intent has an unbound recording-start clock.")
+        if (
+            self.timeline_anchor_mode == "elapsed"
+            and (
+                self.recording_start_clock is not None
+                or self.recording_start_clock_source != "not_applicable"
+            )
+        ) or (
+            self.timeline_anchor_mode != "elapsed"
+            and self.recording_start_clock is None
+        ):
+            raise ValueError(
+                "NPM production intent requires a recording-start clock for "
+                "civil or fixed placement and forbids one for elapsed placement."
+            )
         if (
             isinstance(self.validation_revision, bool)
             or not isinstance(self.validation_revision, int)
@@ -1334,7 +1380,10 @@ def map_guided_validation_request_to_execution_intent(
             acquisition=GuidedProductionAcquisition(
                 request.acquisition_dataset.acquisition_mode, request.acquisition_dataset.sessions_per_hour,
                 request.acquisition_dataset.session_duration_sec, request.acquisition_dataset.timeline_anchor_mode,
-                request.acquisition_dataset.fixed_daily_anchor_clock, request.acquisition_dataset.allow_partial_final_window,
+                request.acquisition_dataset.fixed_daily_anchor_clock,
+                request.acquisition_dataset.recording_start_clock,
+                request.acquisition_dataset.recording_start_clock_source,
+                request.acquisition_dataset.allow_partial_final_window,
                 request.acquisition_dataset.exclude_incomplete_final_rwd_chunk,
                 request.acquisition_dataset.classification_schema_name,
                 request.acquisition_dataset.classification_schema_version,
@@ -2339,6 +2388,10 @@ def _map_verified_guided_npm_request_to_execution_intent(
             source_format=request.source.source_format,
             source_root_canonical=request.source.source_root_canonical,
             acquisition_mode=acquisition.acquisition_mode,
+            timeline_anchor_mode=acquisition.timeline_anchor_mode,
+            fixed_daily_anchor_clock=acquisition.fixed_daily_anchor_clock,
+            recording_start_clock=acquisition.recording_start_clock,
+            recording_start_clock_source=acquisition.recording_start_clock_source,
             source_candidate_files=tuple(
                 GuidedProductionSourceCandidate(
                     item.canonical_relative_path,

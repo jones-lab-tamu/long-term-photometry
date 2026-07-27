@@ -129,6 +129,10 @@ from photometry_pipeline.guided_execution_payloads import (
     GuidedExecutionStartupMappingContract,
 )
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_timeline import (
+    accepted_continuous_window_timing,
+    timeline_provenance_from_intent,
+)
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
     list_cache_rois,
@@ -311,6 +315,10 @@ def execute_guided_continuous_rwd_combined_run(
     """
     included_roi_ids = tuple(review_binding.recording.roi.included_roi_ids)
     run_mode = _build_run_mode(included_roi_ids)
+    timeline_contract = timeline_provenance_from_intent(
+        accepted_draft.execution_intent
+    )
+    window_timing = accepted_continuous_window_timing(accepted_draft)
     run_id, run_dir = _allocate_run_directory(output_base)
     _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
 
@@ -390,7 +398,7 @@ def execute_guided_continuous_rwd_combined_run(
             config=config,
             full_window_sample_count=segment_plan.nominal_segment_sample_count,
             effective_feature_config_by_roi=effective_feature_config_by_roi,
-            window_step_sec=float(accepted_draft.continuous_step_sec),
+            window_step_sec=window_timing["window_step_sec"],
         )
         _validate_phasic_cache(
             phasic_cache_path, included_roi_ids=included_roi_ids, completion=completion
@@ -401,8 +409,8 @@ def execute_guided_continuous_rwd_combined_run(
         generate_run_report(config, phasic_out_dir, traces_only=False)
         auc_provenance = build_continuous_phasic_auc_provenance(
             config,
-            window_length_sec=float(accepted_draft.continuous_window_sec),
-            window_step_sec=float(accepted_draft.continuous_step_sec),
+            window_length_sec=window_timing["window_length_sec"],
+            window_step_sec=window_timing["window_step_sec"],
             effective_configs_by_roi=effective_feature_config_by_roi,
             allow_partial_final_window=bool(
                 getattr(config, "allow_partial_final_window", False)
@@ -411,6 +419,12 @@ def execute_guided_continuous_rwd_combined_run(
                     < segment_plan.nominal_segment_sample_count
                 )
             ),
+        )
+        auc_provenance.update(
+            {
+                "window_length_source": window_timing["window_length_source"],
+                "window_step_source": window_timing["window_step_source"],
+            }
         )
         provenance_payload = _write_feature_event_provenance(
             features_dir,
@@ -464,6 +478,7 @@ def execute_guided_continuous_rwd_combined_run(
                 "source_content_identity": review_binding.recording.source.source_content_identity,
                 "recording_identity": review_binding.recording.recording_identity,
             },
+            "timeline": timeline_contract,
             "target_grid": {
                 "target_grid_identity": target_grid.target_grid_identity,
                 "target_sample_count": target_grid.target_sample_count,
@@ -521,6 +536,7 @@ def execute_guided_continuous_rwd_combined_run(
             "run_id": run_id,
             "run_profile": run_mode["run_profile"],
             "run_type": run_mode["run_type"],
+            "timeline": timeline_contract,
             COMPLETION_KEY: build_manifest_completion_block(
                 run_dir,
                 run_id=run_id,

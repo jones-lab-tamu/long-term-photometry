@@ -776,9 +776,24 @@ def test_standalone_provenance_keeps_accepted_window_length_and_step_distinct(
     inputs = _pass_inputs(case)
     result = _run(inputs, real_config, tmp_path)
     report = json.loads((Path(result.run_dir) / "run_report.json").read_text(encoding="utf-8"))
+    expected_timeline = {
+        "timeline_mode": "fixed_daily_anchor",
+        "fixed_daily_anchor_clock": "07:00",
+        "recording_start_clock": "11:00",
+        "recording_start_clock_source": "user_confirmed",
+    }
+    assert report["timeline"] == expected_timeline
     provenance = report["phasic_analysis"]["window_summary_provenance"]
     assert provenance["window_length_sec"] == 90.0
     assert provenance["window_step_sec"] == 37.5
+    assert provenance["window_length_source"] == (
+        "accepted_draft.continuous_window_sec"
+    )
+    assert provenance["window_step_source"] == (
+        "accepted_draft.continuous_step_sec"
+    )
+    manifest = json.loads((Path(result.run_dir) / "MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["timeline"] == expected_timeline
     cache = open_phasic_cache(result.phasic_cache_path)
     try:
         attrs = load_cache_chunk_attrs(cache, "ROI1", 0)

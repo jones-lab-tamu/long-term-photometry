@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFormLayout
 
 from gui.main_window import MainWindow
 from photometry_pipeline import guided_capabilities
@@ -39,6 +39,16 @@ def window(qapp):
 
 def _combo_values(combo) -> tuple[str, ...]:
     return tuple(str(combo.itemData(index)) for index in range(combo.count()))
+
+
+def _timeline_row_visibility(window, field_name: str):
+    field = getattr(window, field_name)
+    form = window._guided_timeline_group.layout()
+    row, _role = form.getWidgetPosition(field)
+    label_item = form.itemAt(row, QFormLayout.LabelRole)
+    label = label_item.widget() if label_item is not None else None
+    assert label is not None
+    return label.text(), label.isVisible(), field.isVisible()
 
 
 def test_guided_capability_contract_is_narrow_immutable_and_not_environment_driven(
@@ -110,6 +120,111 @@ def test_guided_selector_uses_capability_contract_and_full_control_stays_separat
     )
 
 
+def test_guided_timeline_controls_use_ordered_default_and_do_not_touch_full_control(
+    window,
+):
+    assert _combo_values(window._guided_timeline_mode_combo) == (
+        "fixed_daily_anchor",
+        "civil",
+        "elapsed",
+    )
+    assert window._guided_timeline_mode_combo.currentData() == (
+        "fixed_daily_anchor"
+    )
+    assert window._guided_fixed_daily_anchor_clock_edit.text() == "07:00"
+    assert window._guided_timeline_help_label.text() == (
+        "Fixed daily anchor places each day relative to the selected "
+        "circadian-day start.\n"
+        "Civil clock uses actual clock time with midnight as the day boundary.\n"
+        "Elapsed starts the plot at the first recording."
+    )
+
+    full_control_mode = window._timeline_anchor_mode_combo.currentData()
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("elapsed")
+    )
+    window._guided_fixed_daily_anchor_clock_edit.setText("06:00")
+    window._on_guided_start_setup_new_analysis()
+
+    assert window._guided_timeline_mode_combo.currentData() == (
+        "fixed_daily_anchor"
+    )
+    assert window._guided_fixed_daily_anchor_clock_edit.text() == "07:00"
+    assert window._timeline_anchor_mode_combo.currentData() == full_control_mode
+
+
+def test_guided_timeline_hides_complete_conditional_form_rows(window, tmp_path):
+    window.show()
+    window._on_guided_start_setup_new_analysis()
+    window._on_guided_stepper_row_changed(
+        window._guided_step_index("Recording structure")
+    )
+    window._guided_format_combo.setCurrentText("rwd")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+
+    assert _timeline_row_visibility(
+        window, "_guided_timeline_mode_combo"
+    ) == ("Time display:", True, True)
+    assert _timeline_row_visibility(
+        window, "_guided_fixed_daily_anchor_clock_edit"
+    ) == ("Start of plotted day:", True, True)
+    assert _timeline_row_visibility(
+        window, "_guided_recording_start_clock_edit"
+    ) == ("Clock time at recording start:", True, True)
+
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("civil")
+    )
+    assert _timeline_row_visibility(
+        window, "_guided_fixed_daily_anchor_clock_edit"
+    ) == ("Start of plotted day:", False, False)
+    assert _timeline_row_visibility(
+        window, "_guided_recording_start_clock_edit"
+    ) == ("Clock time at recording start:", True, True)
+
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("elapsed")
+    )
+    assert _timeline_row_visibility(
+        window, "_guided_fixed_daily_anchor_clock_edit"
+    ) == ("Start of plotted day:", False, False)
+    assert _timeline_row_visibility(
+        window, "_guided_recording_start_clock_edit"
+    ) == ("Clock time at recording start:", False, False)
+
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    session = tmp_path / "2026_06_30-12_00_00" / "Fluorescence.csv"
+    window._discovery_cache = {
+        "resolved_format": "rwd",
+        "sessions": [{"path": str(session)}],
+    }
+    window._sync_guided_recording_visibility()
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("fixed_daily_anchor")
+    )
+
+    assert _timeline_row_visibility(
+        window, "_guided_fixed_daily_anchor_clock_edit"
+    ) == ("Start of plotted day:", True, True)
+    assert _timeline_row_visibility(
+        window, "_guided_recording_start_clock_edit"
+    ) == ("Clock time at recording start:", False, False)
+
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("civil")
+    )
+    assert _timeline_row_visibility(
+        window, "_guided_fixed_daily_anchor_clock_edit"
+    ) == ("Start of plotted day:", False, False)
+    assert _timeline_row_visibility(
+        window, "_guided_recording_start_clock_edit"
+    ) == ("Clock time at recording start:", False, False)
+
+
 def test_guided_continuous_selection_produces_a_continuous_draft(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_format_combo.setCurrentText("rwd")
@@ -117,6 +232,7 @@ def test_guided_continuous_selection_produces_a_continuous_draft(window):
         window._guided_acquisition_mode_combo.findData("continuous")
     )
     window._guided_continuous_window_sec_spin.setValue(600.0)
+    window._guided_recording_start_clock_edit.setText("11:00")
 
     assert window._guided_selected_acquisition_mode() == "continuous"
     draft = window._build_guided_new_analysis_draft_plan()
@@ -124,6 +240,10 @@ def test_guided_continuous_selection_produces_a_continuous_draft(window):
     assert draft.input_format == "rwd"
     assert draft.continuous_window_sec == 600.0
     assert draft.continuous_step_sec == 600.0
+    assert draft.execution_intent.timeline_anchor_mode == "fixed_daily_anchor"
+    assert draft.execution_intent.fixed_daily_anchor_clock == "07:00"
+    assert draft.execution_intent.recording_start_clock == "11:00"
+    assert draft.execution_intent.recording_start_clock_source == "user_confirmed"
     # The session-timing questions do not apply to one long recording.
     assert window._guided_sessions_per_hour_edit.isHidden() is True
     assert window._guided_session_duration_edit.isHidden() is True
@@ -132,6 +252,83 @@ def test_guided_continuous_selection_produces_a_continuous_draft(window):
         True,
         "Recording structure is ready.",
     )
+
+
+def test_guided_continuous_timeline_requires_start_clock_and_reviews_mapping(
+    window,
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("rwd")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+
+    assert window._guided_fixed_daily_anchor_clock_edit.isHidden() is False
+    assert window._guided_recording_start_clock_edit.isHidden() is False
+    assert window._guided_recording_structure_readiness() == (
+        False,
+        "Enter the clock time when this recording began.",
+    )
+
+    window._guided_recording_start_clock_edit.setText("11:00")
+    assert window._guided_recording_structure_readiness() == (
+        True,
+        "Recording structure is ready.",
+    )
+    fixed_plan = window._build_guided_new_analysis_draft_plan()
+    assert window._guided_timeline_review_lines(fixed_plan) == [
+        "Time display: Fixed daily anchor",
+        "Start of plotted day: 07:00",
+        "Clock time at recording start: 11:00",
+        "First data will appear 4 hours after the plotted day begins.",
+    ]
+
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("civil")
+    )
+    civil_plan = window._build_guided_new_analysis_draft_plan()
+    assert window._guided_fixed_daily_anchor_clock_edit.isHidden()
+    assert window._guided_recording_start_clock_edit.isHidden() is False
+    assert window._guided_timeline_review_lines(civil_plan) == [
+        "Time display: Civil clock",
+        "Clock time at recording start: 11:00",
+        "Days begin at midnight.",
+    ]
+
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("elapsed")
+    )
+    elapsed_plan = window._build_guided_new_analysis_draft_plan()
+    assert window._guided_recording_start_clock_edit.isHidden()
+    assert elapsed_plan.execution_intent.recording_start_clock is None
+    assert elapsed_plan.execution_intent.recording_start_clock_source == (
+        "not_applicable"
+    )
+    assert window._guided_timeline_review_lines(elapsed_plan) == [
+        "Time display: Elapsed from recording start",
+        "The first recorded sample will appear at time 0.",
+    ]
+
+
+def test_guided_intermittent_rwd_uses_validated_session_clock_without_editable_start(
+    window, tmp_path
+):
+    session = tmp_path / "2026_06_30-12_00_00" / "Fluorescence.csv"
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("rwd")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    window._discovery_cache = {
+        "resolved_format": "rwd",
+        "sessions": [{"path": str(session)}],
+    }
+    window._sync_guided_recording_visibility()
+
+    assert window._guided_recording_start_clock_edit.isHidden()
+    values = window._guided_timeline_plan_values()
+    assert values["recording_start_clock"] == "12:00"
+    assert values["recording_start_clock_source"] == "validated_metadata"
 
 
 @pytest.mark.parametrize("source_format", ["npm", "custom_tabular"])
@@ -182,6 +379,11 @@ def test_guided_intermittent_setup_remains_available(window, source_format):
     window._guided_format_combo.setCurrentText(source_format)
     window._guided_acquisition_mode_combo.setCurrentIndex(
         window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    # No discovery facts are installed in this focused structure test, so use
+    # the explicit elapsed-only option instead of claiming a clock start.
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("elapsed")
     )
     window._guided_sessions_per_hour_edit.setText("6")
     window._guided_session_duration_edit.setText("120")

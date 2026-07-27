@@ -110,6 +110,7 @@ from photometry_pipeline.guided_execution_payloads import (
     GuidedExecutionStartupMappingContract,
 )
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_timeline import timeline_provenance_from_intent
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
@@ -376,6 +377,9 @@ def execute_guided_continuous_rwd_tonic_run(
     """
     included_roi_ids = tuple(review_binding.recording.roi.included_roi_ids)
     run_mode = _build_run_mode(included_roi_ids)
+    timeline_contract = timeline_provenance_from_intent(
+        accepted_draft.execution_intent
+    )
     run_id, run_dir = _allocate_run_directory(output_base)
     _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
 
@@ -444,6 +448,7 @@ def execute_guided_continuous_rwd_tonic_run(
                 "source_content_identity": review_binding.recording.source.source_content_identity,
                 "recording_identity": review_binding.recording.recording_identity,
             },
+            "timeline": timeline_contract,
             "target_grid": {
                 "target_grid_identity": target_grid.target_grid_identity,
                 "target_sample_count": target_grid.target_sample_count,
@@ -479,6 +484,7 @@ def execute_guided_continuous_rwd_tonic_run(
             "run_id": run_id,
             "run_profile": run_mode["run_profile"],
             "run_type": run_mode["run_type"],
+            "timeline": timeline_contract,
             COMPLETION_KEY: build_manifest_completion_block(
                 run_dir,
                 run_id=run_id,

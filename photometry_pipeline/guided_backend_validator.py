@@ -47,6 +47,11 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GUIDED_SUPPORTED_TONIC_OUTPUT_MODES,
     GUIDED_SUPPORTED_TONIC_TIMELINE_MODES,
 )
+from photometry_pipeline.guided_timeline import (
+    GUIDED_TIMELINE_MODE_SET,
+    GUIDED_TIMELINE_CLOCK_SOURCE_SET,
+    valid_guided_clock,
+)
 
 
 GUIDED_BACKEND_VALIDATOR_REFUSAL_CATEGORIES = (
@@ -514,8 +519,35 @@ def _validate_semantics(
         or not isinstance(dataset.session_duration_sec, (int, float))
         or not math.isfinite(float(dataset.session_duration_sec))
         or dataset.session_duration_sec <= 0
-        or dataset.timeline_anchor_mode != "civil"
-        or dataset.fixed_daily_anchor_clock is not None
+        or dataset.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET
+        or (
+            dataset.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(dataset.fixed_daily_anchor_clock)
+        )
+        or (
+            dataset.timeline_anchor_mode != "fixed_daily_anchor"
+            and dataset.fixed_daily_anchor_clock is not None
+        )
+        or dataset.recording_start_clock_source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET
+        or (
+            dataset.recording_start_clock is not None
+            and not valid_guided_clock(dataset.recording_start_clock)
+        )
+        or (
+            dataset.recording_start_clock_source == "not_applicable"
+            and dataset.recording_start_clock is not None
+        )
+        or (
+            dataset.timeline_anchor_mode == "elapsed"
+            and (
+                dataset.recording_start_clock is not None
+                or dataset.recording_start_clock_source != "not_applicable"
+            )
+        )
+        or (
+            dataset.timeline_anchor_mode != "elapsed"
+            and dataset.recording_start_clock is None
+        )
     ):
         return _issue(
             "missing_or_stale_dataset_contract",

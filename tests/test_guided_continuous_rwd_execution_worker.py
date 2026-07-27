@@ -151,7 +151,11 @@ def _build_case_for_mode(
         per_roi_correction_strategy_choices=_choices(strategies),
         feature_event_profile_id="default",
         feature_event_values={},
-        execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode=execution_mode),
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            recording_start_clock="11:00",
+            recording_start_clock_source="user_confirmed",
+            execution_mode=execution_mode,
+        ),
     )
     if feature_confirmed:
         draft_kwargs["feature_event_profile_status"] = "default_initialized"
@@ -190,9 +194,13 @@ def _mode_draft(draft, *, execution_mode: str, feature_confirmed: bool = False):
     refuses first): swapping execution_intent on a copy invalidates the
     accepted_guided_plan_identity baked into an already-built review binding
     / segment plan (see `_build_case_for_mode`)."""
+    intent = dataclasses.replace(
+        draft.execution_intent,
+        execution_mode=execution_mode,
+    )
     updated = dataclasses.replace(
         draft,
-        execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode=execution_mode),
+        execution_intent=intent,
     )
     if feature_confirmed:
         updated = dataclasses.replace(

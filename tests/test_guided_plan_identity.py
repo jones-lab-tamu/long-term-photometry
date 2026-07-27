@@ -384,6 +384,33 @@ def test_execution_mode_change_changes_identity():
     assert len(ids) == 3
 
 
+def test_timeline_placement_change_changes_accepted_plan_identity():
+    base_intent = dict(
+        timeline_anchor_mode="fixed_daily_anchor",
+        fixed_daily_anchor_clock="07:00",
+        recording_start_clock="11:00",
+        recording_start_clock_source="user_confirmed",
+    )
+    plan_fixed = _base_plan(
+        execution_intent=GuidedNewAnalysisExecutionIntent(**base_intent)
+    )
+    plan_other_anchor = _base_plan(
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            **{**base_intent, "fixed_daily_anchor_clock": "06:00"}
+        )
+    )
+    plan_civil = _base_plan(
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            **{**base_intent, "timeline_anchor_mode": "civil"}
+        )
+    )
+    identities = {
+        compute_guided_new_analysis_draft_plan_identity(plan)
+        for plan in (plan_fixed, plan_other_anchor, plan_civil)
+    }
+    assert len(identities) == 3
+
+
 def test_dynamic_fit_parameter_change_changes_identity():
     plan_a = _base_plan(
         dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(

@@ -622,6 +622,27 @@ def _regions_from_run_report(report_path):
     return None
 
 
+def _guided_timeline_provenance_is_present(
+    timeline_anchor_mode,
+    fixed_daily_anchor_clock,
+    recording_start_clock,
+    recording_start_clock_source,
+):
+    """Whether the explicit Guided timing contract is present.
+
+    Full Control's existing civil-clock default has no Guided recording-start
+    contract.  Keep its legacy root metadata shape unless an explicit Guided
+    timing choice is actually carried through.
+    """
+    mode = str(timeline_anchor_mode or "civil").strip().lower()
+    return bool(
+        mode != "civil"
+        or fixed_daily_anchor_clock is not None
+        or recording_start_clock is not None
+        or recording_start_clock_source != "not_applicable"
+    )
+
+
 def _ensure_root_run_report(
     run_dir,
     phasic_out,
@@ -640,6 +661,8 @@ def _ensure_root_run_report(
     acquisition_mode_source=None,
     timeline_anchor_mode="civil",
     fixed_daily_anchor_clock=None,
+    recording_start_clock=None,
+    recording_start_clock_source="not_applicable",
     run_id=None,
 ):
     """
@@ -698,6 +721,18 @@ def _ensure_root_run_report(
                  run_ctx['acquisition_mode_source'] = acquisition_mode_source
                  run_ctx['timeline_anchor_mode'] = timeline_anchor_mode
                  run_ctx['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+                 if _guided_timeline_provenance_is_present(
+                     timeline_anchor_mode,
+                     fixed_daily_anchor_clock,
+                     recording_start_clock,
+                     recording_start_clock_source,
+                 ):
+                     run_ctx['timeline'] = {
+                         'timeline_mode': timeline_anchor_mode,
+                         'fixed_daily_anchor_clock': fixed_daily_anchor_clock,
+                         'recording_start_clock': recording_start_clock,
+                         'recording_start_clock_source': recording_start_clock_source,
+                     }
                  if run_type:
                      run_ctx["run_type"] = str(run_type)
                  if run_profile:
@@ -718,6 +753,14 @@ def _ensure_root_run_report(
                  derived_settings['acquisition_mode_source'] = acquisition_mode_source
                  derived_settings['timeline_anchor_mode'] = timeline_anchor_mode
                  derived_settings['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+                 if _guided_timeline_provenance_is_present(
+                     timeline_anchor_mode,
+                     fixed_daily_anchor_clock,
+                     recording_start_clock,
+                     recording_start_clock_source,
+                 ):
+                     derived_settings['recording_start_clock'] = recording_start_clock
+                     derived_settings['recording_start_clock_source'] = recording_start_clock_source
 
              if artifact_contract is not None:
                  repo["run_mode_contract"] = {
@@ -828,6 +871,17 @@ def parse_args():
         '--fixed-daily-anchor-clock',
         default=None,
         help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
+    )
+    parser.add_argument(
+        '--guided-recording-start-clock',
+        default=None,
+        help="Guided timing provenance: clock at elapsed recording time zero.",
+    )
+    parser.add_argument(
+        '--guided-recording-start-clock-source',
+        choices=['validated_metadata', 'user_confirmed', 'not_applicable'],
+        default='not_applicable',
+        help="Guided timing provenance source for the recording-start clock.",
     )
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
     parser.add_argument('--sig-iso-render-mode', choices=['qc', 'full'], default='qc',
@@ -956,6 +1010,24 @@ def validate_inputs(args):
         if args.fixed_daily_anchor_clock is None or not str(args.fixed_daily_anchor_clock).strip():
             raise RuntimeError(
                 "--fixed-daily-anchor-clock is required when --timeline-anchor-mode fixed_daily_anchor."
+            )
+    guided_recording_start_clock = getattr(
+        args, "guided_recording_start_clock", None
+    )
+    guided_recording_start_clock_source = getattr(
+        args, "guided_recording_start_clock_source", "not_applicable"
+    )
+    if guided_recording_start_clock is not None:
+        if not re.fullmatch(
+            r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?",
+            str(guided_recording_start_clock).strip(),
+        ):
+            raise RuntimeError(
+                "--guided-recording-start-clock must be a valid HH:MM or HH:MM:SS value."
+            )
+        if guided_recording_start_clock_source == 'not_applicable':
+            raise RuntimeError(
+                "--guided-recording-start-clock-source cannot be not_applicable when a clock is supplied."
             )
 
     # Impossible schedule (only when both are provided)
@@ -1866,6 +1938,19 @@ def main():
         'regions': [],
         'deliverables': {}
     }
+    timeline_provenance_present = _guided_timeline_provenance_is_present(
+        args.timeline_anchor_mode,
+        args.fixed_daily_anchor_clock,
+        args.guided_recording_start_clock,
+        args.guided_recording_start_clock_source,
+    )
+    if timeline_provenance_present:
+        manifest['timeline'] = {
+            'timeline_mode': args.timeline_anchor_mode,
+            'fixed_daily_anchor_clock': args.fixed_daily_anchor_clock,
+            'recording_start_clock': args.guided_recording_start_clock,
+            'recording_start_clock_source': args.guided_recording_start_clock_source,
+        }
 
     # ============================================================
     # 0. Validate-only preflight
@@ -2032,6 +2117,15 @@ def main():
             argv.extend(["--timeline-anchor-mode", str(args.timeline_anchor_mode)])
         if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
             argv.extend(["--fixed-daily-anchor-clock", str(args.fixed_daily_anchor_clock)])
+        if args.guided_recording_start_clock is not None:
+            argv.extend(
+                [
+                    "--guided-recording-start-clock",
+                    str(args.guided_recording_start_clock),
+                    "--guided-recording-start-clock-source",
+                    str(args.guided_recording_start_clock_source),
+                ]
+            )
         argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
         argv.extend(["--sig-iso-render-mode", str(args.sig_iso_render_mode)])
         argv.extend(["--dff-render-mode", str(args.dff_render_mode)])
@@ -2165,6 +2259,19 @@ def main():
             "phase_elapsed_sec": {},
         }
     }
+    if timeline_provenance_present:
+        status_data.update(
+            {
+                "recording_start_clock": args.guided_recording_start_clock,
+                "recording_start_clock_source": args.guided_recording_start_clock_source,
+                "timeline": {
+                    "timeline_mode": args.timeline_anchor_mode,
+                    "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
+                    "recording_start_clock": args.guided_recording_start_clock,
+                    "recording_start_clock_source": args.guided_recording_start_clock_source,
+                },
+            }
+        )
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
 
@@ -2329,6 +2436,8 @@ def main():
             acquisition_mode_source=acquisition_mode_source,
             timeline_anchor_mode=args.timeline_anchor_mode,
             fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+            recording_start_clock=args.guided_recording_start_clock,
+            recording_start_clock_source=args.guided_recording_start_clock_source,
             run_id=run_id,
         )
 
@@ -3602,6 +3711,8 @@ def main():
                                           acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
                                           fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+                                          recording_start_clock=args.guided_recording_start_clock,
+                                          recording_start_clock_source=args.guided_recording_start_clock_source,
                                           run_id=run_id)
         except Exception:
              pass
@@ -3672,6 +3783,8 @@ def main():
                                           acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
                                           fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+                                          recording_start_clock=args.guided_recording_start_clock,
+                                          recording_start_clock_source=args.guided_recording_start_clock_source,
                                           run_id=run_id)
         except Exception:
              pass

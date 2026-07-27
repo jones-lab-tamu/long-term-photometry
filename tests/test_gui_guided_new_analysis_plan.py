@@ -2527,8 +2527,10 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "Execution intent:" in preview_text
-    assert "timeline_anchor_mode: civil" in preview_text
-    assert "fixed_daily_anchor_clock: none" in preview_text
+    assert "timeline_anchor_mode: fixed_daily_anchor" in preview_text
+    assert "fixed_daily_anchor_clock: 07:00" in preview_text
+    assert "recording_start_clock: none" in preview_text
+    assert "recording_start_clock_source: not_applicable" in preview_text
     assert "execution_mode: both" in preview_text
     assert "run_profile: full" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text
@@ -2799,7 +2801,7 @@ def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, 
     assert "missing_execution_mode" not in preview_text
     assert "missing_run_profile" not in preview_text
     assert "missing_output_creation_policy" not in preview_text
-    assert "timeline_anchor_mode: fixed_default=civil" in preview_text
+    assert "timeline_anchor_mode: fixed_default=fixed_daily_anchor" in preview_text
     assert "mode: fixed_default=both" in preview_text
     assert "run_profile: fixed_default=full" in preview_text
     assert "output_creation_policy: present" in preview_text
@@ -2825,7 +2827,8 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
 
     assert "Dataset contract snapshot:" in preview_text
     assert "Execution intent:" in preview_text
-    assert "timeline_anchor_mode: civil" in preview_text
+    assert "timeline_anchor_mode: fixed_daily_anchor" in preview_text
+    assert "fixed_daily_anchor_clock: 07:00" in preview_text
     assert "execution_mode: both" in preview_text
     assert "run_profile: full" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text

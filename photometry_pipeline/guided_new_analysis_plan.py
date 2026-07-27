@@ -20,6 +20,12 @@ from photometry_pipeline.feature_event_config import (
     validate_feature_event_config_fields,
 )
 from photometry_pipeline.workflow_safety import feature_event_defaults_from_config
+from photometry_pipeline.guided_timeline import (
+    GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK,
+    GUIDED_TIMELINE_CLOCK_SOURCE_SET,
+    GUIDED_TIMELINE_MODE_SET,
+    valid_guided_clock,
+)
 
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
@@ -61,7 +67,9 @@ FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES = {
     "robust_global_event_reject",
     "adaptive_event_gated_regression",
 }
-TIMELINE_ANCHOR_MODES = {"civil", "elapsed", "fixed_daily_anchor"}
+# Existing public plan vocabulary, backed by the single format-neutral Guided
+# timeline contract used by validation, startup, and continuous publication.
+TIMELINE_ANCHOR_MODES = GUIDED_TIMELINE_MODE_SET
 EXECUTION_MODES = {"both", "phasic", "tonic"}
 RUN_PROFILES = {"full", "tuning_prep"}
 OUTPUT_PATH_ROLES = {"output_base"}
@@ -410,13 +418,22 @@ class GuidedApprovedMissingSession:
 @dataclass(frozen=True)
 class GuidedNewAnalysisExecutionIntent:
     schema_version: str = EXECUTION_INTENT_SCHEMA_VERSION
-    timeline_anchor_mode: str = "civil"
-    fixed_daily_anchor_clock: str | None = None
+    timeline_anchor_mode: str = "fixed_daily_anchor"
+    fixed_daily_anchor_clock: str | None = GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK
+    recording_start_clock: str | None = None
+    recording_start_clock_source: str = "not_applicable"
     execution_mode: str = "phasic"
     run_profile: str = "full"
     provenance: dict[str, Any] = field(default_factory=lambda: {
-        "timeline_anchor_mode": "first_subset_fixed_default_matches_backend_default",
-        "fixed_daily_anchor_clock": "not_relevant_for_civil_timeline_anchor",
+        "timeline_anchor_mode": "Guided default: fixed daily anchor",
+        "fixed_daily_anchor_clock": "Guided default: start of plotted day 07:00",
+        "recording_start_clock": (
+            "resolved from accepted metadata when available or explicitly "
+            "confirmed for elapsed-only continuous input"
+        ),
+        "recording_start_clock_source": (
+            "validated_metadata, user_confirmed, or not_applicable"
+        ),
         "execution_mode": "first_subset_fixed_default_phasic_for_global_dynamic_fit_only",
         "run_profile": "first_subset_fixed_default_matches_backend_default",
         "no_runspec": True,
@@ -664,6 +681,9 @@ NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION: dict[str, str] = {
     "missing_input_source": "source_setup",
     "invalid_or_missing_input_format": "source_setup",
     "missing_or_invalid_acquisition_structure": "source_setup",
+    "invalid_timeline_anchor_mode": "source_setup",
+    "invalid_recording_start_clock": "source_setup",
+    "missing_recording_start_clock": "source_setup",
     "no_roi_inventory": "roi_inclusion",
     "no_included_rois": "roi_inclusion",
     "missing_diagnostic_cache": "diagnostic_cache",
@@ -1412,6 +1432,79 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
                 severity="blocking"
             ))
 
+    # Timeline choices are explicit Guided plan state.  Intermittent source
+    # datetimes are verified later by the normalized recording contract; the
+    # plan model still validates any supplied metadata value.  Continuous RWD
+    # has elapsed-only input at this stage, so civil/fixed placement cannot be
+    # confirmed without an explicitly entered elapsed-zero clock.
+    intent = plan.execution_intent
+    timeline_mode = str(intent.timeline_anchor_mode or "").strip().lower()
+    if timeline_mode not in TIMELINE_ANCHOR_MODES:
+        issues.append(GuidedPlanIssue(
+            category="invalid_timeline_anchor_mode",
+            message="Choose Elapsed from first recording, Civil clock, or Fixed daily anchor.",
+            severity="blocking",
+        ))
+    elif timeline_mode == "fixed_daily_anchor" and not _valid_fixed_anchor_clock(
+        intent.fixed_daily_anchor_clock
+    ):
+        issues.append(GuidedPlanIssue(
+            category="invalid_timeline_anchor_mode",
+            message="Enter the start of the plotted circadian day in HH:MM format.",
+            severity="blocking",
+        ))
+    elif timeline_mode != "fixed_daily_anchor" and intent.fixed_daily_anchor_clock is not None:
+        issues.append(GuidedPlanIssue(
+            category="invalid_timeline_anchor_mode",
+            message="The plotted-day start applies only to Fixed daily anchor.",
+            severity="blocking",
+        ))
+
+    start_source = str(intent.recording_start_clock_source or "").strip().lower()
+    start_clock_valid = intent.recording_start_clock is None or valid_guided_clock(
+        intent.recording_start_clock
+    )
+    if start_source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+        issues.append(GuidedPlanIssue(
+            category="invalid_recording_start_clock",
+            message="The recording-start clock source is not recognized.",
+            severity="blocking",
+        ))
+    elif intent.recording_start_clock is not None and not start_clock_valid:
+        issues.append(GuidedPlanIssue(
+            category="invalid_recording_start_clock",
+            message="Clock time at recording start must be a valid HH:MM value.",
+            severity="blocking",
+        ))
+    elif start_source == "not_applicable" and intent.recording_start_clock is not None:
+        issues.append(GuidedPlanIssue(
+            category="invalid_recording_start_clock",
+            message="A recording-start clock cannot be marked not applicable.",
+            severity="blocking",
+        ))
+
+    if (
+        acq_mode == "continuous"
+        and plan.input_format == "rwd"
+        and timeline_mode in {"civil", "fixed_daily_anchor"}
+        and (
+            start_source != "user_confirmed"
+            or intent.recording_start_clock is None
+            or not start_clock_valid
+        )
+    ):
+        issues.append(GuidedPlanIssue(
+            category="missing_recording_start_clock",
+            message="Enter the clock time when this recording began before continuing.",
+            severity="blocking",
+        ))
+    if timeline_mode == "elapsed" and intent.recording_start_clock is not None:
+        issues.append(GuidedPlanIssue(
+            category="invalid_recording_start_clock",
+            message="Elapsed placement starts at the first recorded sample and does not use a recording-start clock.",
+            severity="blocking",
+        ))
+
     approved_missing = list(plan.approved_missing_sessions or [])
     if approved_missing:
         if plan.input_format != "rwd" or acq_mode != "intermittent":
@@ -2022,18 +2115,7 @@ def _snapshot_has_mapping_fields(
 
 
 def _valid_fixed_anchor_clock(value: str | None) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    parts = value.strip().split(":")
-    if len(parts) not in {2, 3}:
-        return False
-    try:
-        numbers = [int(part) for part in parts]
-    except ValueError:
-        return False
-    hour, minute = numbers[0], numbers[1]
-    second = numbers[2] if len(numbers) == 3 else 0
-    return 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59
+    return valid_guided_clock(value)
 
 
 def _execution_intent_value(intent: GuidedNewAnalysisExecutionIntent) -> dict[str, Any]:
@@ -2041,6 +2123,8 @@ def _execution_intent_value(intent: GuidedNewAnalysisExecutionIntent) -> dict[st
         "schema_version": intent.schema_version,
         "timeline_anchor_mode": intent.timeline_anchor_mode,
         "fixed_daily_anchor_clock": intent.fixed_daily_anchor_clock,
+        "recording_start_clock": intent.recording_start_clock,
+        "recording_start_clock_source": intent.recording_start_clock_source,
         "execution_mode": intent.execution_mode,
         "run_profile": intent.run_profile,
         "provenance": dict(intent.provenance),
@@ -2050,15 +2134,34 @@ def _execution_intent_value(intent: GuidedNewAnalysisExecutionIntent) -> dict[st
 def _execution_intent_fields(
     intent: GuidedNewAnalysisExecutionIntent,
 ) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
-    timeline_ok = intent.timeline_anchor_mode == "civil" and intent.fixed_daily_anchor_clock is None
-    if intent.timeline_anchor_mode == "fixed_daily_anchor" and not _valid_fixed_anchor_clock(intent.fixed_daily_anchor_clock):
+    mode_ok = intent.timeline_anchor_mode in TIMELINE_ANCHOR_MODES
+    fixed_ok = (
+        intent.timeline_anchor_mode == "fixed_daily_anchor"
+        and _valid_fixed_anchor_clock(intent.fixed_daily_anchor_clock)
+    ) or (
+        intent.timeline_anchor_mode in {"civil", "elapsed"}
+        and intent.fixed_daily_anchor_clock is None
+    )
+    timeline_ok = mode_ok and fixed_ok
+    if not mode_ok:
+        timeline_provenance = "Guided timeline mode is unsupported"
+    elif not fixed_ok and intent.timeline_anchor_mode == "fixed_daily_anchor":
         timeline_provenance = "fixed_daily_anchor timeline mode requires a valid fixed_daily_anchor_clock"
-    elif intent.timeline_anchor_mode != "civil":
-        timeline_provenance = "first subset supports only civil timeline anchor mode"
-    elif intent.fixed_daily_anchor_clock is not None:
-        timeline_provenance = "civil timeline anchor mode must not carry fixed_daily_anchor_clock"
+    elif not fixed_ok:
+        timeline_provenance = "civil and elapsed timeline modes must not carry fixed_daily_anchor_clock"
     else:
-        timeline_provenance = "first subset fixed default; matches backend/Full Control civil timeline anchor default"
+        timeline_provenance = "accepted Guided timeline placement choice"
+
+    source_ok = intent.recording_start_clock_source in GUIDED_TIMELINE_CLOCK_SOURCE_SET
+    start_ok = (
+        intent.recording_start_clock is None
+        or valid_guided_clock(intent.recording_start_clock)
+    )
+    if intent.recording_start_clock_source == "not_applicable":
+        start_ok = start_ok and intent.recording_start_clock is None
+    elif intent.recording_start_clock_source in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+        start_ok = start_ok and intent.recording_start_clock is not None
+    recording_start_ok = source_ok and start_ok
 
     execution_mode_ok = intent.execution_mode in {"phasic", "tonic", "both"}
     run_profile_ok = intent.run_profile == "full"
@@ -2074,17 +2177,41 @@ def _execution_intent_fields(
         ),
         _execution_field(
             "fixed_daily_anchor_clock",
-            "fixed_default" if intent.fixed_daily_anchor_clock is None else "invalid",
+            "fixed_default" if fixed_ok else "invalid",
             value=intent.fixed_daily_anchor_clock,
             provenance=(
-                "first subset fixed default; no fixed daily anchor"
-                if intent.fixed_daily_anchor_clock is None
-                else "fixed_daily_anchor_clock is not used by first subset civil timeline default"
+                "accepted Guided default or selected fixed daily anchor"
+                if fixed_ok
+                else "fixed_daily_anchor_clock does not match the selected timeline mode"
             ),
-            blocks_subset=intent.fixed_daily_anchor_clock is not None and intent.timeline_anchor_mode != "fixed_daily_anchor",
-            issue_category="invalid_timeline_anchor_mode"
-            if intent.fixed_daily_anchor_clock is not None and intent.timeline_anchor_mode != "fixed_daily_anchor"
-            else None,
+            blocks_subset=not fixed_ok,
+            issue_category="invalid_timeline_anchor_mode" if not fixed_ok else None,
+        ),
+        _execution_field(
+            "recording_start_clock",
+            "present" if intent.recording_start_clock is not None and recording_start_ok else (
+                "fixed_default" if intent.recording_start_clock is None and recording_start_ok else "invalid"
+            ),
+            value=intent.recording_start_clock,
+            provenance=(
+                "accepted authoritative recording-start clock"
+                if intent.recording_start_clock is not None
+                else "not applicable until a mode/source requires an elapsed-zero clock"
+            ),
+            blocks_subset=not recording_start_ok,
+            issue_category=None if recording_start_ok else "invalid_recording_start_clock",
+        ),
+        _execution_field(
+            "recording_start_clock_source",
+            "present" if recording_start_ok else "invalid",
+            value=intent.recording_start_clock_source,
+            provenance=(
+                "accepted metadata or explicit user confirmation"
+                if intent.recording_start_clock_source != "not_applicable"
+                else "not applicable for elapsed mode or datetime-free plan"
+            ),
+            blocks_subset=not recording_start_ok,
+            issue_category=None if recording_start_ok else "invalid_recording_start_clock",
         ),
         _execution_field(
             "mode",
@@ -2887,6 +3014,8 @@ def _execution_intent_preview_dict(
         "schema_version": intent.schema_version,
         "timeline_anchor_mode": intent.timeline_anchor_mode,
         "fixed_daily_anchor_clock": intent.fixed_daily_anchor_clock,
+        "recording_start_clock": intent.recording_start_clock,
+        "recording_start_clock_source": intent.recording_start_clock_source,
         "execution_mode": intent.execution_mode,
         "run_profile": intent.run_profile,
         "provenance": dict(intent.provenance),
@@ -3258,6 +3387,8 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
                 "status": "represented",
                 "value": plan.execution_intent.timeline_anchor_mode,
                 "fixed_daily_anchor_clock": plan.execution_intent.fixed_daily_anchor_clock,
+                "recording_start_clock": plan.execution_intent.recording_start_clock,
+                "recording_start_clock_source": plan.execution_intent.recording_start_clock_source,
                 "source": "GuidedNewAnalysisDraftPlan.execution_intent",
             },
         },
@@ -4357,19 +4488,34 @@ def _execution_intent_mapping_section(spec_preview: GuidedNewAnalysisExecutionSp
         _mapping_entry(
             "timeline_anchor_mode",
             intent.get("timeline_anchor_mode"),
-            "would_rely_on_backend_default",
+            "would_emit_override",
             "execution_intent",
-            "first-subset fixed default civil timeline anchor",
-            "future backend timeline anchor concept",
+            "accepted Guided timeline placement choice",
+            "future backend timeline placement",
         ),
         _mapping_entry(
             "fixed_daily_anchor_clock",
             intent.get("fixed_daily_anchor_clock"),
-            "not_applicable",
+            "would_emit_override",
             "execution_intent",
-            "not relevant for civil timeline anchor",
-            "future backend fixed anchor clock only if fixed_daily_anchor is selected",
-            production_input=False,
+            "accepted only when Fixed daily anchor is selected",
+            "future backend plotted-day origin",
+        ),
+        _mapping_entry(
+            "recording_start_clock",
+            intent.get("recording_start_clock"),
+            "would_emit_override",
+            "execution_intent",
+            "validated metadata or explicit user confirmation when elapsed zero needs a clock",
+            "future backend elapsed-zero clock",
+        ),
+        _mapping_entry(
+            "recording_start_clock_source",
+            intent.get("recording_start_clock_source"),
+            "would_emit_override",
+            "execution_intent",
+            "records whether the elapsed-zero clock came from metadata or the scientist",
+            "future backend timing provenance",
         ),
     ]
     return {

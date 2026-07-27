@@ -24,6 +24,11 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     GuidedNewAnalysisDraftPlan,
 )
+from photometry_pipeline.guided_timeline import (
+    GUIDED_TIMELINE_CLOCK_SOURCE_SET,
+    GUIDED_TIMELINE_MODE_SET,
+    valid_guided_clock,
+)
 
 
 GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME = (
@@ -392,7 +397,7 @@ class GuidedBackendAcquisitionDatasetRequest:
     sessions_per_hour: int
     session_duration_sec: float
     timeline_anchor_mode: str
-    fixed_daily_anchor_clock: None
+    fixed_daily_anchor_clock: str | None
     allow_partial_final_window: bool
     exclude_incomplete_final_rwd_chunk: bool
     classification_schema_name: str
@@ -412,6 +417,8 @@ class GuidedBackendAcquisitionDatasetRequest:
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
     execution_mode: str = "phasic"
+    recording_start_clock: str | None = None
+    recording_start_clock_source: str = "not_applicable"
 
     def __post_init__(self) -> None:
         if self.acquisition_mode != "intermittent":
@@ -435,14 +442,49 @@ class GuidedBackendAcquisitionDatasetRequest:
             raise GuidedBackendValidationRequestContractError(
                 "session_duration_sec must be positive and finite."
             )
-        if self.timeline_anchor_mode != "civil":
+        if self.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET:
             raise GuidedBackendValidationRequestContractError(
-                "timeline_anchor_mode must be civil."
+                "timeline_anchor_mode is unsupported."
             )
         if (
-            self.fixed_daily_anchor_clock is not None
-            or self.allow_partial_final_window is not False
+            self.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(self.fixed_daily_anchor_clock)
+        ) or (
+            self.timeline_anchor_mode != "fixed_daily_anchor"
+            and self.fixed_daily_anchor_clock is not None
         ):
+            raise GuidedBackendValidationRequestContractError(
+                "fixed_daily_anchor_clock does not match timeline_anchor_mode."
+            )
+        if self.recording_start_clock_source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+            raise GuidedBackendValidationRequestContractError(
+                "recording_start_clock_source is unsupported."
+            )
+        if self.recording_start_clock is not None and not valid_guided_clock(
+            self.recording_start_clock
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "recording_start_clock is invalid."
+            )
+        if self.recording_start_clock_source == "not_applicable" and self.recording_start_clock is not None:
+            raise GuidedBackendValidationRequestContractError(
+                "recording_start_clock cannot be present when its source is not_applicable."
+            )
+        if (
+            self.timeline_anchor_mode == "elapsed"
+            and (
+                self.recording_start_clock is not None
+                or self.recording_start_clock_source != "not_applicable"
+            )
+        ) or (
+            self.timeline_anchor_mode != "elapsed"
+            and self.recording_start_clock is None
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "A recording-start clock is required for civil or fixed placement "
+                "and must be absent for elapsed placement."
+            )
+        if self.allow_partial_final_window is not False:
             raise GuidedBackendValidationRequestContractError(
                 "Unsupported first-subset acquisition policy."
             )
@@ -490,7 +532,7 @@ class GuidedBackendNpmAcquisitionDatasetRequest:
     sessions_per_hour: int
     session_duration_sec: float
     timeline_anchor_mode: str
-    fixed_daily_anchor_clock: None
+    fixed_daily_anchor_clock: str | None
     allow_partial_final_window: bool
     dataset_snapshot_schema_version: str
     dataset_status: str
@@ -511,6 +553,8 @@ class GuidedBackendNpmAcquisitionDatasetRequest:
     npm_target_fs_hz: float | None = None
     npm_adapter_value_nan_policy: str = ""
     disposition_policy: GuidedBackendDispositionPolicyRequest | None = None
+    recording_start_clock: str | None = None
+    recording_start_clock_source: str = "not_applicable"
 
     def __post_init__(self) -> None:
         if self.acquisition_mode != "intermittent":
@@ -534,9 +578,47 @@ class GuidedBackendNpmAcquisitionDatasetRequest:
             raise GuidedBackendValidationRequestContractError(
                 "session_duration_sec must be positive and finite."
             )
-        if self.timeline_anchor_mode != "civil" or self.fixed_daily_anchor_clock is not None:
+        if self.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET:
             raise GuidedBackendValidationRequestContractError(
-                "NPM timeline anchor policy is unsupported."
+                "NPM timeline anchor mode is unsupported."
+            )
+        if (
+            self.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(self.fixed_daily_anchor_clock)
+        ) or (
+            self.timeline_anchor_mode != "fixed_daily_anchor"
+            and self.fixed_daily_anchor_clock is not None
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "NPM fixed daily anchor clock does not match timeline mode."
+            )
+        if self.recording_start_clock_source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM recording-start clock source is unsupported."
+            )
+        if self.recording_start_clock is not None and not valid_guided_clock(
+            self.recording_start_clock
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "NPM recording-start clock is invalid."
+            )
+        if self.recording_start_clock_source == "not_applicable" and self.recording_start_clock is not None:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM recording-start clock cannot be present when its source is not_applicable."
+            )
+        if (
+            self.timeline_anchor_mode == "elapsed"
+            and (
+                self.recording_start_clock is not None
+                or self.recording_start_clock_source != "not_applicable"
+            )
+        ) or (
+            self.timeline_anchor_mode != "elapsed"
+            and self.recording_start_clock is None
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "A recording-start clock is required for civil or fixed placement "
+                "and must be absent for elapsed placement."
             )
         if not isinstance(self.allow_partial_final_window, bool):
             raise GuidedBackendValidationRequestContractError(
@@ -1334,6 +1416,8 @@ class GuidedBackendAcquisitionDatasetFacts:
     session_duration_sec: float | None = None
     timeline_anchor_mode: str = ""
     fixed_daily_anchor_clock: str | None = None
+    recording_start_clock: str | None = None
+    recording_start_clock_source: str = "not_applicable"
     allow_partial_final_window: bool = False
     exclude_incomplete_final_rwd_chunk: bool = False
     dataset_snapshot_schema_version: str = ""
@@ -1813,8 +1897,15 @@ def compile_guided_backend_validation_request(
     if (
         draft.execution_intent.execution_mode not in {"phasic", "tonic", "both"}
         or draft.execution_intent.run_profile != "full"
-        or draft.execution_intent.timeline_anchor_mode != "civil"
-        or draft.execution_intent.fixed_daily_anchor_clock is not None
+        or draft.execution_intent.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET
+        or (
+            draft.execution_intent.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(draft.execution_intent.fixed_daily_anchor_clock)
+        )
+        or (
+            draft.execution_intent.timeline_anchor_mode != "fixed_daily_anchor"
+            and draft.execution_intent.fixed_daily_anchor_clock is not None
+        )
         or getattr(draft, "traces_only", False) is not False
     ):
         return _failure(
@@ -1922,8 +2013,15 @@ def compile_guided_backend_validation_request(
         or dataset_facts.sessions_per_hour <= 0
         or dataset_facts.session_duration_sec is None
         or dataset_facts.session_duration_sec <= 0
-        or dataset_facts.timeline_anchor_mode != "civil"
-        or dataset_facts.fixed_daily_anchor_clock is not None
+        or dataset_facts.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET
+        or (
+            dataset_facts.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(dataset_facts.fixed_daily_anchor_clock)
+        )
+        or (
+            dataset_facts.timeline_anchor_mode != "fixed_daily_anchor"
+            and dataset_facts.fixed_daily_anchor_clock is not None
+        )
         or (not is_npm and dataset_facts.allow_partial_final_window is not False)
         or dataset_facts.dataset_status != "applied"
         or dataset_facts.dataset_current_applied is not True
@@ -2335,6 +2433,8 @@ def compile_guided_backend_validation_request(
                 session_duration_sec=dataset_facts.session_duration_sec,
                 timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
                 fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
+                recording_start_clock=dataset_facts.recording_start_clock,
+                recording_start_clock_source=dataset_facts.recording_start_clock_source,
                 allow_partial_final_window=dataset_facts.allow_partial_final_window,
                 dataset_snapshot_schema_version=dataset_facts.dataset_snapshot_schema_version,
                 dataset_status=dataset_facts.dataset_status,
@@ -2369,6 +2469,8 @@ def compile_guided_backend_validation_request(
                 session_duration_sec=dataset_facts.session_duration_sec,
                 timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
                 fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
+                recording_start_clock=dataset_facts.recording_start_clock,
+                recording_start_clock_source=dataset_facts.recording_start_clock_source,
                 allow_partial_final_window=dataset_facts.allow_partial_final_window,
                 exclude_incomplete_final_rwd_chunk=dataset_facts.exclude_incomplete_final_rwd_chunk,
                 classification_schema_name=GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME,
@@ -2669,6 +2771,8 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "validation_issue_categories",
         "stale_reason_categories",
         "execution_mode",
+        "recording_start_clock",
+        "recording_start_clock_source",
     ),
     GuidedBackendDispositionPolicyRequest: (
         "schema_name",
@@ -2704,6 +2808,8 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "npm_target_fs_hz",
         "npm_adapter_value_nan_policy",
         "disposition_policy",
+        "recording_start_clock",
+        "recording_start_clock_source",
     ),
     GuidedBackendRwdParserRequest: (
         "schema_name",

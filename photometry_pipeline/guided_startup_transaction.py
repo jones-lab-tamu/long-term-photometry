@@ -340,12 +340,35 @@ def build_guided_startup_command_plan(
         execution_mode,
         "--run-type",
         "full",
+        "--timeline-anchor-mode",
+        authority.timeline_anchor_mode,
         "--sessions-per-hour",
         str(sessions_per_hour),
         "--guided-candidate-manifest",
         manifest_path,
         "--guided-preallocated-run-dir",
     )
+    argv_list = list(argv)
+    timing_options: list[str] = []
+    if authority.timeline_anchor_mode == "fixed_daily_anchor":
+        timing_options.extend(
+            ["--fixed-daily-anchor-clock", str(authority.fixed_daily_anchor_clock)]
+        )
+    if authority.recording_start_clock is not None:
+        timing_options.extend(
+            [
+                "--guided-recording-start-clock",
+                str(authority.recording_start_clock),
+                "--guided-recording-start-clock-source",
+                str(authority.recording_start_clock_source),
+            ]
+        )
+    # Keep the accepted bare preallocated-run flag as the final argument;
+    # timing values belong to the command identity but do not change that
+    # existing launcher contract.
+    manifest_option_index = argv_list.index("--guided-candidate-manifest")
+    argv_list[manifest_option_index:manifest_option_index] = timing_options
+    argv = tuple(argv_list)
     command_identity = _canonical_identity(
         "guided-startup-command:v1",
         {
@@ -985,6 +1008,12 @@ def plan_guided_startup_transaction(
         "allocated_run_dir": request.planned_allocated_run_dir,
         "output_base": request.output_base_canonical,
         "source_root": request.source_root_canonical,
+        "timeline": {
+            "timeline_mode": authority.timeline_anchor_mode,
+            "fixed_daily_anchor_clock": authority.fixed_daily_anchor_clock,
+            "recording_start_clock": authority.recording_start_clock,
+            "recording_start_clock_source": authority.recording_start_clock_source,
+        },
         "application_build_identity": authority.application_build_identity,
         "authorization_identity": authority.canonical_authorization_identity,
         "production_intent_identity": authority.production_intent_identity,
@@ -1031,6 +1060,12 @@ def plan_guided_startup_transaction(
         "allocated_run_dir": request.planned_allocated_run_dir,
         "output_base": request.output_base_canonical,
         "source_root": request.source_root_canonical,
+        "timeline": {
+            "timeline_mode": authority.timeline_anchor_mode,
+            "fixed_daily_anchor_clock": authority.fixed_daily_anchor_clock,
+            "recording_start_clock": authority.recording_start_clock,
+            "recording_start_clock_source": authority.recording_start_clock_source,
+        },
         "wrapper_entrypoint_identity": (
             request.wrapper_entrypoint.wrapper_identity_digest
         ),

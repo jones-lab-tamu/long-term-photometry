@@ -110,6 +110,14 @@ from photometry_pipeline.guided_capabilities import (
     GUIDED_PRODUCTION_ACQUISITION_MODES,
     is_guided_production_acquisition_mode,
 )
+from photometry_pipeline.guided_timeline import (
+    GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK,
+    GUIDED_TIMELINE_MODE_SET,
+    guided_clock_from_datetime,
+    map_elapsed_coordinate,
+    timeline_mode_label,
+    valid_guided_clock,
+)
 from photometry_pipeline.guided_execution_request_builder import (
     is_successful_completed_run_root,
 )
@@ -409,6 +417,23 @@ GUIDED_TONIC_GAP_FREE_MISSING_SESSIONS_MESSAGE = (
     "Gap-free elapsed time is unavailable because this analysis contains "
     "missing or excluded recording sessions. Use Real elapsed time to "
     "preserve those gaps."
+)
+GUIDED_TIMELINE_MODE_CHOICES = (
+    ("Fixed daily anchor", "fixed_daily_anchor"),
+    ("Civil clock", "civil"),
+    ("Elapsed from first recording", "elapsed"),
+)
+GUIDED_TIMELINE_HELP_TEXT = (
+    "Fixed daily anchor places each day relative to the selected "
+    "circadian-day start.\n"
+    "Civil clock uses actual clock time with midnight as the day boundary.\n"
+    "Elapsed starts the plot at the first recording."
+)
+GUIDED_TIMELINE_START_CLOCK_REQUIRED_MESSAGE = (
+    "Enter the clock time when this recording began."
+)
+GUIDED_TIMELINE_FIXED_ANCHOR_REQUIRED_MESSAGE = (
+    "Enter the start of the plotted circadian day."
 )
 GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
     "missing_rwd_dataset_contract",
@@ -3230,6 +3255,8 @@ class MainWindow(QMainWindow):
         self._guided_recording_timing_user_edited = False
         self._guided_recording_timing_applying = False
         self._guided_recording_timing_inference = None
+        # Guided owns these placement choices. They are deliberately not
+        # synchronized with Full Control's separate plotting controls.
         self._guided_roi_discovery_running = False
         # CR1-F1-A: bumped whenever the recording structure changes, so a
         # discovery still running under the previous structure cannot install
@@ -3899,6 +3926,78 @@ class MainWindow(QMainWindow):
         )
         form.addRow("", self._guided_incomplete_final_rwd_group)
 
+        self._guided_timeline_group = QGroupBox("Timeline placement")
+        timeline_form = QFormLayout(self._guided_timeline_group)
+        timeline_form.setContentsMargins(10, 8, 10, 8)
+        self._guided_timeline_mode_combo = QComboBox()
+        self._guided_timeline_mode_combo.setObjectName("guidedTimelineMode")
+        for label, value in GUIDED_TIMELINE_MODE_CHOICES:
+            self._guided_timeline_mode_combo.addItem(label, value)
+        self._guided_timeline_mode_combo.setCurrentIndex(0)
+        timeline_form.addRow("Time display:", self._guided_timeline_mode_combo)
+
+        self._guided_fixed_daily_anchor_clock_edit = QLineEdit(
+            GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK
+        )
+        self._guided_fixed_daily_anchor_clock_edit.setObjectName(
+            "guidedFixedDailyAnchorClock"
+        )
+        self._guided_fixed_daily_anchor_clock_edit.setPlaceholderText("HH:MM")
+        self._guided_fixed_daily_anchor_clock_label = QLabel(
+            "Start of plotted day:"
+        )
+        self._guided_fixed_daily_anchor_clock_label.setObjectName(
+            "guidedFixedDailyAnchorClockLabel"
+        )
+        timeline_form.addRow(
+            self._guided_fixed_daily_anchor_clock_label,
+            self._guided_fixed_daily_anchor_clock_edit,
+        )
+
+        self._guided_recording_start_clock_edit = QLineEdit()
+        self._guided_recording_start_clock_edit.setObjectName(
+            "guidedRecordingStartClock"
+        )
+        self._guided_recording_start_clock_edit.setPlaceholderText("HH:MM")
+        self._guided_recording_start_clock_label = QLabel(
+            "Clock time at recording start:"
+        )
+        self._guided_recording_start_clock_label.setObjectName(
+            "guidedRecordingStartClockLabel"
+        )
+        timeline_form.addRow(
+            self._guided_recording_start_clock_label,
+            self._guided_recording_start_clock_edit,
+        )
+
+        self._guided_timeline_help_label = QLabel(GUIDED_TIMELINE_HELP_TEXT)
+        self._guided_timeline_help_label.setObjectName("guidedTimelineHelp")
+        self._guided_timeline_help_label.setProperty("guidedSecondaryText", True)
+        self._guided_timeline_help_label.setWordWrap(True)
+        timeline_form.addRow("", self._guided_timeline_help_label)
+        self._guided_timeline_validation_label = QLabel("")
+        self._guided_timeline_validation_label.setObjectName(
+            "guidedTimelineValidation"
+        )
+        self._guided_timeline_validation_label.setProperty(
+            "guidedValidationError", True
+        )
+        self._guided_timeline_validation_label.setWordWrap(True)
+        self._guided_timeline_validation_label.setVisible(False)
+        timeline_form.addRow("", self._guided_timeline_validation_label)
+
+        self._guided_timeline_mode_combo.currentIndexChanged.connect(
+            self._on_guided_timeline_settings_changed
+        )
+        self._guided_fixed_daily_anchor_clock_edit.textChanged.connect(
+            self._on_guided_timeline_settings_changed
+        )
+        self._guided_recording_start_clock_edit.textChanged.connect(
+            self._on_guided_timeline_settings_changed
+        )
+        form.addRow("", self._guided_timeline_group)
+        self._refresh_guided_timeline_controls()
+
         self._guided_tonic_settings_group = QGroupBox("Tonic analysis settings")
         tonic_settings_layout = QFormLayout(self._guided_tonic_settings_group)
         tonic_settings_layout.setContentsMargins(10, 8, 10, 8)
@@ -4300,6 +4399,9 @@ class MainWindow(QMainWindow):
                 self._guided_format_combo.currentText(),
             )
         ).strip().lower()
+        timeline_ready, timeline_reason = self._guided_timeline_validation()
+        if not timeline_ready:
+            return False, timeline_reason
         if mode == "continuous":
             # A continuous recording has no sessions, so the session timing
             # questions below do not apply and are hidden. Only the window
@@ -4823,6 +4925,12 @@ class MainWindow(QMainWindow):
         self._set_guided_workflow_mode("new_analysis")
         if starting_fresh and hasattr(self, "_guided_format_combo"):
             self._guided_format_combo.setCurrentText("auto")
+        if starting_fresh and hasattr(self, "_guided_timeline_mode_combo"):
+            self._guided_timeline_mode_combo.setCurrentIndex(0)
+            self._guided_fixed_daily_anchor_clock_edit.setText(
+                GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK
+            )
+            self._guided_recording_start_clock_edit.clear()
         self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
@@ -5322,6 +5430,7 @@ class MainWindow(QMainWindow):
                 self._guided_format_combo.currentText(),
             )
         ).strip().lower()
+        self._refresh_guided_timeline_controls()
         if hasattr(self, "_guided_incomplete_final_rwd_group"):
             self._guided_incomplete_final_rwd_group.setVisible(
                 not continuous and resolved_format == "rwd"
@@ -10720,6 +10829,148 @@ class MainWindow(QMainWindow):
         self._refresh_guided_tonic_settings_help()
         self._invalidate_guided_backend_validation("tonic settings changed")
 
+    def _guided_timeline_mode_value(self) -> str:
+        combo = getattr(self, "_guided_timeline_mode_combo", None)
+        value = combo.currentData() if combo is not None else "fixed_daily_anchor"
+        return str(value or "fixed_daily_anchor").strip().lower()
+
+    def _guided_authoritative_first_datetime(self) -> datetime | None:
+        """Read the first clock only from an accepted format contract."""
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        resolved_format = str(discovery.get("resolved_format") or "").strip().lower()
+        if not resolved_format and hasattr(self, "_guided_format_combo"):
+            resolved_format = self._guided_format_combo.currentText().strip().lower()
+        sessions = [
+            item
+            for item in discovery.get("sessions", ()) or ()
+            if isinstance(item, dict) and item.get("path")
+        ]
+        if not sessions:
+            return None
+        path = str(sessions[0]["path"])
+        try:
+            if resolved_format == "rwd":
+                from photometry_pipeline.io.rwd_chronology import (
+                    parse_rwd_session_folder_timestamp,
+                )
+
+                return parse_rwd_session_folder_timestamp(Path(path).parent.name)
+            if resolved_format == "npm":
+                from photometry_pipeline.io.npm_source_snapshot import (
+                    parse_npm_filename_timestamp,
+                )
+
+                return parse_npm_filename_timestamp(path)
+        except Exception:
+            return None
+        # Custom-tabular is intentionally not inferred here: the current
+        # normalized contract does not authorize a custom datetime source.
+        return None
+
+    def _guided_timeline_plan_values(self) -> dict[str, str | None]:
+        mode = self._guided_timeline_mode_value()
+        fixed = (
+            self._guided_fixed_daily_anchor_clock_edit.text().strip()
+            if mode == "fixed_daily_anchor"
+            else None
+        )
+        start_clock = None
+        start_source = "not_applicable"
+        continuous = self._guided_effective_acquisition_mode() == "continuous"
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText()
+                if hasattr(self, "_guided_format_combo")
+                else "",
+            )
+        ).strip().lower()
+        if mode in {"civil", "fixed_daily_anchor"}:
+            if continuous and resolved_format == "rwd":
+                candidate = self._guided_recording_start_clock_edit.text().strip()
+                if valid_guided_clock(candidate):
+                    start_clock = candidate
+                    start_source = "user_confirmed"
+            elif not continuous and resolved_format in {"rwd", "npm"}:
+                first_datetime = self._guided_authoritative_first_datetime()
+                if first_datetime is not None:
+                    start_clock = guided_clock_from_datetime(first_datetime)
+                    start_source = "validated_metadata"
+            elif self._guided_timeline_controls_require_recording_start():
+                candidate = self._guided_recording_start_clock_edit.text().strip()
+                if valid_guided_clock(candidate):
+                    start_clock = candidate
+                    start_source = "user_confirmed"
+        return {
+            "timeline_anchor_mode": mode,
+            "fixed_daily_anchor_clock": fixed,
+            "recording_start_clock": start_clock,
+            "recording_start_clock_source": start_source,
+        }
+
+    def _guided_timeline_controls_require_recording_start(self) -> bool:
+        if self._guided_timeline_mode_value() not in {
+            "civil",
+            "fixed_daily_anchor",
+        }:
+            return False
+        continuous = self._guided_effective_acquisition_mode() == "continuous"
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText()
+                if hasattr(self, "_guided_format_combo")
+                else "",
+            )
+        ).strip().lower()
+        if continuous:
+            # Guided continuous production is RWD-only and currently has no
+            # validated civil clock at elapsed zero.
+            return resolved_format == "rwd"
+        # RWD/NPM session chronology is authoritative once discovery has
+        # supplied a validated first session. Other current Guided formats
+        # remain elapsed-only until an existing normalized datetime contract
+        # is available, so their civil/fixed choice needs explicit input.
+        return self._guided_authoritative_first_datetime() is None
+
+    def _guided_timeline_validation(self) -> tuple[bool, str]:
+        mode = self._guided_timeline_mode_value()
+        if mode not in GUIDED_TIMELINE_MODE_SET:
+            return False, "Choose a time display mode."
+        fixed = self._guided_fixed_daily_anchor_clock_edit.text().strip()
+        if mode == "fixed_daily_anchor" and not valid_guided_clock(fixed):
+            return False, GUIDED_TIMELINE_FIXED_ANCHOR_REQUIRED_MESSAGE
+        if self._guided_timeline_controls_require_recording_start():
+            start = self._guided_recording_start_clock_edit.text().strip()
+            if not valid_guided_clock(start):
+                return False, GUIDED_TIMELINE_START_CLOCK_REQUIRED_MESSAGE
+        return True, ""
+
+    def _refresh_guided_timeline_controls(self) -> None:
+        if not hasattr(self, "_guided_timeline_group"):
+            return
+        mode = self._guided_timeline_mode_value()
+        fixed = mode == "fixed_daily_anchor"
+        start_required = self._guided_timeline_controls_require_recording_start()
+        fixed_edit = self._guided_fixed_daily_anchor_clock_edit
+        start_edit = self._guided_recording_start_clock_edit
+        fixed_label = self._guided_fixed_daily_anchor_clock_label
+        start_label = self._guided_recording_start_clock_label
+        fixed_edit.setVisible(fixed)
+        fixed_edit.setEnabled(fixed)
+        fixed_label.setVisible(fixed)
+        start_edit.setVisible(start_required)
+        start_edit.setEnabled(start_required)
+        start_label.setVisible(start_required)
+        ok, message = self._guided_timeline_validation()
+        self._guided_timeline_validation_label.setText(message)
+        self._guided_timeline_validation_label.setVisible(not ok)
+
+    def _on_guided_timeline_settings_changed(self, *_args) -> None:
+        self._refresh_guided_timeline_controls()
+        self._invalidate_guided_backend_validation("timeline placement changed")
+        self._refresh_guided_navigation_state()
+
     def _on_guided_confirm_selection_changed(self, *_args) -> None:
         if (
             getattr(self, "_guided_confirm_source_type", "")
@@ -12605,12 +12856,69 @@ class MainWindow(QMainWindow):
                 "Reusable correction evidence is missing or stale. Return to "
                 "Correction Approach and refresh the required evidence."
             )
+        if categories & {
+            "invalid_timeline_anchor_mode",
+            "invalid_recording_start_clock",
+            "missing_recording_start_clock",
+        }:
+            actions.append(
+                "Complete the Time display choice in Recording Structure, "
+                "including the recording-start clock when it is required."
+            )
         if not actions:
             actions.append(
                 "The plan has unresolved setup details. Review the highlighted "
                 "sections below before validation."
             )
         return actions[:5]
+
+    def _guided_timeline_review_lines(self, plan) -> list[str]:
+        intent = plan.execution_intent
+        mode = str(intent.timeline_anchor_mode or "").strip().lower()
+        lines = [f"Time display: {timeline_mode_label(mode)}"]
+        if mode == "fixed_daily_anchor":
+            lines.append(
+                "Start of plotted day: "
+                f"{intent.fixed_daily_anchor_clock or 'not set'}"
+            )
+        if plan.acquisition_mode == "continuous":
+            if intent.recording_start_clock:
+                lines.append(
+                    "Clock time at recording start: "
+                    f"{intent.recording_start_clock}"
+                )
+            elif mode in {"civil", "fixed_daily_anchor"}:
+                lines.append("Clock time at recording start: required")
+            if mode == "fixed_daily_anchor" and intent.recording_start_clock:
+                try:
+                    _day, offset = map_elapsed_coordinate(
+                        0.0,
+                        timeline_anchor_mode=mode,
+                        fixed_daily_anchor_clock=intent.fixed_daily_anchor_clock,
+                        recording_start_clock=intent.recording_start_clock,
+                    )
+                    lines.append(
+                        "First data will appear "
+                        f"{offset / 3600.0:g} hours after the plotted day begins."
+                    )
+                except ValueError:
+                    pass
+            elif mode == "civil":
+                lines.append("Days begin at midnight.")
+            elif mode == "elapsed":
+                lines.append("The first recorded sample will appear at time 0.")
+        elif mode == "fixed_daily_anchor":
+            lines.append(
+                "Recording clock times will be positioned relative to "
+                f"{intent.fixed_daily_anchor_clock or 'the selected start'}."
+            )
+        elif mode == "civil":
+            lines.append(
+                "Recording clock times use actual clock time; days begin at midnight."
+            )
+        else:
+            lines.append("The first recording session will appear at time 0.")
+        return lines
 
     def _refresh_guided_review_plan_checkpoint(
         self, plan, readiness, subset_readiness
@@ -12733,6 +13041,9 @@ class MainWindow(QMainWindow):
             "Tonic timeline: "
             f"{self._guided_tonic_timeline_mode_label(tonic_settings.tonic_timeline_mode)}"
         )
+        timeline_summary = "\n" + "\n".join(
+            self._guided_timeline_review_lines(plan)
+        )
         self._guided_review_analysis_summary_label.setText(
             f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
             f"Input format: {plan.input_format or 'not set'}\n"
@@ -12742,6 +13053,7 @@ class MainWindow(QMainWindow):
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
             f"{final_session_policy}"
+            f"{timeline_summary}"
             f"{tonic_summary}"
         )
 
@@ -16556,6 +16868,7 @@ class MainWindow(QMainWindow):
                     
         win_val = float(self._guided_continuous_window_sec_spin.value()) if hasattr(self, "_guided_continuous_window_sec_spin") else 600.0
         step_val = win_val
+        timeline_values = self._guided_timeline_plan_values()
         
         allow_partial = self._guided_allow_partial_final_window_cb.isChecked() if hasattr(self, "_guided_allow_partial_final_window_cb") else False
         exclude_rwd = self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked() if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb") else False
@@ -16880,7 +17193,21 @@ class MainWindow(QMainWindow):
             # produces both analysis components from one Run. This must not
             # read Full Control's _mode_combo, which Guided never shows and
             # which a scientist never touches.
-            execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode="both"),
+            execution_intent=GuidedNewAnalysisExecutionIntent(
+                timeline_anchor_mode=str(
+                    timeline_values["timeline_anchor_mode"]
+                ),
+                fixed_daily_anchor_clock=timeline_values[
+                    "fixed_daily_anchor_clock"
+                ],
+                recording_start_clock=timeline_values[
+                    "recording_start_clock"
+                ],
+                recording_start_clock_source=str(
+                    timeline_values["recording_start_clock_source"]
+                ),
+                execution_mode="both",
+            ),
             tonic_settings_contract=GuidedNewAnalysisTonicSettingsContract(
                 tonic_output_mode=(
                     self._guided_tonic_output_mode_combo.currentData()
@@ -16998,6 +17325,9 @@ class MainWindow(QMainWindow):
             f"Format: {plan.input_format}",
             f"Acquisition mode: {acq_mode}",
             f"Acquisition structure summary: {timing_summary}",
+            "Timeline placement:\n" + "\n".join(
+                f"  {line}" for line in self._guided_timeline_review_lines(plan)
+            ),
             f"ROI counts: {len(plan.discovered_roi_ids)} discovered, {len(plan.included_roi_ids)} included, {len(plan.excluded_roi_ids)} excluded",
             (
                 f"Reusable full correction evidence: {cache_status}"
@@ -17250,6 +17580,8 @@ class MainWindow(QMainWindow):
             "Execution intent:",
             f"  timeline_anchor_mode: {execution_intent.get('timeline_anchor_mode') or 'none'}",
             f"  fixed_daily_anchor_clock: {execution_intent.get('fixed_daily_anchor_clock') or 'none'}",
+            f"  recording_start_clock: {execution_intent.get('recording_start_clock') or 'none'}",
+            f"  recording_start_clock_source: {execution_intent.get('recording_start_clock_source') or 'not_applicable'}",
             f"  execution_mode: {execution_intent.get('execution_mode') or 'none'}",
             f"  run_profile: {execution_intent.get('run_profile') or 'none'}",
             "  execution consumption: "

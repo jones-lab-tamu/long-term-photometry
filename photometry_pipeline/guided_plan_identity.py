@@ -30,7 +30,7 @@ from photometry_pipeline.guided_identity import (
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
 
 GUIDED_PLAN_IDENTITY_SCHEMA_NAME = "guided_new_analysis_draft_plan_identity"
-GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v3"
+GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v4"
 
 
 def _canonical_path_or_raw(path: str | None) -> dict[str, Any]:
@@ -196,6 +196,25 @@ def build_guided_new_analysis_draft_plan_identity_payload(
                 ),
                 key=lambda item: item["canonical_relative_path"],
             ),
+            "timeline": {
+                "timeline_mode": str(
+                    getattr(execution_intent, "timeline_anchor_mode", "") or ""
+                ),
+                "fixed_daily_anchor_clock": getattr(
+                    execution_intent, "fixed_daily_anchor_clock", None
+                ),
+                "recording_start_clock": getattr(
+                    execution_intent, "recording_start_clock", None
+                ),
+                "recording_start_clock_source": str(
+                    getattr(
+                        execution_intent,
+                        "recording_start_clock_source",
+                        "not_applicable",
+                    )
+                    or "not_applicable"
+                ),
+            },
         },
         "roi_scope": {
             "included_roi_ids": sorted(str(roi) for roi in plan.included_roi_ids),

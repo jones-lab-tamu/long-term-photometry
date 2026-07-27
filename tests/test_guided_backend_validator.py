@@ -94,6 +94,8 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         session_duration_sec=120.0,
         timeline_anchor_mode="civil",
         fixed_daily_anchor_clock=None,
+        recording_start_clock="00:00",
+        recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
         exclude_incomplete_final_rwd_chunk=False,
         classification_schema_name=(

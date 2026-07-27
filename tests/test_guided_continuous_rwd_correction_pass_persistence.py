@@ -26,6 +26,7 @@ from photometry_pipeline.guided_execution_payloads import (
 )
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
+    GuidedNewAnalysisExecutionIntent,
     GuidedPlanCorrectionChoice,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
@@ -104,6 +105,10 @@ def _build_case(folder, *, continuous_window_sec=20.0, phase=0.0):
         per_roi_correction_strategy_choices=_choices(strategies),
         feature_event_profile_id="default",
         feature_event_values={},
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            recording_start_clock="11:00",
+            recording_start_clock_source="user_confirmed",
+        ),
     )
     binding = build_guided_continuous_rwd_review_binding(
         draft,

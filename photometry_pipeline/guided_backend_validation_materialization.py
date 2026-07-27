@@ -99,6 +99,11 @@ from photometry_pipeline.guided_normalized_recording import (
     serialize_normalized_recording_description,
     build_npm_normalized_recording_description,
 )
+from photometry_pipeline.guided_timeline import (
+    GUIDED_TIMELINE_MODE_SET,
+    guided_clock_from_datetime,
+    valid_guided_clock,
+)
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -1374,6 +1379,8 @@ def _materialize_dataset_and_roi_facts(
     draft: GuidedNewAnalysisDraftPlan,
     source_facts: GuidedBackendSourceSnapshotFacts,
     cache_facts: GuidedBackendDiagnosticCacheFacts,
+    *,
+    validated_first_recording_start: datetime | None = None,
 ) -> tuple[
     GuidedBackendAcquisitionDatasetFacts | None,
     GuidedBackendRoiScopeFacts | None,
@@ -1401,8 +1408,17 @@ def _materialize_dataset_and_roi_facts(
             detail_code="dataset_snapshot_missing_or_invalid",
         )
     if (
-        draft.execution_intent.timeline_anchor_mode != "civil"
-        or draft.execution_intent.fixed_daily_anchor_clock is not None
+        draft.execution_intent.timeline_anchor_mode not in GUIDED_TIMELINE_MODE_SET
+        or (
+            draft.execution_intent.timeline_anchor_mode == "fixed_daily_anchor"
+            and not valid_guided_clock(
+                draft.execution_intent.fixed_daily_anchor_clock
+            )
+        )
+        or (
+            draft.execution_intent.timeline_anchor_mode != "fixed_daily_anchor"
+            and draft.execution_intent.fixed_daily_anchor_clock is not None
+        )
         or draft.execution_intent.execution_mode not in {"phasic", "tonic", "both"}
         or draft.execution_intent.run_profile != "full"
     ):
@@ -1534,6 +1550,34 @@ def _materialize_dataset_and_roi_facts(
             detail_code="dataset_roi_identity_mismatch",
         )
 
+    recording_start_clock = draft.execution_intent.recording_start_clock
+    recording_start_clock_source = (
+        draft.execution_intent.recording_start_clock_source
+    )
+    if draft.execution_intent.timeline_anchor_mode == "elapsed":
+        recording_start_clock = None
+        recording_start_clock_source = "not_applicable"
+    elif recording_start_clock_source == "not_applicable":
+        # The accepted intermittent RWD/NPM source snapshot already carries
+        # authoritative first-session datetimes.  This is a narrow source
+        # projection for older in-memory draft fixtures; it never consults
+        # filesystem timestamps or invents a clock.
+        try:
+            start_dt = validated_first_recording_start
+            if start_dt is None and not is_npm:
+                first_candidate = source_facts.candidate_files[0]
+                first_candidate_path = os.path.join(
+                    source_facts.source_root_canonical,
+                    *first_candidate.canonical_relative_path.split("/"),
+                )
+                start_dt = resolve_session_start_time(first_candidate_path)
+            if start_dt is not None:
+                recording_start_clock = guided_clock_from_datetime(start_dt)
+                recording_start_clock_source = "validated_metadata"
+        except (AttributeError, IndexError, TypeError, ValueError, OSError):
+            recording_start_clock = None
+            recording_start_clock_source = "not_applicable"
+
     dataset_facts = GuidedBackendAcquisitionDatasetFacts(
         available=True,
         acquisition_mode="intermittent",
@@ -1541,6 +1585,8 @@ def _materialize_dataset_and_roi_facts(
         session_duration_sec=float(identity.session_duration_sec),
         timeline_anchor_mode=draft.execution_intent.timeline_anchor_mode,
         fixed_daily_anchor_clock=draft.execution_intent.fixed_daily_anchor_clock,
+        recording_start_clock=recording_start_clock,
+        recording_start_clock_source=recording_start_clock_source,
         allow_partial_final_window=bool(identity.allow_partial_final_window),
         exclude_incomplete_final_rwd_chunk=bool(
             identity.exclude_incomplete_final_rwd_chunk
@@ -2388,6 +2434,18 @@ def materialize_guided_backend_validation_facts(
                 detail_code="npm_roi_inventory_mismatch",
             )
 
+    validated_first_recording_start = None
+    if is_npm and snapshot.candidates:
+        # The NPM source snapshot has already validated filename chronology;
+        # retain that authoritative first-session timestamp for timing
+        # provenance instead of reparsing a canonicalized (lower-case) path.
+        try:
+            validated_first_recording_start = datetime.fromisoformat(
+                snapshot.candidates[0].authoritative_source_start_time
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            validated_first_recording_start = None
+
     # 8. Incomplete-Final not_requested Classification Materialization
 
     if is_npm:
@@ -2639,6 +2697,7 @@ def materialize_guided_backend_validation_facts(
             draft,
             source_snapshot_facts,
             cache_facts,
+            validated_first_recording_start=validated_first_recording_start,
         )
     )
     if dataset_failure is not None:

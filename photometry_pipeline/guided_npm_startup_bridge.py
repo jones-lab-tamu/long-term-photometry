@@ -127,6 +127,30 @@ class GuidedStartupAuthority:
         return self.npm_intent.execution_mode
 
     @property
+    def timeline_anchor_mode(self) -> str:
+        if self.rwd is not None:
+            return self.rwd.production_intent.acquisition.timeline_anchor_mode
+        return self.npm_intent.timeline_anchor_mode
+
+    @property
+    def fixed_daily_anchor_clock(self) -> str | None:
+        if self.rwd is not None:
+            return self.rwd.production_intent.acquisition.fixed_daily_anchor_clock
+        return self.npm_intent.fixed_daily_anchor_clock
+
+    @property
+    def recording_start_clock(self) -> str | None:
+        if self.rwd is not None:
+            return self.rwd.production_intent.acquisition.recording_start_clock
+        return self.npm_intent.recording_start_clock
+
+    @property
+    def recording_start_clock_source(self) -> str:
+        if self.rwd is not None:
+            return self.rwd.production_intent.acquisition.recording_start_clock_source
+        return self.npm_intent.recording_start_clock_source
+
+    @property
     def sessions_per_hour(self) -> int:
         if self.rwd is not None:
             return self.rwd.production_intent.acquisition.sessions_per_hour

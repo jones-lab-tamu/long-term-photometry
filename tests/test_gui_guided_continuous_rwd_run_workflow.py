@@ -149,7 +149,11 @@ def _draft_for(
         feature_event_explicitly_applied=(feature_status == "applied"),
         # One Guided analysis, both outputs -- exactly what the production
         # draft builder sets unconditionally.
-        execution_intent=GuidedNewAnalysisExecutionIntent(execution_mode="both"),
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            recording_start_clock="11:00",
+            recording_start_clock_source="user_confirmed",
+            execution_mode="both",
+        ),
     )
     return GuidedNewAnalysisDraftPlan(**kwargs)
 
@@ -403,6 +407,7 @@ def _select_continuous_rwd_setup(window, folder):
         window._guided_acquisition_mode_combo.findData("continuous")
     )
     window._guided_continuous_window_sec_spin.setValue(90.0)
+    window._guided_recording_start_clock_edit.setText("11:00")
 
 
 def test_continue_from_recording_structure_starts_the_recording_check(

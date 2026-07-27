@@ -220,9 +220,25 @@ def test_combined_provenance_uses_accepted_window_step_when_distinct(
     result = _run_combined(inputs, real_config, tmp_path)
     with open(os.path.join(result.run_dir, "run_report.json"), encoding="utf-8") as handle:
         report = json.load(handle)
+    expected_timeline = {
+        "timeline_mode": "fixed_daily_anchor",
+        "fixed_daily_anchor_clock": "07:00",
+        "recording_start_clock": "11:00",
+        "recording_start_clock_source": "user_confirmed",
+    }
+    assert report["timeline"] == expected_timeline
     provenance = report["phasic_analysis"]["window_summary_provenance"]
     assert provenance["window_length_sec"] == 90.0
     assert provenance["window_step_sec"] == 37.5
+    assert provenance["window_length_source"] == (
+        "accepted_draft.continuous_window_sec"
+    )
+    assert provenance["window_step_source"] == (
+        "accepted_draft.continuous_step_sec"
+    )
+    with open(os.path.join(result.run_dir, "MANIFEST.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert manifest["timeline"] == expected_timeline
     cache = open_phasic_cache(result.phasic_cache_path)
     try:
         attrs = load_cache_chunk_attrs(cache, "ROI1", 0)

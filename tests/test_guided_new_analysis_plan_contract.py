@@ -900,8 +900,10 @@ def test_execution_intent_defaults_and_provenance_are_model_only():
     intent = GuidedNewAnalysisExecutionIntent()
 
     assert intent.schema_version == EXECUTION_INTENT_SCHEMA_VERSION
-    assert intent.timeline_anchor_mode == "civil"
-    assert intent.fixed_daily_anchor_clock is None
+    assert intent.timeline_anchor_mode == "fixed_daily_anchor"
+    assert intent.fixed_daily_anchor_clock == "07:00"
+    assert intent.recording_start_clock is None
+    assert intent.recording_start_clock_source == "not_applicable"
     assert intent.execution_mode == "phasic"
     assert intent.run_profile == "full"
     assert intent.provenance["execution_mode"] == "first_subset_fixed_default_phasic_for_global_dynamic_fit_only"
@@ -1169,8 +1171,10 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.output_policy["path"] == plan.output_policy_path
     assert preview.output_policy["directory_created"] is False
     assert preview.output_policy["files_written"] is False
-    assert preview.execution_intent["timeline_anchor_mode"] == "civil"
-    assert preview.execution_intent["fixed_daily_anchor_clock"] is None
+    assert preview.execution_intent["timeline_anchor_mode"] == "fixed_daily_anchor"
+    assert preview.execution_intent["fixed_daily_anchor_clock"] == "07:00"
+    assert preview.execution_intent["recording_start_clock"] is None
+    assert preview.execution_intent["recording_start_clock_source"] == "not_applicable"
     assert preview.execution_intent["execution_mode"] == "phasic"
     assert preview.execution_intent["run_profile"] == "full"
     assert preview.execution_intent["execution_consumption_enabled"] is True
@@ -1314,7 +1318,7 @@ def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_un
     assert preview.source["authoritative_input_source_path"] == "C:/resolved/raw"
     assert preview.feature_event["values"] == {"event_signal": "delta_f", "peak_threshold_method": "mean_std"}
     assert preview.acquisition["timeline_anchor_mode"]["status"] == "represented"
-    assert preview.acquisition["timeline_anchor_mode"]["value"] == "civil"
+    assert preview.acquisition["timeline_anchor_mode"]["value"] == "fixed_daily_anchor"
     assert preview.acquisition["timeline_anchor_mode"]["source"] == "GuidedNewAnalysisDraftPlan.execution_intent"
 
 
@@ -1594,7 +1598,7 @@ def test_execution_subset_default_execution_intent_removes_intent_blockers():
     categories = {issue.category for issue in readiness.blocking_issues}
 
     assert fields["timeline_anchor_mode"].status == "fixed_default"
-    assert fields["timeline_anchor_mode"].value == "civil"
+    assert fields["timeline_anchor_mode"].value == "fixed_daily_anchor"
     assert fields["timeline_anchor_mode"].blocks_subset is False
     assert fields["mode"].status == "fixed_default"
     assert fields["mode"].value == "phasic"
@@ -2163,10 +2167,10 @@ def test_execution_subset_fixed_defaults_are_reported_as_provenance():
     fields = {field.field_name: field for field in subset.field_classifications}
 
     assert fields["timeline_anchor_mode"].status == "fixed_default"
-    assert fields["timeline_anchor_mode"].value == "civil"
+    assert fields["timeline_anchor_mode"].value == "fixed_daily_anchor"
     assert fields["timeline_anchor_mode"].blocks_subset is False
     assert fields["timeline_anchor_mode"].issue_category is None
-    assert "matches backend/Full Control civil timeline anchor default" in fields["timeline_anchor_mode"].provenance
+    assert "accepted Guided timeline placement choice" in fields["timeline_anchor_mode"].provenance
     assert fields["mode"].status == "fixed_default"
     assert fields["mode"].value == "phasic"
     assert fields["mode"].blocks_subset is False
@@ -2786,7 +2790,8 @@ def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
     assert dyn_contract["no_argv"] is True
     assert dyn_contract["no_config_written"] is True
     assert dyn_contract["no_files_written"] is True
-    assert preview.execution_intent["timeline_anchor_mode"] == "civil"
+    assert preview.execution_intent["timeline_anchor_mode"] == "fixed_daily_anchor"
+    assert preview.execution_intent["fixed_daily_anchor_clock"] == "07:00"
     assert preview.execution_intent["execution_mode"] == "phasic"
     assert preview.execution_intent["run_profile"] == "full"
     assert preview.execution_intent["traces_only"] is False

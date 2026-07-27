@@ -118,6 +118,32 @@ def test_valid_request_produces_pure_non_effectful_plan(startup_request):
     )
 
 
+def test_startup_command_and_provenance_carry_timeline_authority(startup_request):
+    result = startup.plan_guided_startup_transaction(startup_request)
+    authority = startup_request.startup_authority
+    expected = {
+        "timeline_mode": authority.timeline_anchor_mode,
+        "fixed_daily_anchor_clock": authority.fixed_daily_anchor_clock,
+        "recording_start_clock": authority.recording_start_clock,
+        "recording_start_clock_source": authority.recording_start_clock_source,
+    }
+    status = json.loads(result.startup_status_bytes)
+    provenance = json.loads(result.startup_provenance_bytes)
+
+    assert status["timeline"] == expected
+    assert provenance["timeline"] == expected
+    argv = result.command_plan.argv
+    assert argv[argv.index("--timeline-anchor-mode") + 1] == (
+        authority.timeline_anchor_mode
+    )
+    assert argv[argv.index("--guided-recording-start-clock") + 1] == (
+        authority.recording_start_clock
+    )
+    assert argv[argv.index("--guided-recording-start-clock-source") + 1] == (
+        authority.recording_start_clock_source
+    )
+
+
 def test_planning_preserves_nonrunnable_payload_semantics(startup_request):
     payload = startup_request.payload_result
     assert payload.status == payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE
