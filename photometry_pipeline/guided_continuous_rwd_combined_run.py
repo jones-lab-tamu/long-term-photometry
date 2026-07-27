@@ -60,7 +60,10 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.reporting import generate_run_report
+from photometry_pipeline.core.reporting import (
+    build_continuous_phasic_auc_provenance,
+    generate_run_report,
+)
 from photometry_pipeline.guided_continuous_rwd_block_plan import (
     GuidedContinuousRwdBlockPlan,
 )
@@ -100,6 +103,7 @@ from photometry_pipeline.guided_continuous_rwd_phasic_run import (
     _generate_phasic_summary,
     _is_lower_layer_cancellation,
     _publish_phasic_cache_and_features,
+    _resolve_continuous_effective_feature_configs,
     _stamp_feature_event_provenance_contract,
     _validate_events_csv,
     _validate_phasic_cache,
@@ -318,6 +322,15 @@ def execute_guided_continuous_rwd_combined_run(
     features_dir = os.path.join(phasic_out_dir, PHASIC_FEATURES_RELATIVE_DIR)
     traversal: GuidedContinuousRwdCorrectionPassTraversal | None = None
     try:
+        (
+            effective_feature_config_by_roi,
+            per_roi_feature_config,
+            per_roi_source_details,
+        ) = _resolve_continuous_effective_feature_configs(
+            accepted_draft,
+            base_config=config,
+            included_roi_ids=included_roi_ids,
+        )
         # --- one correction pass, shared by both analysis families ---
         traversal = iterate_guided_continuous_rwd_corrected_segments(
             review_binding,
@@ -365,6 +378,7 @@ def execute_guided_continuous_rwd_combined_run(
             review_binding=review_binding,
             target_grid=target_grid,
             config=config,
+            per_roi_config=effective_feature_config_by_roi,
             cancellation_requested=cancellation_requested,
         )
         os.makedirs(phasic_out_dir, exist_ok=True)
@@ -374,6 +388,9 @@ def execute_guided_continuous_rwd_combined_run(
             included_roi_ids=included_roi_ids,
             detection=detection,
             config=config,
+            full_window_sample_count=segment_plan.nominal_segment_sample_count,
+            effective_feature_config_by_roi=effective_feature_config_by_roi,
+            window_step_sec=float(accepted_draft.continuous_step_sec),
         )
         _validate_phasic_cache(
             phasic_cache_path, included_roi_ids=included_roi_ids, completion=completion
@@ -382,13 +399,32 @@ def execute_guided_continuous_rwd_combined_run(
         events_path = _write_events_csv(features_dir, event_rows)
         _validate_events_csv(events_path, detection=detection)
         generate_run_report(config, phasic_out_dir, traces_only=False)
+        auc_provenance = build_continuous_phasic_auc_provenance(
+            config,
+            window_length_sec=float(accepted_draft.continuous_window_sec),
+            window_step_sec=float(accepted_draft.continuous_step_sec),
+            effective_configs_by_roi=effective_feature_config_by_roi,
+            allow_partial_final_window=bool(
+                getattr(config, "allow_partial_final_window", False)
+                or (
+                    segment_plan.descriptors[-1].sample_count
+                    < segment_plan.nominal_segment_sample_count
+                )
+            ),
+        )
         provenance_payload = _write_feature_event_provenance(
             features_dir,
             included_roi_ids=included_roi_ids,
             config=config,
             detection=detection,
+            per_roi_feature_config=per_roi_feature_config,
+            per_roi_source_details=per_roi_source_details,
         )
-        _stamp_feature_event_provenance_contract(phasic_out_dir, provenance_payload)
+        _stamp_feature_event_provenance_contract(
+            phasic_out_dir,
+            provenance_payload,
+            continuous_auc_provenance=auc_provenance,
+        )
         phasic_paths, phasic_row_counts = _generate_phasic_summary(
             run_dir, phasic_out_dir, included_roi_ids
         )
@@ -461,6 +497,7 @@ def execute_guided_continuous_rwd_combined_run(
                     roi_id: detection.per_roi[roi_id].event_count for roi_id in included_roi_ids
                 },
                 "execution_strategy": detection.execution_strategy,
+                "window_summary_provenance": auc_provenance,
             },
             "continuous_correction_pass_completion_identity": completion.completion_identity,
         }

@@ -185,7 +185,7 @@ def _assert_retuned_continuous_outputs(result: dict, roi: str = "Region0") -> pd
     assert rate_path.parent == Path(result["retune_dir"])
     assert not (Path(result["retune_dir"]) / roi / "tables").exists()
     assert not (Path(result["retune_dir"]) / roi / "summary").exists()
-    return pd.read_csv(summary_path).sort_values("chunk_id").reset_index(drop=True)
+    return pd.read_csv(summary_path).sort_values("window_index").reset_index(drop=True)
 
 
 def test_downstream_continuous_retune_writes_flat_retuned_summary_and_plots(tmp_path: Path):
@@ -202,8 +202,7 @@ def test_downstream_continuous_retune_writes_flat_retuned_summary_and_plots(tmp_
     retuned_features = pd.read_csv(result["artifacts"]["retuned_features_csv"]).sort_values("chunk_id")
     assert len(summary) == 2
     assert list(summary["event_count"].astype(int)) == list(retuned_features["peak_count"].astype(int))
-    np.testing.assert_allclose(summary["event_signal_auc"], retuned_features["auc"])
-    assert set(summary["acquisition_mode"]) == {"continuous"}
+    np.testing.assert_allclose(summary["phasic_signal_auc"], retuned_features["auc"])
 
     saved = json.loads((Path(result["retune_dir"]) / "retune_result.json").read_text(encoding="utf-8"))
     assert saved["retuned_continuous_outputs"]["generated"] is True
@@ -216,8 +215,8 @@ def test_downstream_continuous_retune_writes_flat_retuned_summary_and_plots(tmp_
     assert saved_block["source_cache_path"] == result["retuned_continuous_outputs"]["source_cache_path"]
     assert saved_block["roi"] == "Region0"
     np.testing.assert_allclose(
-        summary["elapsed_hour_mid"],
-        ((summary["window_start_sec"] + summary["window_end_sec"]) / 2.0) / 3600.0,
+        summary["window_midpoint_sec"],
+        (summary["window_start_sec"] + summary["window_end_sec"]) / 2.0,
     )
 
 
@@ -250,7 +249,7 @@ def test_correction_continuous_retune_preserves_attrs_and_writes_outputs(tmp_pat
         assert float(attrs["continuous_step_sec"]) == 600.0
 
     retuned_features = pd.read_csv(result["artifacts"]["retuned_features_csv"]).sort_values("chunk_id")
-    np.testing.assert_allclose(summary["event_signal_auc"], retuned_features["auc"])
+    np.testing.assert_allclose(summary["phasic_signal_auc"], retuned_features["auc"])
     saved = json.loads((Path(result["retune_dir"]) / "retune_result.json").read_text(encoding="utf-8"))
     assert saved["retuned_continuous_outputs"]["generated"] is True
     assert saved["retuned_continuous_outputs"]["continuous_detected"] is True

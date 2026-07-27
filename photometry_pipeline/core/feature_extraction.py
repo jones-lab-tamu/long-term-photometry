@@ -86,6 +86,54 @@ def compute_auc_above_threshold(
         
     return auc
 
+
+def compute_auc_over_finite_runs(
+    signal,
+    time_s,
+    baseline_value,
+    *,
+    fs_hz=None,
+    signal_excursion_polarity: str = "positive",
+):
+    """Integrate a signal over its usable finite runs.
+
+    This is the finite-run wrapper used by intermittent segment AUC and by
+    continuous window publication.  Each contiguous finite run with at least
+    two samples is integrated with :func:`compute_auc_above_threshold` using
+    the run's actual timestamps.  A trace with no such run has unavailable AUC
+    and therefore returns ``NaN`` rather than a measured zero area.
+    """
+    signal_arr = np.asarray(signal, dtype=float).reshape(-1)
+    time_arr = np.asarray(time_s, dtype=float).reshape(-1)
+    if signal_arr.size != time_arr.size:
+        raise ValueError("time_s length mismatch")
+
+    is_valid = np.isfinite(signal_arr) & np.isfinite(time_arr)
+    padded = np.concatenate(([False], is_valid, [False]))
+    diff = np.diff(padded.astype(int))
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+
+    total = 0.0
+    usable_run_found = False
+    for start, end in zip(starts, ends):
+        run_signal = signal_arr[start:end]
+        if run_signal.size < 2:
+            continue
+        run_auc = compute_auc_above_threshold(
+            run_signal,
+            baseline_value,
+            fs_hz=fs_hz,
+            time_s=time_arr[start:end],
+            signal_excursion_polarity=signal_excursion_polarity,
+        )
+        if not np.isfinite(run_auc):
+            return float("nan")
+        total += float(run_auc)
+        usable_run_found = True
+
+    return float(total) if usable_run_found else float("nan")
+
 def get_event_signal_array(chunk, config):
     signal_type = getattr(config, 'event_signal', 'dff')
     if signal_type == 'dff':
@@ -474,7 +522,8 @@ def extract_features(chunk, config, per_roi_config=None):
         ends = np.where(diff == -1)[0]
         
         total_peaks = 0
-        total_auc = 0.0 
+        total_auc = 0.0
+        usable_auc_run_found = False
         
         # Determine signal to use based on pre-filter setting.
         mode = _normalize_peak_prefilter_mode(getattr(roi_config, "peak_pre_filter", "none"))
@@ -587,15 +636,23 @@ def extract_features(chunk, config, per_roi_config=None):
                         )
                         qc_counts['DD5'] = qc_counts.get('DD5', 0) + 1
                         continue
-                
-                    # Compute AUC for this run. Peak count comes from
-                    # get_peak_indices_for_trace() so plotting and analysis share one detector.
-                    total_auc += compute_auc_above_threshold(
-                        run_y, auc_baseline, 
-                        fs_hz=chunk.fs_hz, 
-                        time_s=run_t,
-                        signal_excursion_polarity=polarity,
-                    )
+
+                # Compute AUC with the shared finite-run implementation. Peak
+                # count comes from get_peak_indices_for_trace() so plotting
+                # and analysis continue to share one detector.
+                segment_auc = compute_auc_over_finite_runs(
+                    seg_y,
+                    seg_t,
+                    auc_baseline,
+                    fs_hz=chunk.fs_hz,
+                    signal_excursion_polarity=polarity,
+                )
+                if np.isfinite(segment_auc):
+                    total_auc += float(segment_auc)
+                    usable_auc_run_found = True
+
+            if not usable_auc_run_found:
+                total_auc = np.nan
             
             row = {
                 'chunk_id': chunk.chunk_id,

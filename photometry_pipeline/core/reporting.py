@@ -3,8 +3,83 @@ import yaml
 import os
 import pathlib
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, Mapping
 from ..config import Config
+
+
+def _continuous_phasic_auc_settings(config: Config) -> dict[str, Any]:
+    """Return the effective settings that define one ROI's window AUC."""
+    event_signal = str(getattr(config, "event_signal", "dff"))
+    signal_units = {
+        "dff": "dF/F",
+        "delta_f": "deltaF",
+    }.get(event_signal, event_signal)
+    return {
+        "event_signal": event_signal,
+        "auc_baseline_mode": str(getattr(config, "event_auc_baseline", "zero")),
+        "polarity": str(
+            getattr(config, "signal_excursion_polarity", "positive")
+        ),
+        "prefilter": str(getattr(config, "peak_pre_filter", "none")),
+        "prefilter_parameters": {
+            "lowpass_hz": float(getattr(config, "lowpass_hz", 1.0)),
+            "filter_order": int(getattr(config, "filter_order", 3)),
+        },
+        "signal_units": signal_units,
+        "auc_units": f"{signal_units}\u00b7s",
+    }
+
+
+def build_continuous_phasic_auc_provenance(
+    config: Config,
+    *,
+    window_length_sec: float | None = None,
+    window_step_sec: float | None = None,
+    allow_partial_final_window: bool | None = None,
+    effective_configs_by_roi: Mapping[str, Config] | None = None,
+) -> dict[str, Any]:
+    """Describe the contract for continuous phasic window AUC.
+
+    The existing top-level fields remain the global-default snapshot. Guided
+    continuous callers additionally provide the complete effective Config used
+    for each ROI, which is recorded once under ``effective_settings_by_roi``
+    rather than being repeated in every summary row.
+    """
+    global_settings = _continuous_phasic_auc_settings(config)
+    provenance = {
+        "published_column": "phasic_signal_auc",
+        "semantics": "whole-window corrected phasic signal area; not per-event AUC",
+        **global_settings,
+        "global_defaults": dict(global_settings),
+        "window_length_sec": float(
+            getattr(config, "continuous_window_sec", 600.0)
+            if window_length_sec is None
+            else window_length_sec
+        ),
+        "window_step_sec": float(
+            getattr(config, "continuous_step_sec", 600.0)
+            if window_step_sec is None
+            else window_step_sec
+        ),
+        "partial_final_window_policy": {
+            "allow_partial_final_window": bool(
+                getattr(config, "allow_partial_final_window", False)
+                if allow_partial_final_window is None
+                else allow_partial_final_window
+            ),
+            "determination": (
+                "actual sample coverage compared with the configured full-window "
+                "sample count"
+            ),
+            "event_rate_duration": "actual window duration in seconds",
+        },
+    }
+    if effective_configs_by_roi:
+        provenance["effective_settings_by_roi"] = {
+            str(roi_id): _continuous_phasic_auc_settings(roi_config)
+            for roi_id, roi_config in sorted(effective_configs_by_roi.items())
+        }
+    return provenance
 
 def make_json_safe(obj: Any) -> Any:
     """
@@ -160,6 +235,9 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
         "derived_settings": derived_settings,
         "analytical_contract": contract
     }
+
+    if str(getattr(config, "acquisition_mode", "intermittent")).lower() == "continuous":
+        report["continuous_phasic_auc"] = build_continuous_phasic_auc_provenance(config)
 
     
     if roi_selection is not None:

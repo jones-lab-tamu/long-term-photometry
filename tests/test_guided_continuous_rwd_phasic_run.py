@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,8 +11,13 @@ import pytest
 
 from photometry_pipeline import guided_continuous_rwd_phasic_run as subject
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.feature_extraction import compute_auc_above_threshold
+from photometry_pipeline.core.feature_extraction import (
+    apply_peak_prefilter,
+    compute_auc_over_finite_runs,
+    extract_features,
+)
 from photometry_pipeline.core.types import Chunk
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.guided_continuous_rwd_phasic_detection import (
     GuidedContinuousRwdPhasicDetectionResult,
     GuidedContinuousRwdPhasicRoiDetection,
@@ -24,6 +30,10 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     load_cache_chunk_fields,
     open_phasic_cache,
 )
+from photometry_pipeline.guided_continuous_rwd_review_binding import (
+    build_guided_continuous_rwd_review_binding,
+)
+from photometry_pipeline.guided_new_analysis_plan import GuidedPlanFeatureEventChoice
 from photometry_pipeline.run_completion_contract import (
     TERMINAL_SUCCESS_CURRENT,
     classify_run_terminal_state,
@@ -240,6 +250,184 @@ def test_window_auc_is_independently_reintegrated_per_chunk(boundary_scenario):
     assert len({roi1_rows[0]["auc"], roi1_rows[1]["auc"], roi1_rows[2]["auc"]}) == 3
 
 
+@pytest.mark.parametrize("prefilter", ["none", "lowpass", "smooth"])
+@pytest.mark.parametrize("baseline_mode", ["zero", "median"])
+@pytest.mark.parametrize("polarity", ["positive", "negative", "both"])
+def test_window_auc_matches_intermittent_segment_auc(
+    prefilter, baseline_mode, polarity
+):
+    """The continuous arithmetic path matches one intermittent segment."""
+    fs_hz = 20.0
+    sample_count = 240
+    dt = np.full(sample_count - 1, 1.0 / fs_hz, dtype=float)
+    dt[35:55] += 0.0005
+    dt[145:165] -= 0.0002
+    time_sec = np.concatenate(([0.0], np.cumsum(dt)))
+    trace = (
+        0.7
+        + 0.8 * np.sin(2.0 * np.pi * 0.08 * time_sec)
+        + 0.25 * np.sin(2.0 * np.pi * 0.45 * time_sec)
+    )
+    trace[90:95] = np.nan
+    config = Config(
+        event_signal="dff",
+        event_auc_baseline=baseline_mode,
+        signal_excursion_polarity=polarity,
+        peak_pre_filter=prefilter,
+        lowpass_hz=3.0,
+        filter_order=2,
+        peak_threshold_method="absolute",
+        peak_threshold_abs=0.0,
+        peak_min_prominence_k=0.0,
+        peak_min_width_sec=0.0,
+    )
+
+    filtered, _ = apply_peak_prefilter(trace, fs_hz, config)
+    finite = filtered[np.isfinite(filtered)]
+    baseline = 0.0 if baseline_mode == "zero" else float(np.median(finite))
+    continuous_auc = subject._window_auc(
+        filtered,
+        time_sec,
+        baseline=baseline,
+        polarity=polarity,
+    )
+
+    chunk = Chunk(
+        chunk_id=0,
+        source_file="synthetic-segment",
+        format="synthetic",
+        time_sec=time_sec,
+        uv_raw=np.zeros((sample_count, 1), dtype=float),
+        sig_raw=np.zeros((sample_count, 1), dtype=float),
+        fs_hz=fs_hz,
+        channel_names=["ROI1"],
+        metadata={},
+    )
+    chunk.dff = trace.reshape(-1, 1)
+    chunk.delta_f = trace.reshape(-1, 1)
+    intermittent_auc = float(extract_features(chunk, config).loc[0, "auc"])
+
+    assert continuous_auc == pytest.approx(intermittent_auc)
+
+
+def test_window_auc_uses_effective_roi_prefilter_baseline_and_polarity(
+    boundary_scenario,
+):
+    """Each ROI's accepted AUC settings govern its own window arithmetic."""
+    chunk_sample_counts = [50, 50]
+    total = sum(chunk_sample_counts)
+    roi1_trace = np.full(total, 2.0, dtype=np.float64)
+    roi2_trace = 1.0 + 1.5 * np.sin(np.arange(total, dtype=np.float64) / 3.0)
+    corrected_path = str(boundary_scenario["tmp_path"] / "effective_auc.h5")
+    _write_min_phasic_cache(
+        corrected_path,
+        included_roi_ids=["ROI1", "ROI2"],
+        chunk_sample_counts=chunk_sample_counts,
+        roi_dff={"ROI1": roi1_trace, "ROI2": roi2_trace},
+        config=boundary_scenario["config"],
+    )
+    detection = dataclasses.replace(
+        boundary_scenario["detection"],
+        target_sample_count=total,
+        global_time_end_sec=(total - 1) / FS_HZ,
+        per_roi={
+            roi_id: dataclasses.replace(
+                boundary_scenario["detection"].per_roi[roi_id],
+                peak_global_times_sec=np.asarray([], dtype=np.float64),
+                peak_polarities=np.asarray([], dtype=np.int64),
+                event_count=0,
+            )
+            for roi_id in ("ROI1", "ROI2")
+        },
+    )
+    global_config = dataclasses.replace(
+        boundary_scenario["config"],
+        event_signal="dff",
+        peak_pre_filter="none",
+        event_auc_baseline="zero",
+        signal_excursion_polarity="positive",
+    )
+    effective_by_roi = {
+        "ROI1": global_config,
+        "ROI2": dataclasses.replace(
+            global_config,
+            event_signal="delta_f",
+            peak_pre_filter="lowpass",
+            event_auc_baseline="median",
+            signal_excursion_polarity="negative",
+            lowpass_hz=1.0,
+            filter_order=2,
+        ),
+    }
+
+    feature_rows, _ = subject._publish_phasic_cache_and_features(
+        corrected_cache_path=corrected_path,
+        phasic_cache_path=str(boundary_scenario["tmp_path"] / "effective_auc_phasic.h5"),
+        included_roi_ids=("ROI1", "ROI2"),
+        detection=detection,
+        config=global_config,
+        effective_feature_config_by_roi=effective_by_roi,
+    )
+
+    cache = open_phasic_cache(corrected_path)
+    try:
+        for roi_id, roi_config in effective_by_roi.items():
+            roi_rows = {row["chunk_id"]: row for row in feature_rows if row["roi"] == roi_id}
+            for chunk_id in (0, 1):
+                (time_sec, dff, delta_f) = load_cache_chunk_fields(
+                    cache, roi_id, chunk_id, ["time_sec", "dff", "delta_f"]
+                )
+                trace = dff if roi_config.event_signal == "dff" else delta_f
+                filtered, _ = apply_peak_prefilter(trace, FS_HZ, roi_config)
+                finite = filtered[np.isfinite(filtered)]
+                baseline = (
+                    float(np.median(finite))
+                    if roi_config.event_auc_baseline == "median" and finite.size
+                    else 0.0
+                )
+                expected = compute_auc_over_finite_runs(
+                    filtered,
+                    time_sec,
+                    baseline,
+                    signal_excursion_polarity=roi_config.signal_excursion_polarity,
+                )
+                assert roi_rows[chunk_id]["auc"] == pytest.approx(expected)
+
+            if roi_id == "ROI2":
+                wrong_filtered, _ = apply_peak_prefilter(
+                    roi2_trace[:50], FS_HZ, global_config
+                )
+                wrong_global_auc = compute_auc_over_finite_runs(
+                    wrong_filtered,
+                    np.arange(50, dtype=np.float64) / FS_HZ,
+                    0.0,
+                    signal_excursion_polarity="positive",
+                )
+                assert roi_rows[0]["auc"] != pytest.approx(wrong_global_auc)
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        np.array([np.nan, 1.0, np.nan]),
+        np.array([1.0, np.nan, 2.0]),
+        np.array([np.nan, np.nan, np.nan]),
+    ],
+)
+def test_window_auc_returns_nan_without_a_usable_finite_run(trace):
+    time_sec = np.arange(trace.size, dtype=float) / FS_HZ
+    assert np.isnan(
+        subject._window_auc(
+            trace,
+            time_sec,
+            baseline=0.0,
+            polarity="positive",
+        )
+    )
+
+
 def test_publish_raises_when_event_partition_does_not_conserve_count(boundary_scenario):
     detection = boundary_scenario["detection"]
     bad_roi1 = dataclasses.replace(
@@ -344,6 +532,90 @@ def _run(inputs, real_config, output_base, **kwargs):
     )
 
 
+def _case_with_feature_overrides(case, base_config, *, continuous_step_sec=None):
+    binding, grid, draft, contract, source = case
+    default_fields = {
+        field_name: getattr(base_config, field_name)
+        for field_name in FEATURE_EVENT_CONFIG_FIELDS
+    }
+    updated_draft = dataclasses.replace(
+        draft,
+        feature_event_profile_status="applied",
+        feature_event_profile_id="accepted-default",
+        feature_event_values=default_fields,
+        feature_event_explicitly_applied=True,
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="ROI1",
+                feature_event_profile_id="accepted-roi1",
+                config_fields={
+                    "event_signal": "dff",
+                    "peak_pre_filter": "none",
+                    "event_auc_baseline": "zero",
+                    "signal_excursion_polarity": "positive",
+                },
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanFeatureEventChoice(
+                roi_id="ROI2",
+                feature_event_profile_id="accepted-roi2",
+                config_fields={
+                    "event_signal": "delta_f",
+                    "peak_pre_filter": "lowpass",
+                    "event_auc_baseline": "median",
+                    "signal_excursion_polarity": "negative",
+                },
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+    if continuous_step_sec is not None:
+        updated_draft = dataclasses.replace(
+            updated_draft, continuous_step_sec=continuous_step_sec
+        )
+    updated_binding = build_guided_continuous_rwd_review_binding(
+        updated_draft,
+        recording=binding.recording,
+        continuity_evaluation=binding.continuity_evaluation,
+        current_source_path=source,
+    )
+    return updated_binding, grid, updated_draft, contract, source
+
+
+def _effective_auc_by_window(run_result, config_by_roi):
+    expected: dict[str, list[float]] = {}
+    cache = open_phasic_cache(run_result.phasic_cache_path)
+    try:
+        for roi_id, roi_config in config_by_roi.items():
+            values = []
+            for chunk_id in list_cache_chunk_ids(cache):
+                time_sec, dff, delta_f = load_cache_chunk_fields(
+                    cache, roi_id, chunk_id, ["time_sec", "dff", "delta_f"]
+                )
+                trace = dff if roi_config.event_signal == "dff" else delta_f
+                filtered, _ = apply_peak_prefilter(trace, FS_HZ, roi_config)
+                finite = filtered[np.isfinite(filtered)]
+                baseline = (
+                    float(np.median(finite))
+                    if roi_config.event_auc_baseline == "median" and finite.size
+                    else 0.0
+                )
+                values.append(
+                    compute_auc_over_finite_runs(
+                        filtered,
+                        time_sec,
+                        baseline,
+                        signal_excursion_polarity=roi_config.signal_excursion_polarity,
+                    )
+                )
+            expected[roi_id] = values
+    finally:
+        cache.close()
+    return expected
+
+
 def _read_roi_summary(run_dir, roi):
     path = os.path.join(run_dir, roi, "tables", "continuous_phasic_window_summary.csv")
     return pd.read_csv(path)
@@ -380,6 +652,140 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
         report = json.load(fh)
     assert "tonic" in report["summary"]["narrative"].lower()
     assert "not been run" in report["summary"]["narrative"].lower()
+    auc_provenance = report["phasic_analysis"]["window_summary_provenance"]
+    assert set(auc_provenance["effective_settings_by_roi"]) == {
+        "ROI1",
+        "ROI2",
+    }
+    assert all(
+        settings == auc_provenance["global_defaults"]
+        for settings in auc_provenance["effective_settings_by_roi"].values()
+    )
+
+
+def test_successful_run_detects_each_roi_once_before_publication(
+    accepted_case, real_config, tmp_path, monkeypatch
+):
+    from photometry_pipeline import guided_continuous_rwd_phasic_detection as detection_module
+
+    real_detect_roi = detection_module._detect_roi
+    calls = {"count": 0}
+
+    def counting_detect_roi(*args, **kwargs):
+        calls["count"] += 1
+        return real_detect_roi(*args, **kwargs)
+
+    monkeypatch.setattr(detection_module, "_detect_roi", counting_detect_roi)
+    inputs = _pass_inputs(accepted_case)
+    result = _run(inputs, real_config, tmp_path)
+
+    assert calls["count"] == len(inputs[0].recording.roi.included_roi_ids)
+    for roi in inputs[0].recording.roi.included_roi_ids:
+        summary = _read_roi_summary(result.run_dir, roi)
+        assert int(summary["event_count"].sum()) == result.detection.per_roi[roi].event_count
+
+
+def test_natural_run_uses_accepted_effective_roi_auc_settings_and_provenance(
+    accepted_case, real_config, tmp_path, monkeypatch
+):
+    case = _case_with_feature_overrides(accepted_case, real_config)
+    inputs = _pass_inputs(case)
+    seen_configs = []
+    from photometry_pipeline import guided_continuous_rwd_phasic_detection as detection_module
+
+    real_detect_roi = detection_module._detect_roi
+
+    def tracking_detect_roi(*args, **kwargs):
+        seen_configs.append((args[0], kwargs["config"]))
+        return real_detect_roi(*args, **kwargs)
+
+    monkeypatch.setattr(detection_module, "_detect_roi", tracking_detect_roi)
+    result = _run(inputs, real_config, tmp_path)
+
+    assert [roi_id for roi_id, _config in seen_configs] == ["ROI1", "ROI2"]
+    assert seen_configs[0][1].peak_pre_filter == "none"
+    assert seen_configs[1][1].peak_pre_filter == "lowpass"
+    assert seen_configs[0][1].event_auc_baseline == "zero"
+    assert seen_configs[1][1].event_auc_baseline == "median"
+    assert seen_configs[0][1].signal_excursion_polarity == "positive"
+    assert seen_configs[1][1].signal_excursion_polarity == "negative"
+
+    config_by_roi = {roi_id: config for roi_id, config in seen_configs}
+    expected_auc = _effective_auc_by_window(result, config_by_roi)
+    for roi_id in ("ROI1", "ROI2"):
+        summary = _read_roi_summary(result.run_dir, roi_id)
+        assert summary["phasic_signal_auc"].tolist() == pytest.approx(expected_auc[roi_id])
+
+    provenance_path = Path(result.run_dir) / "_analysis" / "phasic_out" / "features" / "feature_event_provenance.json"
+    feature_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    feature_entries = {entry["roi"]: entry for entry in feature_provenance["rois"]}
+    for roi_id, config in config_by_roi.items():
+        assert feature_entries[roi_id]["source"] == "override"
+        assert feature_entries[roi_id]["effective_config_fields"]["event_signal"] == config.event_signal
+        assert feature_entries[roi_id]["effective_config_fields"]["peak_pre_filter"] == config.peak_pre_filter
+        assert feature_entries[roi_id]["effective_config_fields"]["event_auc_baseline"] == config.event_auc_baseline
+        assert feature_entries[roi_id]["effective_config_fields"]["signal_excursion_polarity"] == config.signal_excursion_polarity
+
+    report = json.loads((Path(result.run_dir) / "run_report.json").read_text(encoding="utf-8"))
+    auc_provenance = report["phasic_analysis"]["window_summary_provenance"]
+    assert set(auc_provenance["effective_settings_by_roi"]) == {"ROI1", "ROI2"}
+    for roi_id, config in config_by_roi.items():
+        settings = auc_provenance["effective_settings_by_roi"][roi_id]
+        assert settings["event_signal"] == config.event_signal
+        assert settings["prefilter"] == config.peak_pre_filter
+        assert settings["auc_baseline_mode"] == config.event_auc_baseline
+        assert settings["polarity"] == config.signal_excursion_polarity
+        assert settings["prefilter_parameters"] == {
+            "lowpass_hz": config.lowpass_hz,
+            "filter_order": config.filter_order,
+        }
+    assert len(seen_configs) == len(case[0].recording.roi.included_roi_ids)
+
+    events = pd.read_csv(result.events_path)
+    for roi_id in case[0].recording.roi.included_roi_ids:
+        roi_events = events[events["roi"] == roi_id].sort_values("global_time_sec")
+        detection = result.detection.per_roi[roi_id]
+        np.testing.assert_allclose(
+            roi_events["global_time_sec"].to_numpy(),
+            detection.peak_global_times_sec,
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(roi_events["polarity"].to_numpy(), detection.peak_polarities)
+
+    expected_columns = [
+        "roi",
+        "window_index",
+        "window_start_sec",
+        "window_end_sec",
+        "window_midpoint_sec",
+        "window_duration_sec",
+        "phasic_signal_auc",
+        "event_count",
+        "event_rate_per_min",
+        "is_partial_final_window",
+    ]
+    assert list(_read_roi_summary(result.run_dir, "ROI1").columns) == expected_columns
+
+
+def test_standalone_provenance_keeps_accepted_window_length_and_step_distinct(
+    accepted_case, real_config, tmp_path
+):
+    case = _case_with_feature_overrides(
+        accepted_case, real_config, continuous_step_sec=37.5
+    )
+    inputs = _pass_inputs(case)
+    result = _run(inputs, real_config, tmp_path)
+    report = json.loads((Path(result.run_dir) / "run_report.json").read_text(encoding="utf-8"))
+    provenance = report["phasic_analysis"]["window_summary_provenance"]
+    assert provenance["window_length_sec"] == 90.0
+    assert provenance["window_step_sec"] == 37.5
+    cache = open_phasic_cache(result.phasic_cache_path)
+    try:
+        attrs = load_cache_chunk_attrs(cache, "ROI1", 0)
+        assert attrs["continuous_window_sec"] == pytest.approx(90.0)
+        assert attrs["continuous_step_sec"] == pytest.approx(37.5)
+    finally:
+        cache.close()
 
 
 def test_features_csv_has_one_row_per_chunk_per_roi(accepted_case, real_config, tmp_path):
@@ -457,9 +863,25 @@ def test_final_short_tail_is_included_not_dropped(accepted_case, real_config, tm
         first_row = df.iloc[0]
         assert last_row["window_duration_sec"] < first_row["window_duration_sec"]
         assert last_row["window_index"] == segment_plan.segment_count - 1
+        assert bool(first_row["is_partial_final_window"]) is False
+        assert bool(last_row["is_partial_final_window"]) is True
+        assert last_row["window_midpoint_sec"] == pytest.approx(
+            (last_row["window_start_sec"] + last_row["window_end_sec"]) / 2.0
+        )
+        assert last_row["window_duration_sec"] == pytest.approx(
+            last_row["window_end_sec"] - last_row["window_start_sec"]
+        )
+        assert last_row["event_rate_per_min"] == pytest.approx(
+            last_row["event_count"] / (last_row["window_duration_sec"] / 60.0)
+        )
+        assert np.isfinite(last_row["phasic_signal_auc"])
 
     features = pd.read_csv(result.features_path)
     assert features["chunk_id"].max() == segment_plan.segment_count - 1
+    report = json.loads((Path(result.run_dir) / "run_report.json").read_text(encoding="utf-8"))
+    assert report["phasic_analysis"]["window_summary_provenance"][
+        "partial_final_window_policy"
+    ]["allow_partial_final_window"] is True
 
 
 def test_one_chunk_run_is_one_continuous_recording(real_config, tmp_path, tmp_path_factory):

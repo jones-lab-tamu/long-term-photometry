@@ -15,31 +15,15 @@ def _write_phasic_summary(path: Path) -> None:
     pd.DataFrame(
         {
             "roi": ["Region0", "Region0"],
-            "source_file": ["source.csv", "source.csv"],
-            "chunk_id": [0, 1],
             "window_index": [0, 1],
             "window_start_sec": [0.0, 600.0],
             "window_end_sec": [600.0, 1200.0],
+            "window_midpoint_sec": [300.0, 900.0],
             "window_duration_sec": [600.0, 600.0],
-            "elapsed_hour_start": [0.0, 600.0 / 3600.0],
-            "elapsed_hour_mid": [300.0 / 3600.0, 900.0 / 3600.0],
+            "phasic_signal_auc": [1.25, 2.5],
             "event_count": [3, 5],
             "event_rate_per_min": [0.3, 0.5],
-            "event_rate_per_hour": [18.0, 30.0],
-            "event_signal_auc": [1.25, 2.5],
-            "event_signal_auc_semantics": [
-                "aggregate finite-run AUC from feature_extraction output; not per-event AUC",
-                "aggregate finite-run AUC from feature_extraction output; not per-event AUC",
-            ],
-            "event_signal_mean": [0.1, 0.2],
-            "event_signal_median": [0.05, 0.07],
-            "event_signal_std": [0.01, 0.02],
-            "event_signal_mad": [0.005, 0.006],
             "is_partial_final_window": [False, False],
-            "original_file_duration_sec": [1200.0, 1200.0],
-            "continuous_window_sec": [600.0, 600.0],
-            "continuous_step_sec": [600.0, 600.0],
-            "acquisition_mode": ["continuous", "continuous"],
         }
     ).to_csv(path, index=False)
 
@@ -154,7 +138,7 @@ def test_continuous_phasic_plot_skip_does_not_create_empty_summary_folder(tmp_pa
     df = pd.read_csv(table_path)
     df["event_rate_per_min"] = np.nan
     df["event_count"] = np.nan
-    df["event_signal_auc"] = np.nan
+    df["phasic_signal_auc"] = np.nan
     df.to_csv(table_path, index=False)
 
     result = generate_continuous_summary_plots(str(run_dir), mode="phasic")

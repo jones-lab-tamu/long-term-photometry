@@ -208,10 +208,29 @@ def write_mandatory_artifacts(
         )
 
 
-def write_required_deliverables(run_dir: Path, run_mode: dict) -> None:
+def write_required_deliverables(
+    run_dir: Path, run_mode: dict, *, continuous_window_rows: int = 3
+) -> None:
     """Write exactly the per-ROI deliverables the run mode promises."""
     for rel in required_deliverables_for_run_mode(run_mode):
-        _write_text(run_dir / Path(*rel.split("/")), f"deliverable:{rel}")
+        target = run_dir / Path(*rel.split("/"))
+        if rel.endswith("continuous_phasic_window_summary.csv"):
+            roi = rel.split("/", 1)[0]
+            rows = [
+                f"{roi},{index},{index * 60.0},{(index + 1) * 60.0},"
+                f"{index * 60.0 + 30.0},60.0,1.0,1,1.0,False"
+                for index in range(int(continuous_window_rows))
+            ]
+            _write_text(
+                target,
+                "roi,window_index,window_start_sec,window_end_sec,"
+                "window_midpoint_sec,window_duration_sec,phasic_signal_auc,"
+                "event_count,event_rate_per_min,is_partial_final_window\n"
+                + "\n".join(rows)
+                + "\n",
+            )
+        else:
+            _write_text(target, f"deliverable:{rel}")
 
 
 def full_intermittent_run_mode(
@@ -337,7 +356,9 @@ def write_current_run(
         chunked_input_processing=chunked_input_processing,
         shared_input_manifest=shared_input_manifest,
     )
-    write_required_deliverables(run_dir, run_mode)
+    write_required_deliverables(
+        run_dir, run_mode, continuous_window_rows=continuous_window_rows
+    )
     if region:
         write_region_deliverable(run_dir, region)
 

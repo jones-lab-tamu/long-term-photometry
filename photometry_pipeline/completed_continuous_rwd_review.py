@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from photometry_pipeline.continuous_outputs import validate_continuous_phasic_summary_file
 from photometry_pipeline.feature_event_provenance import (
     PROVENANCE_MODE_CURRENT,
     classify_provenance_contract,
@@ -410,6 +411,16 @@ def load_continuous_run_overview(run_dir: str) -> ContinuousRunOverview:
                 raise CompletedContinuousRwdReviewError(
                     "This completed analysis could not be reopened because its phasic "
                     f"summary for region {roi_id} is missing."
+                )
+            summary_error = validate_continuous_phasic_summary_file(
+                os.path.join(resolved, phasic_summary_relative_paths[roi_id]),
+                expected_roi=roi_id,
+                expected_row_count=phasic_window_row_counts[roi_id],
+            )
+            if summary_error:
+                raise CompletedContinuousRwdReviewError(
+                    "This completed analysis's phasic window summary for region "
+                    f"{roi_id} is invalid ({summary_error})."
                 )
 
         phasic_out_dir = os.path.join(resolved, "_analysis", "phasic_out")

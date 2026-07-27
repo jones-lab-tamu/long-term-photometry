@@ -74,27 +74,46 @@ def test_continuous_phasic_summary_table_uses_features_and_window_attrs(tmp_path
     summary = pd.read_csv(summary_path)
     features = pd.read_csv(out_dir / "_analysis" / "phasic_out" / "features" / "features.csv")
     features = features[features["roi"] == "Region0"].sort_values("chunk_id").reset_index(drop=True)
-    summary = summary.sort_values("chunk_id").reset_index(drop=True)
+    summary = summary.sort_values("window_index").reset_index(drop=True)
 
     assert len(summary) == 2
+    assert list(summary.columns) == [
+        "roi",
+        "window_index",
+        "window_start_sec",
+        "window_end_sec",
+        "window_midpoint_sec",
+        "window_duration_sec",
+        "phasic_signal_auc",
+        "event_count",
+        "event_rate_per_min",
+        "is_partial_final_window",
+    ]
     assert list(summary["event_count"].astype(int)) == list(features["peak_count"].astype(int))
-    np.testing.assert_allclose(summary["event_signal_auc"], features["auc"])
+    np.testing.assert_allclose(summary["phasic_signal_auc"], features["auc"])
     np.testing.assert_allclose(
         summary["event_rate_per_min"],
         summary["event_count"] / (summary["window_duration_sec"] / 60.0),
     )
     np.testing.assert_allclose(
-        summary["event_rate_per_hour"],
-        summary["event_count"] / (summary["window_duration_sec"] / 3600.0),
+        summary["window_midpoint_sec"],
+        (summary["window_start_sec"] + summary["window_end_sec"]) / 2.0,
     )
-    np.testing.assert_allclose(
-        summary["elapsed_hour_mid"],
-        ((summary["window_start_sec"] + summary["window_end_sec"]) / 2.0) / 3600.0,
-    )
-    assert set(summary["event_signal_auc_semantics"]) == {
-        "aggregate finite-run AUC from feature_extraction output; not per-event AUC"
-    }
     for unavailable in [
+        "event_signal_auc",
+        "event_signal_mean",
+        "event_signal_median",
+        "event_signal_std",
+        "event_signal_mad",
+        "event_rate_per_hour",
+        "elapsed_hour_start",
+        "elapsed_hour_mid",
+        "source_file",
+        "chunk_id",
+        "continuous_window_sec",
+        "continuous_step_sec",
+        "acquisition_mode",
+        "event_signal_auc_semantics",
         "mean_event_amplitude",
         "peak_event_amplitude",
         "event_auc_mean",
@@ -102,6 +121,38 @@ def test_continuous_phasic_summary_table_uses_features_and_window_attrs(tmp_path
         "n_rejected_events",
     ]:
         assert unavailable not in summary.columns
+    assert not summary["is_partial_final_window"].any()
+
+    with h5py.File(
+        out_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5", "r"
+    ) as h5:
+        for row in summary.itertuples(index=False):
+            group = h5["roi"]["Region0"][f"chunk_{int(row.window_index)}"]
+            local_time = group["time_sec"][()]
+            start = float(group.attrs["window_start_sec"]) + float(local_time[0])
+            end = float(group.attrs["window_start_sec"]) + float(local_time[-1])
+            assert row.window_start_sec == pytest.approx(start)
+            assert row.window_end_sec == pytest.approx(end)
+            assert row.window_duration_sec == pytest.approx(end - start)
+
+    phasic_report = json.loads(
+        (
+            out_dir
+            / "_analysis"
+            / "phasic_out"
+            / "run_report.json"
+        ).read_text(encoding="utf-8")
+    )
+    provenance = phasic_report["continuous_phasic_auc"]
+    assert provenance["event_signal"] == "dff"
+    assert provenance["auc_baseline_mode"] == "zero"
+    assert provenance["polarity"] == "positive"
+    assert provenance["prefilter"] == "none"
+    assert provenance["signal_units"] == "dF/F"
+    assert provenance["auc_units"] == "dF/F·s"
+    assert provenance["window_length_sec"] == pytest.approx(600.0)
+    assert provenance["window_step_sec"] == pytest.approx(600.0)
+    assert provenance["partial_final_window_policy"]["determination"]
 
     manifest = json.loads((out_dir / "MANIFEST.json").read_text(encoding="utf-8"))
     continuous_outputs = manifest["continuous_outputs"]

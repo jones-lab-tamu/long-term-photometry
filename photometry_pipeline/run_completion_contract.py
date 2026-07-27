@@ -63,6 +63,7 @@ from photometry_pipeline.guided_startup_transaction import (
 from photometry_pipeline.guided_startup_claim import (
     GUIDED_STARTUP_WRAPPER_CLAIM_FILENAME,
 )
+from photometry_pipeline.continuous_outputs import validate_continuous_phasic_summary_file
 
 # B1: the Guided markers that cannot validly exist for a non-Guided (Full
 # Control / legacy) run -- each is written exclusively by guided_startup_*.py
@@ -506,7 +507,9 @@ def input_completeness_error(run_dir: str, run_mode: dict[str, Any]) -> str:
     return ""
 
 
-def continuous_index_error(run_mode: dict[str, Any], deliverables: Any) -> str:
+def continuous_index_error(
+    run_mode: dict[str, Any], deliverables: Any, *, run_dir: str | None = None
+) -> str:
     """Validate the continuous index against what the run promised. "" when sound."""
     families = expected_continuous_families(run_mode)
     if not families:
@@ -542,6 +545,17 @@ def continuous_index_error(run_mode: dict[str, Any], deliverables: Any) -> str:
             count = counts.get(roi)
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
                 return f"the continuous window index records no analysis windows for ROI {roi}"
+            if family == FAMILY_CONTINUOUS_PHASIC_WINDOW_SUMMARY and run_dir is not None:
+                summary_path = os.path.join(run_dir, _to_os_rel(expected_path))
+                if not os.path.isfile(summary_path):
+                    continue
+                summary_error = validate_continuous_phasic_summary_file(
+                    summary_path,
+                    expected_roi=roi,
+                    expected_row_count=count,
+                )
+                if summary_error:
+                    return f"{expected_path}: {summary_error}"
     return ""
 
 
@@ -590,7 +604,7 @@ def build_manifest_completion_block(
         raise RunCompletionError(f"Run mode does not describe a completable run: {structural_error}")
 
     deliverables = build_manifest_deliverables_block(run_mode, continuous_index=continuous_index)
-    index_error = continuous_index_error(run_mode, deliverables)
+    index_error = continuous_index_error(run_mode, deliverables, run_dir=run_dir)
     if index_error:
         raise RunCompletionError(f"Continuous window outputs are incomplete: {index_error}")
 
@@ -1398,7 +1412,9 @@ def verify_terminal_set_before_status(
     structural_error = run_mode_structural_error(run_mode)
     if structural_error:
         return f"run mode does not describe a completable run: {structural_error}"
-    index_error = continuous_index_error(run_mode, manifest_block.get("deliverables"))
+    index_error = continuous_index_error(
+        run_mode, manifest_block.get("deliverables"), run_dir=run_dir
+    )
     if index_error:
         return f"continuous window outputs are incomplete: {index_error}"
     completeness_error = input_completeness_error(run_dir, run_mode)
@@ -1708,7 +1724,9 @@ def _classify_current(
             run_id=run_id,
         )
 
-    index_error = continuous_index_error(run_mode, manifest_block.get("deliverables"))
+    index_error = continuous_index_error(
+        run_mode, manifest_block.get("deliverables"), run_dir=run_dir
+    )
     if index_error:
         return corrupted(
             f"This continuous run's window outputs are not accounted for: {index_error}.",

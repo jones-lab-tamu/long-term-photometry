@@ -81,10 +81,14 @@ from photometry_pipeline.continuous_outputs import (
     generate_continuous_phasic_summary,
 )
 from photometry_pipeline.core.feature_extraction import (
-    compute_auc_above_threshold,
+    apply_peak_prefilter,
+    compute_auc_over_finite_runs,
     normalize_signal_excursion_polarity,
 )
-from photometry_pipeline.core.reporting import generate_run_report
+from photometry_pipeline.core.reporting import (
+    build_continuous_phasic_auc_provenance,
+    generate_run_report,
+)
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.feature_event_provenance import (
     FEATURE_EVENT_PROVENANCE_CONTRACT_VERSION,
@@ -132,6 +136,11 @@ from photometry_pipeline.guided_execution_payloads import (
     GuidedExecutionStartupMappingContract,
 )
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_new_analysis_plan import (
+    build_guided_per_roi_feature_event_map,
+    build_per_roi_feature_backend_config,
+    build_per_roi_feature_event_provenance,
+)
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
@@ -233,31 +242,85 @@ def _window_auc(
     baseline: float,
     polarity: str,
 ) -> float:
-    """Numerically re-integrate AUC over one D1 chunk's own corrected
-    event-signal slice against an already-established baseline.
+    """Reuse intermittent finite-run AUC semantics for one window.
 
-    Mirrors ``core.feature_extraction.extract_features``'s finite-run
-    splitting exactly (so a window containing an internal NaN gap integrates
-    identically to how the production detector itself would have summed that
-    same slice), but performs no threshold estimation or peak search -- this
-    is arithmetic over already-corrected samples, not detection.
+    This is arithmetic over already-corrected samples only; it performs no
+    threshold estimation or peak search.
     """
-    is_valid = np.isfinite(trace)
-    padded = np.concatenate(([False], is_valid, [False]))
-    diff = np.diff(padded.astype(int))
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]
+    return compute_auc_over_finite_runs(
+        trace,
+        local_time_sec,
+        baseline,
+        signal_excursion_polarity=polarity,
+    )
 
-    total = 0.0
-    for s, e in zip(starts, ends):
-        run_y = trace[s:e]
-        run_t = local_time_sec[s:e]
-        if run_y.shape[0] < 2:
-            continue
-        total += compute_auc_above_threshold(
-            run_y, baseline, time_s=run_t, signal_excursion_polarity=polarity
+
+def _is_partial_continuous_window(
+    *,
+    sample_count: int,
+    fs_hz: float,
+    configured_window_sec: float,
+) -> bool:
+    """Determine partial coverage from the actual sample count.
+
+    The continuous grid is sample-based.  Comparing the recorded sample count
+    with the configured full-window sample count keeps an exact full final
+    window non-partial despite its last timestamp being one sample interval
+    before the nominal duration.
+    """
+    expected_samples = int(round(float(configured_window_sec) * float(fs_hz)))
+    if expected_samples <= 0:
+        raise GuidedContinuousRwdPhasicRunError(
+            "continuous_window_sec and fs_hz must describe at least one sample."
         )
-    return total
+    return int(sample_count) < expected_samples
+
+
+def _resolve_continuous_effective_feature_configs(
+    accepted_draft: GuidedNewAnalysisDraftPlan,
+    *,
+    base_config: Config,
+    included_roi_ids: tuple[str, ...],
+) -> tuple[dict[str, Config], dict[str, Config], dict[str, dict]]:
+    """Reuse Guided's accepted per-ROI Feature Detection resolution.
+
+    The first mapping is the complete Config actually consumed by detection
+    and AUC publication for every ROI. The second contains only Custom ROI
+    Configs, matching ``build_feature_event_provenance_payload``'s existing
+    contract. The third carries the accepted source/profile descriptions.
+    """
+    feature_map = build_guided_per_roi_feature_event_map(accepted_draft)
+    if not feature_map.resolution_supported:
+        # The direct low-level continuous test path predates the saved Guided
+        # feature profile and has no per-ROI choices. Preserve its global-only
+        # behavior, but never hide an unresolved accepted override behind the
+        # global Config.
+        if getattr(accepted_draft, "per_roi_feature_event_choices", ()):
+            raise GuidedContinuousRwdPhasicRunError(
+                "Accepted per-ROI Feature Detection settings could not be resolved: "
+                f"{feature_map.blocking_categories!r}."
+            )
+        return (
+            {roi_id: base_config for roi_id in included_roi_ids},
+            {},
+            {},
+        )
+
+    resolved_roi_ids = tuple(entry.roi_id for entry in feature_map.entries)
+    if resolved_roi_ids != tuple(included_roi_ids):
+        raise GuidedContinuousRwdPhasicRunError(
+            "Accepted per-ROI Feature Detection settings do not cover the "
+            f"canonical ROI order: resolved={resolved_roi_ids!r}, "
+            f"expected={included_roi_ids!r}."
+        )
+
+    override_configs = build_per_roi_feature_backend_config(feature_map, base_config)
+    source_details = build_per_roi_feature_event_provenance(feature_map, base_config)
+    effective_configs = {
+        roi_id: override_configs.get(roi_id, base_config)
+        for roi_id in included_roi_ids
+    }
+    return effective_configs, override_configs, source_details
 
 
 def _publish_phasic_cache_and_features(
@@ -267,6 +330,9 @@ def _publish_phasic_cache_and_features(
     included_roi_ids: tuple[str, ...],
     detection: GuidedContinuousRwdPhasicDetectionResult,
     config: Config,
+    full_window_sample_count: int | None = None,
+    effective_feature_config_by_roi: dict[str, Config] | None = None,
+    window_step_sec: float | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Republish D1's corrected per-segment arrays through the existing
     phasic-mode ``Hdf5TraceCacheWriter``, one storage chunk (all canonical
@@ -279,13 +345,6 @@ def _publish_phasic_cache_and_features(
     partition does not exactly conserve D3b-A's own recording-global event
     count for any ROI.
     """
-    event_signal_field = str(getattr(config, "event_signal", "dff"))
-    cache_field = "dff" if event_signal_field == "dff" else "delta_f"
-    auc_baseline_method = str(getattr(config, "event_auc_baseline", "zero"))
-    polarity = normalize_signal_excursion_polarity(
-        getattr(config, "signal_excursion_polarity", "positive")
-    )
-
     source_cache = open_phasic_cache(corrected_cache_path)
     try:
         chunk_ids = list_cache_chunk_ids(source_cache)
@@ -314,12 +373,45 @@ def _publish_phasic_cache_and_features(
                         time_sec = local_time
                         fs_hz_chunk = float(attrs["fs_hz"])
                         source_file = str(attrs.get("source_file", ""))
+                        window_start = float(attrs["window_start_sec"]) + float(local_time[0])
+                        window_end = float(attrs["window_start_sec"]) + float(local_time[-1])
+                        expected_full_samples = int(
+                            full_window_sample_count
+                            if full_window_sample_count is not None
+                            else round(
+                                float(
+                                    getattr(
+                                        config,
+                                        "continuous_window_sec",
+                                        attrs.get("window_duration_sec", 0.0),
+                                    )
+                                )
+                                * float(fs_hz_chunk)
+                            )
+                        )
+                        if expected_full_samples <= 0:
+                            raise GuidedContinuousRwdPhasicRunError(
+                                "The continuous window grid does not describe a "
+                                "positive full-window sample count."
+                            )
+                        configured_window_sec = expected_full_samples / float(fs_hz_chunk)
                         window_meta = {
                             "acquisition_mode": "continuous",
                             "window_index": float(attrs["window_index"]),
-                            "window_start_sec": float(attrs["window_start_sec"]),
-                            "window_end_sec": float(attrs["window_end_sec"]),
-                            "window_duration_sec": float(attrs["window_duration_sec"]),
+                            "window_start_sec": window_start,
+                            "window_end_sec": window_end,
+                            "window_duration_sec": window_end - window_start,
+                            "continuous_window_sec": configured_window_sec,
+                            "continuous_step_sec": float(
+                                getattr(config, "continuous_step_sec", configured_window_sec)
+                                if window_step_sec is None
+                                else window_step_sec
+                            ),
+                            "is_partial_final_window": _is_partial_continuous_window(
+                                sample_count=int(local_time.size),
+                                fs_hz=float(fs_hz_chunk),
+                                configured_window_sec=configured_window_sec,
+                            ),
                         }
                     sig_cols.append(np.asarray(sig, dtype=np.float64))
                     uv_cols.append(np.asarray(uv, dtype=np.float64))
@@ -330,15 +422,33 @@ def _publish_phasic_cache_and_features(
                     delta_cols.append(delta_arr)
 
                     roi_detection = detection.per_roi[roi_id]
+                    roi_config = (effective_feature_config_by_roi or {}).get(roi_id, config)
+                    event_signal_field = str(getattr(roi_config, "event_signal", "dff"))
+                    cache_field = "dff" if event_signal_field == "dff" else "delta_f"
+                    auc_baseline_method = str(
+                        getattr(roi_config, "event_auc_baseline", "zero")
+                    )
+                    polarity = normalize_signal_excursion_polarity(
+                        getattr(roi_config, "signal_excursion_polarity", "positive")
+                    )
                     event_trace = dff_arr if cache_field == "dff" else delta_arr
-                    n_samples = int(event_trace.shape[0])
-
+                    filtered_event_trace, _ = apply_peak_prefilter(
+                        event_trace, float(fs_hz_chunk), roi_config
+                    )
+                    finite_event_trace = filtered_event_trace[np.isfinite(filtered_event_trace)]
                     auc_baseline = (
-                        roi_detection.median if auc_baseline_method == "median" else 0.0
+                        float(np.median(finite_event_trace))
+                        if auc_baseline_method == "median" and finite_event_trace.size
+                        else 0.0
                     )
                     window_auc = _window_auc(
-                        event_trace, local_time, baseline=auc_baseline, polarity=polarity
+                        filtered_event_trace,
+                        local_time,
+                        baseline=auc_baseline,
+                        polarity=polarity,
                     )
+
+                    n_samples = int(event_trace.shape[0])
 
                     range_start = cumulative_samples[roi_id]
                     range_end = range_start + n_samples
@@ -529,19 +639,16 @@ def _write_feature_event_provenance(
     included_roi_ids: tuple[str, ...],
     config: Config,
     detection: GuidedContinuousRwdPhasicDetectionResult,
+    per_roi_feature_config: dict[str, Config] | None = None,
+    per_roi_source_details: dict[str, dict] | None = None,
 ) -> dict:
-    """Reuse the existing, unmodified provenance payload builder, then add
-    one small additive, backward-compatible section distinguishing this
-    recording-global continuous execution from ordinary per-chunk detection.
-
-    Continuous Guided has no per-ROI feature-detection override path yet (the
-    D3b-A kernel itself accepts a single ``config``, never a per-ROI feature
-    config mapping), so every analyzed ROI's effective settings are the
-    global Default -- exactly what the unmodified payload builder already
-    records when given no per-ROI override.
-    """
+    """Reuse the existing consumed-settings provenance builder, then add the
+    continuous execution identity section."""
     payload = build_feature_event_provenance_payload(
-        base_config=config, analyzed_rois=list(included_roi_ids)
+        base_config=config,
+        analyzed_rois=list(included_roi_ids),
+        per_roi_feature_config=per_roi_feature_config,
+        per_roi_source_details=per_roi_source_details,
     )
     payload["continuous_execution"] = {
         "execution_strategy": detection.execution_strategy,
@@ -549,6 +656,9 @@ def _write_feature_event_provenance(
         "target_grid_identity": detection.target_grid_identity,
         "completion_identity": detection.completion_identity,
         "detector_parameter_identity": detection.detector_parameter_identity,
+        "detector_parameter_identity_by_roi": dict(
+            detection.detector_parameter_identity_by_roi
+        ),
         "sampling_rate_hz": detection.sampling_rate_hz,
     }
     path = os.path.join(features_dir, FEATURE_EVENT_PROVENANCE_FILENAME)
@@ -556,7 +666,12 @@ def _write_feature_event_provenance(
     return payload
 
 
-def _stamp_feature_event_provenance_contract(phasic_out_dir: str, payload: dict) -> None:
+def _stamp_feature_event_provenance_contract(
+    phasic_out_dir: str,
+    payload: dict,
+    *,
+    continuous_auc_provenance: dict | None = None,
+) -> None:
     """Record the explicit contract-version signal in the phasic-out
     ``run_report.json``, matching ``Pipeline._stamp_feature_event_provenance_
     contract`` exactly so ``feature_event_provenance.classify_provenance_
@@ -573,6 +688,8 @@ def _stamp_feature_event_provenance_contract(phasic_out_dir: str, payload: dict)
         "global_default_config_digest": payload.get("global_default_config_digest", ""),
         "roi_count": len(payload.get("rois", [])),
     }
+    if continuous_auc_provenance is not None:
+        data["continuous_phasic_auc"] = dict(continuous_auc_provenance)
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
@@ -686,6 +803,15 @@ def execute_guided_continuous_rwd_phasic_run(
     features_dir = os.path.join(phasic_out_dir, PHASIC_FEATURES_RELATIVE_DIR)
     traversal: GuidedContinuousRwdCorrectionPassTraversal | None = None
     try:
+        (
+            effective_feature_config_by_roi,
+            per_roi_feature_config,
+            per_roi_source_details,
+        ) = _resolve_continuous_effective_feature_configs(
+            accepted_draft,
+            base_config=config,
+            included_roi_ids=included_roi_ids,
+        )
         traversal = iterate_guided_continuous_rwd_corrected_segments(
             review_binding,
             target_grid,
@@ -715,6 +841,7 @@ def execute_guided_continuous_rwd_phasic_run(
             review_binding=review_binding,
             target_grid=target_grid,
             config=config,
+            per_roi_config=effective_feature_config_by_roi,
             cancellation_requested=cancellation_requested,
         )
 
@@ -725,6 +852,9 @@ def execute_guided_continuous_rwd_phasic_run(
             included_roi_ids=included_roi_ids,
             detection=detection,
             config=config,
+            full_window_sample_count=segment_plan.nominal_segment_sample_count,
+            effective_feature_config_by_roi=effective_feature_config_by_roi,
+            window_step_sec=float(accepted_draft.continuous_step_sec),
         )
         _validate_phasic_cache(
             phasic_cache_path, included_roi_ids=included_roi_ids, completion=completion
@@ -735,13 +865,32 @@ def execute_guided_continuous_rwd_phasic_run(
         _validate_events_csv(events_path, detection=detection)
 
         generate_run_report(config, phasic_out_dir, traces_only=False)
+        auc_provenance = build_continuous_phasic_auc_provenance(
+            config,
+            window_length_sec=float(accepted_draft.continuous_window_sec),
+            window_step_sec=float(accepted_draft.continuous_step_sec),
+            effective_configs_by_roi=effective_feature_config_by_roi,
+            allow_partial_final_window=bool(
+                getattr(config, "allow_partial_final_window", False)
+                or (
+                    segment_plan.descriptors[-1].sample_count
+                    < segment_plan.nominal_segment_sample_count
+                )
+            ),
+        )
         provenance_payload = _write_feature_event_provenance(
             features_dir,
             included_roi_ids=included_roi_ids,
             config=config,
             detection=detection,
+            per_roi_feature_config=per_roi_feature_config,
+            per_roi_source_details=per_roi_source_details,
         )
-        _stamp_feature_event_provenance_contract(phasic_out_dir, provenance_payload)
+        _stamp_feature_event_provenance_contract(
+            phasic_out_dir,
+            provenance_payload,
+            continuous_auc_provenance=auc_provenance,
+        )
 
         phasic_paths, phasic_row_counts = _generate_phasic_summary(
             run_dir, phasic_out_dir, included_roi_ids
@@ -799,6 +948,7 @@ def execute_guided_continuous_rwd_phasic_run(
                     roi_id: detection.per_roi[roi_id].event_count for roi_id in included_roi_ids
                 },
                 "execution_strategy": detection.execution_strategy,
+                "window_summary_provenance": auc_provenance,
             },
             "continuous_correction_pass_completion_identity": completion.completion_identity,
         }

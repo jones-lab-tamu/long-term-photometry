@@ -49,7 +49,8 @@ Results, or Guided Run.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
@@ -64,6 +65,7 @@ from photometry_pipeline.feature_event_provenance import (
     compute_feature_config_digest,
     feature_fields_from_config,
 )
+from photometry_pipeline.guided_identity import encode_canonical_value
 from photometry_pipeline.guided_continuous_rwd_review_binding import (
     GuidedContinuousRwdReviewBinding,
 )
@@ -143,6 +145,7 @@ class GuidedContinuousRwdPhasicDetectionResult:
     execution_strategy: str
     detector_parameter_identity: str
     per_roi: dict[str, GuidedContinuousRwdPhasicRoiDetection]
+    detector_parameter_identity_by_roi: dict[str, str] = field(default_factory=dict)
 
 
 def _check_cancellation(callback: Callable[[], bool] | None) -> None:
@@ -468,6 +471,7 @@ def detect_guided_continuous_rwd_phasic_features(
     review_binding: GuidedContinuousRwdReviewBinding,
     target_grid: GuidedContinuousRwdTargetGridDescription,
     config: Config,
+    per_roi_config: dict[str, Config] | None = None,
     cancellation_requested: Callable[[], bool] | None = None,
 ) -> GuidedContinuousRwdPhasicDetectionResult:
     """Run the existing phasic detector once per ROI on one accepted,
@@ -500,15 +504,16 @@ def detect_guided_continuous_rwd_phasic_features(
             cache, review_binding=review_binding, target_grid=target_grid
         )
 
-        event_signal_field = str(getattr(config, "event_signal", "dff"))
-        cache_field = "dff" if event_signal_field == "dff" else "delta_f"
-
         per_roi: dict[str, GuidedContinuousRwdPhasicRoiDetection] = {}
+        detector_parameter_identity_by_roi: dict[str, str] = {}
         global_start = global_end = None
         recording_source_file: str | None = None
         validated_fs_hz: float | None = None
         for roi_id in included_roi_ids:
             _check_cancellation(cancellation_requested)
+            roi_config = (per_roi_config or {}).get(roi_id, config)
+            event_signal_field = str(getattr(roi_config, "event_signal", "dff"))
+            cache_field = "dff" if event_signal_field == "dff" else "delta_f"
             event_trace, global_time_sec, fs_hz, source_file = _reconstruct_roi_trace(
                 cache,
                 roi_id,
@@ -540,10 +545,13 @@ def detect_guided_continuous_rwd_phasic_features(
                 global_time_sec,
                 fs_hz=fs_hz,
                 source_file=source_file,
-                config=config,
+                config=roi_config,
             )
             _check_cancellation(cancellation_requested)
             per_roi[roi_id] = detection
+            detector_parameter_identity_by_roi[roi_id] = compute_feature_config_digest(
+                feature_fields_from_config(roi_config)
+            )
             if global_start is None:
                 global_start = float(global_time_sec[0])
                 global_end = float(global_time_sec[-1])
@@ -552,9 +560,26 @@ def detect_guided_continuous_rwd_phasic_features(
         cache.close()
 
     assert global_start is not None and global_end is not None and validated_fs_hz is not None
-    detector_parameter_identity = compute_feature_config_digest(
-        feature_fields_from_config(config)
+    detector_digests = tuple(
+        detector_parameter_identity_by_roi[roi_id] for roi_id in included_roi_ids
     )
+    if len(set(detector_digests)) == 1:
+        # Preserve the existing global-only identity when every ROI consumed
+        # the same effective settings.
+        detector_parameter_identity = detector_digests[0]
+    else:
+        detector_parameter_identity = hashlib.sha256(
+            b"continuous-phasic-detector-config:v1\x00"
+            + encode_canonical_value(
+                [
+                    {
+                        "roi": roi_id,
+                        "config_digest": detector_parameter_identity_by_roi[roi_id],
+                    }
+                    for roi_id in included_roi_ids
+                ]
+            )
+        ).hexdigest()
     return GuidedContinuousRwdPhasicDetectionResult(
         recording_identity=review_binding.recording.recording_identity,
         target_grid_identity=target_grid.target_grid_identity,
@@ -567,4 +592,5 @@ def detect_guided_continuous_rwd_phasic_features(
         execution_strategy=EXECUTION_STRATEGY_ROI_AT_A_TIME,
         detector_parameter_identity=detector_parameter_identity,
         per_roi=per_roi,
+        detector_parameter_identity_by_roi=detector_parameter_identity_by_roi,
     )

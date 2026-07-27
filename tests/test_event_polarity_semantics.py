@@ -8,6 +8,7 @@ from photometry_pipeline.core.feature_extraction import (
     extract_features,
     get_peak_indices_for_trace,
 )
+from photometry_pipeline.core.reporting import build_continuous_phasic_auc_provenance
 from photometry_pipeline.core.types import Chunk
 
 
@@ -111,6 +112,31 @@ def test_auc_semantics_are_signed_by_selected_polarity():
     assert auc_pos == 3.0
     assert auc_neg == -3.0
     assert auc_both == 0.0
+
+
+def test_continuous_auc_provenance_uses_configured_signal_units_and_window_grid():
+    config = Config(
+        acquisition_mode="continuous",
+        event_signal="delta_f",
+        event_auc_baseline="median",
+        signal_excursion_polarity="negative",
+        peak_pre_filter="lowpass",
+        continuous_window_sec=90.0,
+        continuous_step_sec=90.0,
+        allow_partial_final_window=True,
+    )
+
+    provenance = build_continuous_phasic_auc_provenance(config)
+
+    assert provenance["event_signal"] == "delta_f"
+    assert provenance["auc_baseline_mode"] == "median"
+    assert provenance["polarity"] == "negative"
+    assert provenance["prefilter"] == "lowpass"
+    assert provenance["signal_units"] == "deltaF"
+    assert provenance["auc_units"] == "deltaF·s"
+    assert provenance["window_length_sec"] == 90.0
+    assert provenance["window_step_sec"] == 90.0
+    assert provenance["partial_final_window_policy"]["allow_partial_final_window"] is True
 
 
 def test_extract_features_default_matches_explicit_positive_mode():

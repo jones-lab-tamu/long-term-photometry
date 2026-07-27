@@ -177,10 +177,21 @@ def _assert_phasic_summary_sane(path: Path, expected_rows: int) -> pd.DataFrame:
     assert path.exists()
     df = pd.read_csv(path)
     assert len(df) == expected_rows
-    assert set(df["acquisition_mode"].astype(str)) == {"continuous"}
-    assert np.all(np.diff(df["elapsed_hour_mid"].to_numpy(dtype=float)) > 0)
+    assert list(df.columns) == [
+        "roi",
+        "window_index",
+        "window_start_sec",
+        "window_end_sec",
+        "window_midpoint_sec",
+        "window_duration_sec",
+        "phasic_signal_auc",
+        "event_count",
+        "event_rate_per_min",
+        "is_partial_final_window",
+    ]
+    assert np.all(np.diff(df["window_midpoint_sec"].to_numpy(dtype=float)) > 0)
     assert int(df["event_count"].sum()) > 0
-    assert np.all(np.isfinite(df["event_signal_auc"].to_numpy(dtype=float)))
+    assert np.all(np.isfinite(df["phasic_signal_auc"].to_numpy(dtype=float)))
     return df
 
 

@@ -31,14 +31,24 @@ _RETUNED_PHASIC_SUMMARY_TEMPLATE = "{prefix}_continuous_phasic_window_summary_{r
 _RETUNED_PHASIC_RATE_PLOT_TEMPLATE = "{prefix}_phasic_peak_rate_timeseries_{roi}.png"
 _RETUNED_PHASIC_COUNT_PLOT_TEMPLATE = "{prefix}_phasic_peak_count_timeseries_{roi}.png"
 _RETUNED_PHASIC_AUC_PLOT_TEMPLATE = "{prefix}_phasic_auc_timeseries_{roi}.png"
-_AUC_SEMANTICS = (
-    "aggregate finite-run AUC from feature_extraction output; not per-event AUC"
-)
 _CONTINUOUS_REQUIRED_ATTRS = (
     "window_index",
     "window_start_sec",
     "window_end_sec",
     "window_duration_sec",
+)
+
+CONTINUOUS_PHASIC_SUMMARY_COLUMNS = (
+    "roi",
+    "window_index",
+    "window_start_sec",
+    "window_end_sec",
+    "window_midpoint_sec",
+    "window_duration_sec",
+    "phasic_signal_auc",
+    "event_count",
+    "event_rate_per_min",
+    "is_partial_final_window",
 )
 
 
@@ -117,6 +127,59 @@ def _window_metadata_row(attrs: dict[str, Any], *, roi: str, chunk_id: int) -> d
     }
 
 
+def _phasic_window_metadata_row(
+    attrs: dict[str, Any],
+    *,
+    roi: str,
+    chunk_id: int,
+    local_time_sec: np.ndarray,
+) -> dict[str, Any]:
+    """Build truthful public window bounds from the cached time coordinates."""
+    _require_continuous_attrs(attrs, roi=roi, chunk_id=chunk_id)
+    local_time = np.asarray(local_time_sec, dtype=float).reshape(-1)
+    if (
+        local_time.size == 0
+        or not np.all(np.isfinite(local_time))
+        or (local_time.size > 1 and np.any(np.diff(local_time) < 0.0))
+    ):
+        raise RuntimeError(
+            "Continuous phasic summary requires finite, non-decreasing HDF5 "
+            f"time coordinates for roi={roi} chunk_id={chunk_id}."
+        )
+
+    start = float(attrs["window_start_sec"]) + float(local_time[0])
+    end = float(attrs["window_start_sec"]) + float(local_time[-1])
+    duration = end - start
+    configured_window_sec = _float_or_nan(attrs.get("continuous_window_sec"))
+    fs_hz = _float_or_nan(attrs.get("fs_hz"))
+    if np.isfinite(configured_window_sec) and np.isfinite(fs_hz) and fs_hz > 0.0:
+        expected_samples = int(round(configured_window_sec * fs_hz))
+        if expected_samples <= 0:
+            raise RuntimeError(
+                "Continuous phasic summary requires a positive configured "
+                f"window sample count for roi={roi} chunk_id={chunk_id}."
+            )
+        is_partial = int(local_time.size) < expected_samples
+    elif "is_partial_final_window" in attrs:
+        is_partial = bool(attrs["is_partial_final_window"])
+    else:
+        raise RuntimeError(
+            "Continuous phasic summary requires configured full-window metadata "
+            f"for roi={roi} chunk_id={chunk_id}."
+        )
+
+    return {
+        "roi": str(roi),
+        "chunk_id": int(chunk_id),
+        "window_index": int(round(float(attrs["window_index"]))),
+        "window_start_sec": start,
+        "window_end_sec": end,
+        "window_midpoint_sec": (start + end) / 2.0,
+        "window_duration_sec": duration,
+        "is_partial_final_window": bool(is_partial),
+    }
+
+
 def _float_or_nan(value: Any) -> float:
     try:
         return float(value)
@@ -143,31 +206,7 @@ def _write_roi_and_aggregate_tables(
     result["row_counts"]["all_rois"] = int(len(df))
 
 
-_PHASIC_SUMMARY_COLUMNS = [
-    "roi",
-    "source_file",
-    "chunk_id",
-    "window_index",
-    "window_start_sec",
-    "window_end_sec",
-    "window_duration_sec",
-    "elapsed_hour_start",
-    "elapsed_hour_mid",
-    "event_count",
-    "event_rate_per_min",
-    "event_rate_per_hour",
-    "event_signal_auc",
-    "event_signal_auc_semantics",
-    "event_signal_mean",
-    "event_signal_median",
-    "event_signal_std",
-    "event_signal_mad",
-    "is_partial_final_window",
-    "original_file_duration_sec",
-    "continuous_window_sec",
-    "continuous_step_sec",
-    "acquisition_mode",
-]
+_PHASIC_SUMMARY_COLUMNS = list(CONTINUOUS_PHASIC_SUMMARY_COLUMNS)
 
 
 def _load_phasic_features(features_path: str, *, roi: str | None = None) -> pd.DataFrame:
@@ -219,9 +258,16 @@ def _build_continuous_phasic_summary_dataframe(
             row_roi = str(record["roi"])
             chunk_id = int(record["chunk_id"])
             attrs = load_cache_chunk_attrs(cache, row_roi, chunk_id)
-            meta = _window_metadata_row(attrs, roi=row_roi, chunk_id=chunk_id)
+            (local_time,) = load_cache_chunk_fields(
+                cache, row_roi, chunk_id, ["time_sec"]
+            )
+            meta = _phasic_window_metadata_row(
+                attrs,
+                roi=row_roi,
+                chunk_id=chunk_id,
+                local_time_sec=local_time,
+            )
             duration_min = meta["window_duration_sec"] / 60.0
-            duration_hour = meta["window_duration_sec"] / 3600.0
             event_count = int(record["peak_count"])
             rows.append(
                 {
@@ -230,23 +276,59 @@ def _build_continuous_phasic_summary_dataframe(
                     "event_rate_per_min": (
                         event_count / duration_min if duration_min > 0 else np.nan
                     ),
-                    "event_rate_per_hour": (
-                        event_count / duration_hour if duration_hour > 0 else np.nan
-                    ),
-                    "event_signal_auc": _float_or_nan(record.get("auc")),
-                    "event_signal_auc_semantics": _AUC_SEMANTICS,
-                    "event_signal_mean": _float_or_nan(record.get("mean", np.nan)),
-                    "event_signal_median": _float_or_nan(record.get("median", np.nan)),
-                    "event_signal_std": _float_or_nan(record.get("std", np.nan)),
-                    "event_signal_mad": _float_or_nan(record.get("mad", np.nan)),
+                    "phasic_signal_auc": _float_or_nan(record.get("auc")),
                 }
             )
 
     if not rows:
         return pd.DataFrame(columns=_PHASIC_SUMMARY_COLUMNS)
-    return pd.DataFrame(rows, columns=_PHASIC_SUMMARY_COLUMNS).sort_values(
+    summary = pd.DataFrame(rows).sort_values(
         ["roi", "window_index", "chunk_id"]
     )
+    return summary.loc[:, _PHASIC_SUMMARY_COLUMNS].reset_index(drop=True)
+
+
+def validate_continuous_phasic_summary_file(
+    path: str,
+    *,
+    expected_roi: str | None = None,
+    expected_row_count: int | None = None,
+) -> str:
+    """Validate the current scientist-facing phasic window-table contract."""
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        return f"could not read continuous phasic summary ({exc})"
+
+    actual_columns = tuple(str(column) for column in df.columns)
+    if actual_columns != CONTINUOUS_PHASIC_SUMMARY_COLUMNS:
+        return (
+            "continuous phasic summary has the wrong columns: "
+            f"expected {list(CONTINUOUS_PHASIC_SUMMARY_COLUMNS)!r}, "
+            f"got {list(actual_columns)!r}"
+        )
+    if expected_row_count is not None and len(df) != int(expected_row_count):
+        return (
+            "continuous phasic summary row count does not match the completion "
+            f"index (expected {int(expected_row_count)}, got {len(df)})"
+        )
+    if expected_roi is not None:
+        observed_rois = set(df["roi"].astype(str))
+        if observed_rois != {str(expected_roi)}:
+            return (
+                "continuous phasic summary ROI identity does not match the "
+                f"completion index (expected {str(expected_roi)!r}, got {sorted(observed_rois)!r})"
+            )
+
+    window_indices = pd.to_numeric(df["window_index"], errors="coerce")
+    if window_indices.isna().any() or not np.all(
+        np.equal(window_indices.to_numpy(dtype=float), np.floor(window_indices.to_numpy(dtype=float)))
+    ):
+        return "continuous phasic summary contains a non-integer window identity"
+    expected_indices = list(range(len(df)))
+    if sorted(window_indices.astype(int).tolist()) != expected_indices:
+        return "continuous phasic summary window identities are incomplete or duplicated"
+    return ""
 
 
 def generate_continuous_phasic_summary(
@@ -329,9 +411,9 @@ def _generate_retuned_phasic_plots(
         (
             "auc",
             _RETUNED_PHASIC_AUC_PLOT_TEMPLATE.format(prefix=output_prefix, roi=roi),
-            "event_signal_auc",
-            "Aggregate event-signal AUC per window",
-            f"{roi} retuned continuous aggregate event-signal AUC",
+            "phasic_signal_auc",
+            "Phasic signal AUC per window",
+            f"{roi} retuned continuous phasic signal AUC",
         ),
     ]
     plots: dict[str, str] = {}
@@ -340,7 +422,7 @@ def _generate_retuned_phasic_plots(
         out_path = os.path.join(output_dir, filename)
         ok = _plot_xy_from_summary(
             df=df,
-            x_col="elapsed_hour_mid",
+            x_col="window_midpoint_sec",
             y_col=y_col,
             y_label=y_label,
             title=title,
@@ -354,7 +436,7 @@ def _generate_retuned_phasic_plots(
                     "output": filename,
                     "reason": (
                         "No finite values available for required columns "
-                        f"elapsed_hour_mid/{y_col}"
+                        f"window_midpoint_sec/{y_col}"
                     ),
                 }
             )
@@ -580,6 +662,8 @@ def _plot_xy_from_summary(
     plot_df = plot_df[np.isfinite(plot_df[x_col]) & np.isfinite(plot_df[y_col])]
     if plot_df.empty:
         return False
+    if x_col == "window_midpoint_sec":
+        plot_df[x_col] = plot_df[x_col] / 3600.0
     plot_df = plot_df.sort_values(x_col)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -1028,16 +1112,16 @@ def generate_continuous_phasic_plots(run_dir: str, *, logger=None) -> dict[str, 
             ),
             (
                 PHASIC_AUC_PLOT_FILENAME,
-                "event_signal_auc",
-                "Aggregate event-signal AUC per window",
-                f"{roi} continuous aggregate event-signal AUC",
+                "phasic_signal_auc",
+                "Phasic signal AUC per window",
+                f"{roi} continuous phasic signal AUC",
             ),
         ]
         for filename, y_col, y_label, title in plot_specs:
             out_path = os.path.join(summary_dir, filename)
             ok = _plot_xy_from_summary(
                 df=df,
-                x_col="elapsed_hour_mid",
+                x_col="window_midpoint_sec",
                 y_col=y_col,
                 y_label=y_label,
                 title=title,
@@ -1055,7 +1139,7 @@ def generate_continuous_phasic_plots(run_dir: str, *, logger=None) -> dict[str, 
                 _skip(
                     result,
                     f"{roi}/summary/{filename}",
-                    f"No finite values available for required columns elapsed_hour_mid/{y_col}",
+                    f"No finite values available for required columns window_midpoint_sec/{y_col}",
                 )
     if not any_table:
         _skip(

@@ -13,6 +13,10 @@ from photometry_pipeline import guided_continuous_rwd_phasic_detection as detect
 from photometry_pipeline.guided_continuous_rwd_phasic_run import (
     execute_guided_continuous_rwd_phasic_run,
 )
+from photometry_pipeline.guided_continuous_rwd_review_binding import (
+    build_guided_continuous_rwd_review_binding,
+)
+from photometry_pipeline.guided_new_analysis_plan import GuidedPlanFeatureEventChoice
 from photometry_pipeline.guided_continuous_rwd_tonic_run import (
     execute_guided_continuous_rwd_tonic_run,
 )
@@ -20,6 +24,7 @@ from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
     list_cache_rois,
+    load_cache_chunk_attrs,
     load_cache_chunk_fields,
     open_phasic_cache,
     open_tonic_cache,
@@ -168,6 +173,63 @@ def test_successful_multi_chunk_combined_run_publishes_current_success(
     assert "completed" in narrative
     for internal_term in ("d3a", "d3b-a", "d3b-b", "kernel", "storage chunk"):
         assert internal_term not in narrative
+
+
+def test_combined_provenance_uses_accepted_window_step_when_distinct(
+    accepted_case, real_config, tmp_path
+):
+    binding, grid, draft, contract, source = accepted_case
+    updated_draft = dataclasses.replace(
+        draft,
+        continuous_step_sec=37.5,
+        feature_event_profile_status="applied",
+        feature_event_profile_id="accepted-default",
+        feature_event_values={
+            "event_signal": real_config.event_signal,
+            "signal_excursion_polarity": real_config.signal_excursion_polarity,
+            "peak_threshold_method": real_config.peak_threshold_method,
+            "peak_threshold_k": real_config.peak_threshold_k,
+            "peak_threshold_percentile": real_config.peak_threshold_percentile,
+            "peak_threshold_abs": real_config.peak_threshold_abs,
+            "peak_min_distance_sec": real_config.peak_min_distance_sec,
+            "peak_min_prominence_k": real_config.peak_min_prominence_k,
+            "peak_min_width_sec": real_config.peak_min_width_sec,
+            "peak_pre_filter": real_config.peak_pre_filter,
+            "event_auc_baseline": real_config.event_auc_baseline,
+        },
+        feature_event_explicitly_applied=True,
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id=roi_id,
+                feature_event_profile_id=f"accepted-{roi_id}",
+                config_fields={"peak_pre_filter": real_config.peak_pre_filter},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+            for roi_id in ("ROI1", "ROI2")
+        ],
+    )
+    updated_binding = build_guided_continuous_rwd_review_binding(
+        updated_draft,
+        recording=binding.recording,
+        continuity_evaluation=binding.continuity_evaluation,
+        current_source_path=source,
+    )
+    updated_case = (updated_binding, grid, updated_draft, contract, source)
+    inputs = _pass_inputs(updated_case)
+    result = _run_combined(inputs, real_config, tmp_path)
+    with open(os.path.join(result.run_dir, "run_report.json"), encoding="utf-8") as handle:
+        report = json.load(handle)
+    provenance = report["phasic_analysis"]["window_summary_provenance"]
+    assert provenance["window_length_sec"] == 90.0
+    assert provenance["window_step_sec"] == 37.5
+    cache = open_phasic_cache(result.phasic_cache_path)
+    try:
+        attrs = load_cache_chunk_attrs(cache, "ROI1", 0)
+        assert attrs["continuous_window_sec"] == pytest.approx(90.0)
+        assert attrs["continuous_step_sec"] == pytest.approx(37.5)
+    finally:
+        cache.close()
 
 
 # ---------------------------------------------------------------------------
