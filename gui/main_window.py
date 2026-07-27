@@ -14224,18 +14224,33 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_prepare_worker = worker
         self._guided_continuous_rwd_prepare_active_token = token
         self._guided_continuous_rwd_prepare_cancel_event = cancel_event
+        # These are emitted from the worker's own thread, and a lambda has no
+        # receiver object for Qt to take a thread from, so it would run there
+        # too -- installing the prepared run, enabling Run, and writing the
+        # setup-check text all off the GUI thread. Post each handler back to
+        # this window instead, the same way the recording check does
+        # (CR1-F1-E, CR1-F1-G). The captured token and worker keep the
+        # currency checks exactly as they were.
         thread.started.connect(worker.run)
         worker.succeeded.connect(
             lambda prepared_run, t=token, w=worker: (
-                self._on_guided_continuous_rwd_preparation_succeeded(
-                    t, w, prepared_run
+                self._post_to_guided_gui_thread(
+                    lambda: (
+                        self._on_guided_continuous_rwd_preparation_succeeded(
+                            t, w, prepared_run
+                        )
+                    )
                 )
             )
         )
         worker.failed.connect(
             lambda message, t=token, w=worker: (
-                self._on_guided_continuous_rwd_preparation_failed(
-                    t, w, message
+                self._post_to_guided_gui_thread(
+                    lambda: (
+                        self._on_guided_continuous_rwd_preparation_failed(
+                            t, w, message
+                        )
+                    )
                 )
             )
         )
@@ -14246,7 +14261,11 @@ class MainWindow(QMainWindow):
         # are cleared while the QThread wrapper is still valid.
         thread.finished.connect(
             lambda w=worker, th=thread: (
-                self._cleanup_guided_continuous_rwd_preparation(w, th)
+                self._post_to_guided_gui_thread(
+                    lambda: (
+                        self._cleanup_guided_continuous_rwd_preparation(w, th)
+                    )
+                )
             )
         )
         thread.finished.connect(thread.deleteLater)
@@ -14435,13 +14454,21 @@ class MainWindow(QMainWindow):
             return False, "Choose where to save results before running."
         return True, "Continuous analysis is ready to run."
 
+    def _guided_continuous_rwd_owns_run_display(self) -> bool:
+        """Whether continuous readiness owns the Run control and setup check.
+
+        One predicate so the Run affordance and the setup-check text cannot
+        end up answering to different authorities (CR1-F1-G).
+        """
+        return bool(
+            self._guided_continuous_rwd_live_draft() is not None
+            or getattr(self, "_guided_continuous_rwd_execution_active", False)
+        )
+
     def _refresh_guided_continuous_rwd_run_readiness_display(self) -> bool:
         """Render the continuous Run affordance. Returns True when this
         display owns the Run control for the current plan."""
-        if (
-            self._guided_continuous_rwd_live_draft() is None
-            and not getattr(self, "_guided_continuous_rwd_execution_active", False)
-        ):
+        if not self._guided_continuous_rwd_owns_run_display():
             return False
         ready, summary = self._guided_continuous_rwd_run_readiness()
         button = getattr(self, "_guided_run_btn", None)
@@ -14461,6 +14488,22 @@ class MainWindow(QMainWindow):
             )
             cancel_btn.setVisible(stoppable)
             cancel_btn.setEnabled(stoppable)
+        # The setup check and the Run control must describe the same thing.
+        # Preparation finishes on its own, long after any click, so the check
+        # is restated here rather than left holding whatever it said when the
+        # scientist last pressed the button (CR1-F1-G).
+        status_label = getattr(
+            self, "_guided_backend_validation_status_label", None
+        )
+        if status_label is not None:
+            status_label.setText(
+                "Setup check passed. Ready to run." if ready else summary
+            )
+        details_label = getattr(
+            self, "_guided_backend_validation_details_label", None
+        )
+        if details_label is not None:
+            details_label.setText("")
         return True
 
     def _on_guided_continuous_rwd_cancel_clicked(self) -> None:
@@ -14964,12 +15007,41 @@ class MainWindow(QMainWindow):
                 return message
         return None
 
+    def _check_guided_continuous_rwd_setup(self) -> None:
+        """Report the setup check for one continuous recording (CR1-F1-G).
+
+        A continuous plan is made ready by its own accepted preparation, not
+        by the first-subset validator, which only ever describes repeated
+        sessions and refuses anything else. Asking that validator about a
+        continuous recording produced a refusal that contradicted the
+        preparation running beside it, so this reports the continuous
+        authority instead -- the same readiness the Run control itself uses.
+
+        Preparation normally starts when the scientist arrives on this page;
+        this reuses that one launcher, which declines to start a second for a
+        plan already preparing, already prepared, or already failed.
+        """
+        # Any outcome here came from the intermittent validator and cannot
+        # describe this plan; leaving it would keep its refusal on screen.
+        self._guided_backend_validation_outcome = None
+        self._guided_backend_validation_outcome_revision = None
+        if not self._guided_continuous_rwd_preparation_active():
+            # One preparation at a time: while one is in flight this button
+            # reports it rather than starting a rival for the same plan.
+            self._maybe_start_guided_continuous_rwd_preparation()
+        # This renders both the Run control and the setup-check text from the
+        # one continuous readiness result.
+        self._refresh_guided_continuous_rwd_run_readiness_display()
+
     def _on_guided_backend_validate_clicked(self) -> None:
         from photometry_pipeline.guided_plan_identity import (
             compute_guided_new_analysis_draft_plan_identity,
         )
 
         if getattr(self, "_guided_backend_validation_active", False):
+            return
+        if self._guided_continuous_rwd_live_draft() is not None:
+            self._check_guided_continuous_rwd_setup()
             return
         # A new attempt owns its own explanation: drop any reason left by a
         # previous failed derivation before this attempt runs.
@@ -15034,6 +15106,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_guided_backend_validation_display(self) -> None:
         self._refresh_guided_run_readiness_display()
+        if self._guided_continuous_rwd_owns_run_display():
+            # That refresh already stated the continuous setup check. The
+            # intermittent wording below would overwrite it with an outcome
+            # that never described this plan (CR1-F1-G).
+            return
         status_label = getattr(
             self,
             "_guided_backend_validation_status_label",
