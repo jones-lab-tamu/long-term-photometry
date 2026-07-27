@@ -131,15 +131,23 @@ def _viewer(qapp) -> RunReportViewer:
 # ---------------------------------------------------------------------------
 
 
-def test_full_control_load_report_routes_continuous_runs_to_continuous_branch(
+def test_native_continuous_load_report_routes_to_saved_artifact_viewer(
     qapp, combined_run
 ):
     viewer = _viewer(qapp)
     loaded = viewer.load_report(combined_run.run_dir)
     assert loaded is True
-    assert not viewer._continuous_workspace.isHidden()
-    assert viewer._workspace.isHidden()
-    assert viewer._continuous_overview is not None
+    assert viewer._continuous_workspace.isHidden()
+    assert not viewer._workspace.isHidden()
+    assert viewer.available_view_tabs() == [
+        "Correction impact",
+        "Tonic overview",
+        "Phasic signal AUC",
+        "Peak rate",
+        "Phasic window summary",
+        "Tonic window summary",
+        "Detected events",
+    ]
 
 
 def test_guided_entry_point_uses_same_continuous_branch_via_preloaded_overview(

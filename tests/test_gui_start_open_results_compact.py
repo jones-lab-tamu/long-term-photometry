@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -65,6 +65,11 @@ def _snapshot_tree(root: Path) -> dict[str, tuple[int, int, bytes]]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+class _LoaderSignalSource(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
 
 
 def test_start_open_uses_overview_worker_and_passes_overview_to_viewer(
@@ -205,3 +210,59 @@ def test_start_open_failure_returns_to_start_and_restores_action(
     assert str(selected) in message
     assert "The run was not changed." in message
     assert window._guided_start_open_results_btn.isEnabled() is True
+
+
+def test_stale_start_open_success_cannot_overwrite_newer_selection(
+    window, tmp_path, monkeypatch
+):
+    active_worker = _LoaderSignalSource()
+    stale_worker = _LoaderSignalSource()
+    newer = tmp_path / "newer"
+    older = tmp_path / "older"
+    calls = []
+
+    window._guided_start_open_results_loading = True
+    window._guided_start_open_results_worker = active_worker
+    window._guided_start_open_results_path = str(newer)
+    window._guided_start_open_results_selected_path = str(newer)
+    monkeypatch.setattr(
+        window._guided_report_viewer,
+        "load_report",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
+    )
+    stale_worker.succeeded.connect(window._on_guided_start_open_results_succeeded)
+
+    stale_worker.succeeded.emit(
+        {
+            "native_saved_artifacts": True,
+            "run_dir": str(older),
+            "artifact_index": {"run_dir": str(older)},
+        }
+    )
+    QApplication.processEvents()
+
+    assert calls == []
+    assert window._guided_start_open_results_loading is True
+    assert window._guided_start_open_results_path == str(newer)
+    window._set_guided_start_open_results_loading(False)
+
+
+def test_stale_start_open_failure_cannot_clear_newer_ready_view(
+    window, monkeypatch
+):
+    active_worker = _LoaderSignalSource()
+    stale_worker = _LoaderSignalSource()
+    clears = []
+
+    window._guided_start_open_results_loading = False
+    window._guided_start_open_results_worker = active_worker
+    monkeypatch.setattr(
+        window._guided_report_viewer, "clear", lambda: clears.append(True)
+    )
+    stale_worker.failed.connect(window._on_guided_start_open_results_failed)
+
+    stale_worker.failed.emit("old load failed")
+    QApplication.processEvents()
+
+    assert clears == []
+    assert window._guided_start_open_results_loading is False

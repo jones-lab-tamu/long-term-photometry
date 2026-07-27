@@ -4,11 +4,12 @@ RunReportViewer
 Complete-state results workspace driven by run outputs under <run_dir>.
 """
 
+import csv
 import io
 import math
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from PySide6.QtCore import Qt, QSize, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
@@ -37,6 +38,10 @@ from gui.run_report_parser import (
     classify_completed_run_terminal_state,
     get_scientist_completion_summary,
     is_continuous_rwd_run_mode,
+    declared_completed_run_mode,
+    is_guided_continuous_saved_artifact_run_mode,
+    build_guided_continuous_saved_artifact_index,
+    SavedArtifactIndexError,
 )
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from photometry_pipeline.guided_completed_applied_dff_reload import (
@@ -67,6 +72,8 @@ from photometry_pipeline.completed_continuous_rwd_review import (
 )
 from photometry_pipeline.continuous_outputs import CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
 
+
+NATIVE_CSV_PREVIEW_ROW_LIMIT = 5000
 
 TAB_VERIFICATION = "Verification"
 TAB_TONIC = "Tonic"
@@ -101,6 +108,11 @@ class RunReportViewer(QWidget):
         self._run_summary_path = ""
         self._continuous_overview: ContinuousRunOverview | None = None
         self._continuous_selected_roi = ""
+        self._native_continuous_artifact_index: Dict[str, Any] | None = None
+        self._native_continuous_artifacts_by_roi: Dict[str, List[Dict[str, Any]]] = {}
+        self._native_continuous_artifact_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._native_continuous_context: Dict[str, Any] = {}
+        self._native_continuous_mode = False
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._phasic_review_model: CompletedRunReviewModel | None = None
@@ -285,7 +297,7 @@ class RunReportViewer(QWidget):
         self._open_region_tables_btn = QPushButton("Tables")
         self._open_region_tables_btn.setToolTip("Open the selected region tables folder.")
         self._open_region_tables_btn.clicked.connect(
-            lambda _checked=False: self._open_selected_region_subpath("tables")
+            lambda _checked=False: self._open_selected_table_or_region_tables()
         )
         selector_row.addWidget(self._open_region_tables_btn)
         selector_row.addStretch()
@@ -304,6 +316,15 @@ class RunReportViewer(QWidget):
         self._image_title_label.setAlignment(Qt.AlignCenter)
         self._image_title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         viewer_col.addWidget(self._image_title_label)
+
+        self._artifact_metadata_label = QLabel("")
+        self._artifact_metadata_label.setObjectName("completedRunArtifactMetadata")
+        self._artifact_metadata_label.setAlignment(Qt.AlignCenter)
+        self._artifact_metadata_label.setWordWrap(True)
+        self._artifact_metadata_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._artifact_metadata_label.setStyleSheet("font-size: 11px; color: #666;")
+        self._artifact_metadata_label.setVisible(False)
+        viewer_col.addWidget(self._artifact_metadata_label)
 
         self._image_label = InteractiveImageLabel()
         self._image_label.setAlignment(Qt.AlignCenter)
@@ -337,6 +358,21 @@ class RunReportViewer(QWidget):
             allow_upscale_in_fit=True,
             on_zoom_mode_changed=self._on_zoom_mode_changed,
         )
+
+        self._artifact_table = QTableWidget(0, 0)
+        self._artifact_table.setObjectName("completedRunArtifactTable")
+        self._artifact_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._artifact_table.setSortingEnabled(False)
+        self._artifact_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._artifact_table.setWordWrap(False)
+        self._artifact_table_scroll = QScrollArea()
+        self._artifact_table_scroll.setWidgetResizable(True)
+        self._artifact_table_scroll.setFrameShape(QFrame.NoFrame)
+        self._artifact_table_scroll.setWidget(self._artifact_table)
+        self._artifact_table_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._artifact_table_scroll.setMinimumHeight(260)
+        self._artifact_table_scroll.setVisible(False)
+        viewer_col.addWidget(self._artifact_table_scroll, 1)
 
         nav_row = QHBoxLayout()
         self._prev_btn = QPushButton("<")
@@ -530,6 +566,11 @@ class RunReportViewer(QWidget):
         self._run_summary_path = ""
         self._continuous_overview = None
         self._continuous_selected_roi = ""
+        self._native_continuous_artifact_index = None
+        self._native_continuous_artifacts_by_roi = {}
+        self._native_continuous_artifact_by_key = {}
+        self._native_continuous_context = {}
+        self._native_continuous_mode = False
         self._continuous_overview_label.setText("")
         self._continuous_roi_row.setVisible(False)
         self._continuous_roi_combo.blockSignals(True)
@@ -559,6 +600,12 @@ class RunReportViewer(QWidget):
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
         self._set_zoom_mode(False)
+        self._artifact_metadata_label.setText("")
+        self._artifact_metadata_label.setVisible(False)
+        self._artifact_table.setRowCount(0)
+        self._artifact_table.setColumnCount(0)
+        self._artifact_table_scroll.setVisible(False)
+        self._image_scroll.setVisible(True)
 
         self._set_status_message(
             "No completed results loaded. Run the pipeline or open a completed run folder.",
@@ -593,9 +640,34 @@ class RunReportViewer(QWidget):
         self.clear()
         self._current_run_dir = out_dir
 
+        # The Guided worker supplies the prepared native index. Honor it
+        # directly so the GUI does not repeat terminal classification,
+        # manifest parsing, or image validation. Direct callers that provide
+        # only the marker retain the bounded synchronous fallback below.
+        if (
+            isinstance(review_overview, dict)
+            and review_overview.get("native_saved_artifacts")
+        ):
+            prepared_index = review_overview.get("artifact_index")
+            if isinstance(prepared_index, dict):
+                return self._install_native_continuous_artifact_index(
+                    out_dir, prepared_index
+                )
+            return self._load_native_continuous_saved_artifacts(
+                out_dir
+            )
+        routing_classification = None
         if review_overview is None:
             routing_classification = classify_completed_run_terminal_state(out_dir)
-            routing_run_mode = routing_classification.run_mode or {}
+            routing_run_mode = (
+                routing_classification.run_mode
+                or declared_completed_run_mode(out_dir)
+                or {}
+            )
+            if is_guided_continuous_saved_artifact_run_mode(routing_run_mode):
+                return self._load_native_continuous_saved_artifacts(
+                    out_dir, classification=routing_classification
+                )
             if routing_classification.is_success and is_continuous_rwd_run_mode(
                 routing_run_mode
             ):
@@ -803,21 +875,134 @@ class RunReportViewer(QWidget):
 
         return True
 
+    def _load_native_continuous_saved_artifacts(
+        self, run_dir: str, *, classification=None
+    ) -> bool:
+        """Load the I3 native Guided continuous package into this viewer.
+
+        Membership, ROI order, paths, and saved-image provenance come from the
+        completion manifest.  This branch intentionally has no cache reader,
+        trace loader, coordinate mapper, detector, or plotting call.
+        """
+        try:
+            artifact_index = build_guided_continuous_saved_artifact_index(
+                run_dir, classification=classification
+            )
+        except SavedArtifactIndexError as exc:
+            self._set_status_message(str(exc), level="error")
+            self._workspace.hide()
+            self._continuous_workspace.hide()
+            return False
+
+        return self._install_native_continuous_artifact_index(
+            run_dir, artifact_index
+        )
+
+    def install_prepared_native_continuous_artifacts(
+        self, run_dir: str, artifact_index: Dict[str, Any]
+    ) -> bool:
+        """Install the already-validated native package from the Guided worker."""
+        self.clear()
+        return self._install_native_continuous_artifact_index(
+            run_dir, artifact_index
+        )
+
+    def _install_native_continuous_artifact_index(
+        self, run_dir: str, artifact_index: Dict[str, Any]
+    ) -> bool:
+        """Install a prepared index without rereading or revalidating files."""
+        resolved_run_dir = os.path.realpath(str(run_dir))
+        indexed_run_dir = os.path.realpath(
+            str(artifact_index.get("run_dir") or "")
+        )
+        if not indexed_run_dir or indexed_run_dir != resolved_run_dir:
+            self._set_status_message(
+                "The prepared completed-analysis package belongs to a different run.",
+                level="error",
+            )
+            self._workspace.hide()
+            self._continuous_workspace.hide()
+            return False
+        try:
+            roi_order = [str(roi) for roi in artifact_index.get("roi_order", ())]
+            all_artifacts = list(artifact_index.get("artifacts") or [])
+            if not roi_order or not all_artifacts:
+                raise ValueError("the prepared artifact index is empty")
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._set_status_message(
+                f"The prepared completed-analysis package is invalid ({exc}).",
+                level="error",
+            )
+            self._workspace.hide()
+            self._continuous_workspace.hide()
+            return False
+
+        self._native_continuous_mode = True
+        self._native_continuous_artifact_index = artifact_index
+        self._native_continuous_context = {
+            "timeline": dict(artifact_index.get("timeline") or {}),
+            "window_timing": dict(artifact_index.get("window_timing") or {}),
+            "run_mode": dict(artifact_index.get("run_mode") or {}),
+        }
+        roi_order = [str(roi) for roi in artifact_index.get("roi_order", ())]
+        all_artifacts = list(artifact_index.get("artifacts") or [])
+        self._native_continuous_artifacts_by_roi = {roi: [] for roi in roi_order}
+        self._native_continuous_artifact_by_key = {}
+        self._region_paths = {
+            roi: os.path.join(indexed_run_dir, roi)
+            for roi in roi_order
+        }
+        self._region_tab_images = {roi: {} for roi in roi_order}
+
+        run_level_artifacts = [
+            record for record in all_artifacts if record.get("scope") == "run"
+        ]
+        for roi in roi_order:
+            records = [
+                record for record in all_artifacts if record.get("roi") == roi
+            ]
+            # The run-level event table is available from every ROI selection,
+            # but the manifest-backed package itself retains one record only.
+            records.extend(run_level_artifacts)
+            records.sort(key=lambda record: int(record.get("order", 0)))
+            self._native_continuous_artifacts_by_roi[roi] = records
+            for record in records:
+                label = str(record.get("label") or "")
+                if label:
+                    self._native_continuous_artifact_by_key[(roi, label)] = record
+                    if record.get("artifact_type") == "image":
+                        self._region_tab_images[roi][label] = [str(record["path"])]
+                    else:
+                        self._region_tab_images[roi].setdefault(label, [])
+
+        self._current_run_dir = indexed_run_dir
+        self._run_summary_path = os.path.join(self._current_run_dir, "run_report.json")
+        self._set_status_message("Results workspace — continuous analysis", level="ready")
+        self._workspace.show()
+        self._continuous_workspace.hide()
+        self._region_combo.blockSignals(True)
+        self._region_combo.clear()
+        self._region_combo.addItems(roi_order)
+        self._region_combo.blockSignals(False)
+        if self._region_combo.count() > 0:
+            self._region_combo.setCurrentIndex(0)
+            self._on_region_changed(0)
+        else:
+            self._show_no_image("No region is available in the completed analysis.")
+            self._refresh_inline_actions()
+        return True
+
     def load_continuous_results(
         self,
         run_dir: str,
         overview: ContinuousRunOverview | None = None,
     ) -> bool:
-        """Load the read-only continuous-recording Results presentation
-        (CR1-E1-B).
+        """Load the retained legacy/Full-Control continuous presentation.
 
-        The sole continuous loading/validation layer is
-        ``photometry_pipeline.completed_continuous_rwd_review`` (CR1-E1-A):
-        this method never parses run_report.json, summary CSVs, event CSVs,
-        or HDF5 caches directly. ``overview`` may be supplied already-loaded
-        (the Guided entry point loads it once, off the GUI thread, to decide
-        routing) or left unset so this method loads it itself (the Full
-        Control entry point).
+        Native Guided continuous runs are diverted to the manifest-backed
+        generic artifact viewer before this retained compatibility path is
+        entered.  The old trace workspace remains only for explicit
+        non-native callers whose existing behavior is outside CR1-F1-I4.
         """
         self.clear()
         self._current_run_dir = run_dir
@@ -1424,6 +1609,7 @@ class RunReportViewer(QWidget):
     def _on_tab_changed(self, _index: int):
         """Refresh image viewer when tab changes."""
         self._refresh_active_image(reset_index=True)
+        self._refresh_inline_actions()
 
     def _selected_region(self) -> str:
         return self._region_combo.currentText().strip()
@@ -1509,11 +1695,35 @@ class RunReportViewer(QWidget):
 
     def available_regions(self) -> List[str]:
         """Public region list for parent workspace integrations."""
+        if self._native_continuous_mode and self._native_continuous_artifact_index:
+            return [
+                str(roi)
+                for roi in self._native_continuous_artifact_index.get("roi_order", ())
+            ]
         return sorted(self._region_paths.keys(), key=lambda s: s.lower())
 
     def has_loaded_results(self) -> bool:
         """Return True when a completed run workspace is currently loaded."""
         return bool(self._region_paths)
+
+    def available_artifacts(self, roi: str | None = None) -> List[Dict[str, Any]]:
+        """Return the current native saved-artifact records for inspection/tests."""
+        if not self._native_continuous_mode:
+            return []
+        selected = str(roi or self._selected_region()).strip()
+        return [
+            dict(record)
+            for record in self._native_continuous_artifacts_by_roi.get(selected, [])
+        ]
+
+    def active_artifact_path(self) -> str:
+        """Return the selected saved image or table path, if any."""
+        if not self._native_continuous_mode:
+            return self.active_image_path()
+        region = self._selected_region()
+        label = self._selected_tab()
+        record = self._native_continuous_artifact_by_key.get((region, label))
+        return str(record.get("path") or "") if record is not None else ""
 
     def available_view_tabs(self) -> List[str]:
         """Return currently visible tab labels for the selected region."""
@@ -1532,6 +1742,9 @@ class RunReportViewer(QWidget):
 
     def _rebuild_tabs_for_selected_region(self):
         region = self._selected_region()
+        if self._native_continuous_mode:
+            self._rebuild_native_tabs_for_selected_region(region)
+            return
         tab_map = self._region_tab_images.get(region, {})
         available_tabs = [t for t in TAB_ORDER if tab_map.get(t)]
         model = self._phasic_review_model
@@ -1571,10 +1784,34 @@ class RunReportViewer(QWidget):
         self._tabs.setCurrentIndex(idx)
         self._refresh_active_image(reset_index=True)
 
+    def _rebuild_native_tabs_for_selected_region(self, region: str) -> None:
+        """Build friendly artifact tabs from the in-memory manifest index."""
+        records = self._native_continuous_artifacts_by_roi.get(region, [])
+        labels = [str(record.get("label") or "") for record in records]
+        labels = [label for label in labels if label]
+        current_tab = self._selected_tab()
+        self._tabs.blockSignals(True)
+        while self._tabs.count() > 0:
+            self._tabs.removeTab(0)
+        for label in labels:
+            self._tabs.addTab(QWidget(), label)
+        self._tabs.blockSignals(False)
+        if not labels:
+            self._show_no_image("No saved artifacts are available for the selected region.")
+            return
+        idx = labels.index(current_tab) if current_tab in labels else 0
+        self._tabs.setCurrentIndex(idx)
+        self._refresh_active_image(reset_index=True)
+
     def _current_tab_images(self) -> List[str]:
         key = self._tab_key()
         region, tab = key
         if not region or not tab:
+            return []
+        if self._native_continuous_mode:
+            record = self._native_continuous_artifact_by_key.get((region, tab))
+            if record is not None and record.get("artifact_type") == "image":
+                return [str(record.get("path") or "")]
             return []
         override = self._external_tab_image_overrides.get(key, [])
         if override:
@@ -1588,6 +1825,9 @@ class RunReportViewer(QWidget):
         return (self._selected_region(), self._selected_tab())
 
     def _refresh_active_image(self, reset_index: bool):
+        if self._native_continuous_mode:
+            self._refresh_native_artifact()
+            return
         images = self._current_tab_images()
         if not images:
             self._show_no_image("No images available for this tab.")
@@ -1612,6 +1852,154 @@ class RunReportViewer(QWidget):
         self._prev_btn.setVisible(multi)
         self._next_btn.setVisible(multi)
         self._image_counter_label.setText(f"{idx + 1}/{n}" if multi else "")
+
+    def _refresh_native_artifact(self) -> None:
+        region = self._selected_region()
+        label = self._selected_tab()
+        record = self._native_continuous_artifact_by_key.get((region, label))
+        if record is None:
+            self._show_no_image("No saved artifact is available for this selection.")
+            return
+
+        self._set_native_artifact_metadata(record, region)
+        self._prev_btn.setVisible(False)
+        self._next_btn.setVisible(False)
+        self._image_counter_label.setText("")
+        artifact_type = str(record.get("artifact_type") or "")
+        path = str(record.get("path") or "")
+        if artifact_type == "image":
+            self._artifact_table_scroll.setVisible(False)
+            self._image_scroll.setVisible(True)
+            self._active_image_path = path
+            self._active_pixmap = QPixmap()
+            self._image_title_label.setText(str(record.get("label") or "Saved figure"))
+            self._set_zoom_mode(False)
+            self._set_image(path)
+            return
+
+        if artifact_type == "table":
+            self._active_image_path = ""
+            self._active_pixmap = QPixmap()
+            self._set_zoom_mode(False)
+            self._image_scroll.setVisible(False)
+            self._artifact_table_scroll.setVisible(True)
+            self._image_title_label.setText(str(record.get("label") or "Saved table"))
+            try:
+                rows, total_rows = self._read_saved_csv_table(path)
+            except (OSError, csv.Error, ValueError) as exc:
+                self._artifact_table.setRowCount(0)
+                self._artifact_table.setColumnCount(0)
+                self._set_status_message(
+                    f"The saved {record.get('label', 'table')} could not be displayed "
+                    f"because it is missing or invalid ({exc}).",
+                    level="error",
+                )
+                return
+            self._populate_saved_csv_table(rows)
+            preview_message = None
+            displayed_rows = len(rows) - 1
+            if total_rows > displayed_rows:
+                preview_message = (
+                    f"Showing first {displayed_rows:,} of {total_rows:,} rows. "
+                    "Open the CSV to inspect the complete table."
+                )
+            self._set_native_artifact_metadata(
+                record, region, table_preview=preview_message
+            )
+            return
+
+        self._show_no_image("The selected saved artifact has an unsupported type.")
+
+    @staticmethod
+    def _read_saved_csv_table(
+        path: str,
+        *,
+        preview_limit: int = NATIVE_CSV_PREVIEW_ROW_LIMIT,
+    ) -> Tuple[List[List[str]], int]:
+        if not path or not os.path.isfile(path):
+            raise OSError("file is missing")
+        if preview_limit < 1:
+            raise ValueError("the CSV preview limit must be positive")
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            try:
+                headers = next(reader)
+            except StopIteration as exc:
+                raise ValueError("the table has no column header") from exc
+            if not headers:
+                raise ValueError("the table has no column header")
+            rows = [headers]
+            width = len(headers)
+            total_rows = 0
+            for row in reader:
+                if len(row) != width:
+                    raise ValueError(
+                        "the table rows do not match the stored column count"
+                    )
+                total_rows += 1
+                if total_rows <= preview_limit:
+                    rows.append(row)
+        return rows, total_rows
+
+    def _populate_saved_csv_table(self, rows: List[List[str]]) -> None:
+        headers = list(rows[0])
+        body = rows[1:]
+        self._artifact_table.setColumnCount(len(headers))
+        self._artifact_table.setHorizontalHeaderLabels(headers)
+        self._artifact_table.setRowCount(len(body))
+        for row_idx, row in enumerate(body):
+            for col_idx, value in enumerate(row):
+                self._artifact_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+
+    def _set_native_artifact_metadata(
+        self,
+        record: Dict[str, Any],
+        region: str,
+        *,
+        table_preview: str | None = None,
+    ) -> None:
+        lines = [f"Artifact: {record.get('label', '')}"]
+        if record.get("scope") == "run":
+            lines.append("Scope: Run-level (all included ROIs)")
+        else:
+            lines.insert(0, f"ROI: {region}")
+        timeline = self._native_continuous_context.get("timeline", {})
+        timeline_mode = str(timeline.get("timeline_mode") or "").strip().lower()
+        timeline_labels = {
+            "elapsed": "Elapsed time",
+            "fixed_daily_anchor": "Fixed daily anchor",
+            "civil": "Civil clock",
+        }
+        if timeline_mode:
+            lines.append(f"Timeline: {timeline_labels.get(timeline_mode, timeline_mode)}")
+        if timeline.get("fixed_daily_anchor_clock"):
+            lines.append(f"Plotted-day start: {timeline['fixed_daily_anchor_clock']}")
+        if timeline.get("recording_start_clock"):
+            lines.append(f"Recording start: {timeline['recording_start_clock']}")
+        if record.get("correction_strategy_label"):
+            lines.append(f"Correction: {record['correction_strategy_label']}")
+        representative = record.get("representative_window")
+        if isinstance(representative, dict):
+            index = representative.get("window_index")
+            start = representative.get("elapsed_start_sec")
+            end = representative.get("elapsed_end_sec")
+            if index is not None:
+                text = f"Representative window: {index}"
+                if start is not None and end is not None:
+                    text += f" ({float(start):g}–{float(end):g}s)"
+                lines.append(text)
+        if record.get("auc_units"):
+            lines.append(f"AUC units: {record['auc_units']}")
+        window_timing = self._native_continuous_context.get("window_timing", {})
+        if record.get("artifact_type") == "table" and window_timing:
+            length = window_timing.get("window_length_sec")
+            step = window_timing.get("window_step_sec")
+            if length is not None and step is not None:
+                lines.append(f"Window length: {float(length):g}s; step: {float(step):g}s")
+        if table_preview:
+            lines.append(table_preview)
+        self._artifact_metadata_label.setText("  •  ".join(lines))
+        self._artifact_metadata_label.setVisible(True)
 
     def _set_image(self, path: str):
         if not path or not os.path.isfile(path):
@@ -1651,6 +2039,12 @@ class RunReportViewer(QWidget):
     def _show_no_image(self, message: str):
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
+        self._artifact_metadata_label.setText("")
+        self._artifact_metadata_label.setVisible(False)
+        self._artifact_table_scroll.setVisible(False)
+        self._image_scroll.setVisible(True)
+        self._artifact_table.setRowCount(0)
+        self._artifact_table.setColumnCount(0)
         if self._image_interaction is not None:
             self._image_interaction.clear(message, fallback_width=640, fallback_height=320)
             self._zoom_mode = self._image_interaction.zoom_mode
@@ -1697,10 +2091,31 @@ class RunReportViewer(QWidget):
             self._open_region_day_plots_btn,
             os.path.join(region_path, "day_plots") if region_path else "",
         )
+        table_target = os.path.join(region_path, "tables") if region_path else ""
+        selected_native_table = False
+        self._open_region_tables_btn.setText("Tables")
+        self._open_region_tables_btn.setToolTip(
+            "Open the selected region tables folder."
+        )
+        if self._native_continuous_mode:
+            record = self._native_continuous_artifact_by_key.get(
+                (region, self._selected_tab())
+            )
+            if record is not None and record.get("artifact_type") == "table":
+                table_target = str(record.get("path") or "")
+                selected_native_table = True
+                self._open_region_tables_btn.setText("Open CSV")
+                self._open_region_tables_btn.setToolTip(
+                    "Open the complete saved CSV file."
+                )
         self._set_open_button_state(
             self._open_region_tables_btn,
-            os.path.join(region_path, "tables") if region_path else "",
+            table_target,
         )
+        if selected_native_table:
+            self._open_region_tables_btn.setToolTip(
+                "Open the complete saved CSV file."
+            )
 
     def _set_open_button_state(self, button: QPushButton, path: str) -> None:
         exists = bool(path and os.path.exists(path))
@@ -1715,6 +2130,16 @@ class RunReportViewer(QWidget):
         region_path = self._region_paths.get(region, "")
         target = os.path.join(region_path, child) if region_path else ""
         self._open_path(target)
+
+    def _open_selected_table_or_region_tables(self) -> None:
+        if self._native_continuous_mode:
+            record = self._native_continuous_artifact_by_key.get(
+                (self._selected_region(), self._selected_tab())
+            )
+            if record is not None and record.get("artifact_type") == "table":
+                self._open_path(str(record.get("path") or ""))
+                return
+        self._open_selected_region_subpath("tables")
 
     def _open_path(self, path: str):
         if path and os.path.exists(path):

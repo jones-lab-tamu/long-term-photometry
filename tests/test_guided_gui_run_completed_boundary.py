@@ -792,6 +792,13 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
     # Real click of the real in-app control -- not a direct call into
     # _open_completed_results_dir or the report viewer.
     review_btn.click()
+    load_deadline = time.monotonic() + 30.0
+    while (
+        window._guided_completed_review_loading
+        and time.monotonic() < load_deadline
+    ):
+        qapp.processEvents()
+        time.sleep(0.01)
     assert window._guided_run_readiness_label.text() == (
         "Completed run loaded for review."
     )
@@ -812,7 +819,8 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
     guided_viewer = window._guided_report_viewer
     assert guided_viewer._region_paths
     assert set(guided_viewer._region_paths) == {"CH1", "CH2", "CH3"}
-    assert guided_viewer._region_combo.count() == 3
+    assert guided_viewer._region_combo.count() == 4
+    assert guided_viewer._region_combo.currentText() == "Choose an ROI to inspect"
     assert any(
         images
         for tabs in guided_viewer._region_tab_images.values()

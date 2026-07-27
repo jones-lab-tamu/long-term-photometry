@@ -18,9 +18,337 @@ from photometry_pipeline.guided_completed_run_rejection_policy import (
     detect_guided_diagnostic_cache_candidate,
 )
 from photometry_pipeline.run_completion_contract import (
+    COMPLETION_KEY,
+    CONTINUOUS_INDEX_KEY,
+    CONTINUOUS_FAMILY_FILENAMES,
+    GUIDED_CONTINUOUS_RUN_PROFILES,
+    PROFILE_CONTINUOUS,
+    expected_continuous_families,
+    guided_continuous_saved_artifact_specs,
     TERMINAL_SUCCESS_LEGACY,
     classify_run_terminal_state,
 )
+
+
+class SavedArtifactIndexError(RuntimeError):
+    """A current native Guided continuous artifact package is not readable."""
+
+
+_CONTINUOUS_ARTIFACT_LABELS = {
+    "phasic_correction_impact.png": "Correction impact",
+    "tonic_overview.png": "Tonic overview",
+    "phasic_auc_timeseries.png": "Phasic signal AUC",
+    "phasic_peak_rate_timeseries.png": "Peak rate",
+    "continuous_phasic_window_summary.csv": "Phasic window summary",
+    "continuous_tonic_window_summary.csv": "Tonic window summary",
+    "continuous_phasic_events.csv": "Detected events",
+}
+
+_CONTINUOUS_ARTIFACT_ORDER = {
+    "phasic_correction_impact.png": 10,
+    "tonic_overview.png": 20,
+    "phasic_auc_timeseries.png": 30,
+    "phasic_peak_rate_timeseries.png": 40,
+    "continuous_phasic_window_summary.csv": 50,
+    "continuous_tonic_window_summary.csv": 60,
+    "continuous_phasic_events.csv": 70,
+}
+
+
+def _manifest_completion_run_mode(run_dir: str) -> Dict[str, Any]:
+    """Read only the completion-declared run mode, without directory discovery."""
+    manifest, error = _read_json_dict(os.path.join(run_dir, "MANIFEST.json"))
+    if error is not None:
+        return {}
+    completion = manifest.get(COMPLETION_KEY)
+    if not isinstance(completion, dict):
+        return {}
+    run_mode = completion.get("run_mode")
+    return dict(run_mode) if isinstance(run_mode, dict) else {}
+
+
+def declared_completed_run_mode(run_dir: str) -> Dict[str, Any]:
+    """Return the run mode pinned by the completion manifest, if present."""
+    return _manifest_completion_run_mode(os.path.realpath(run_dir))
+
+
+def is_guided_continuous_saved_artifact_run_mode(
+    run_mode: Dict[str, Any]
+) -> bool:
+    """True only for native Guided continuous runs with the I3 package."""
+    return (
+        str(run_mode.get("run_profile", "")) in GUIDED_CONTINUOUS_RUN_PROFILES
+        and str(run_mode.get("acquisition_mode", "")) == "continuous"
+        and str(run_mode.get("deliverable_profile", "")) == PROFILE_CONTINUOUS
+        and bool(run_mode.get("continuous_outputs_ran"))
+    )
+
+
+def _continuous_artifact_path(
+    run_dir: str, relative_path: str, *, description: str
+) -> str:
+    """Resolve one manifest-declared path inside the completed run."""
+    normalized = str(relative_path or "").replace("\\", "/").strip("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or ".." in normalized.split("/")
+    ):
+        raise SavedArtifactIndexError(
+            f"This completed analysis has an invalid {description} path."
+        )
+    root = os.path.realpath(run_dir)
+    path = os.path.realpath(os.path.join(root, *normalized.split("/")))
+    try:
+        inside = os.path.normcase(os.path.commonpath([root, path])) == os.path.normcase(root)
+    except (OSError, ValueError):
+        inside = False
+    try:
+        exists = os.path.isfile(path)
+        size = os.path.getsize(path) if exists else 0
+    except OSError:
+        exists = False
+        size = 0
+    if not inside or not exists:
+        raise SavedArtifactIndexError(
+            f"This completed analysis cannot be opened because the required "
+            f"{description} is missing or invalid."
+        )
+    if size <= 0:
+        raise SavedArtifactIndexError(
+            f"This completed analysis cannot be opened because the required "
+            f"{description} is empty."
+        )
+    return path
+
+
+def _validate_continuous_saved_image(path: str, label: str) -> None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            if image.size[0] <= 0 or image.size[1] <= 0:
+                raise ValueError("image dimensions are not positive")
+    except Exception as exc:
+        raise SavedArtifactIndexError(
+            f"This completed analysis cannot be opened because the required "
+            f"{label} image is missing or invalid."
+        ) from exc
+
+
+def build_guided_continuous_saved_artifact_index(
+    run_dir: str,
+    *,
+    classification=None,
+) -> Dict[str, Any]:
+    """Adapt the I3 completion index to the existing generic Results viewer.
+
+    The manifest is the only source of artifact membership and ROI order here.
+    This function never scans ROI directories and never opens an analysis cache.
+    """
+    resolved = os.path.realpath(str(run_dir))
+    if classification is None:
+        classification = classify_run_terminal_state(resolved)
+    if not getattr(classification, "is_success", False):
+        raise SavedArtifactIndexError(
+            "This completed analysis cannot be opened because it is not a "
+            f"verified successful run ({getattr(classification, 'reason', 'validation failed')})."
+        )
+    if not getattr(classification, "is_current", False):
+        raise SavedArtifactIndexError(
+            "This completed analysis is not a current native Guided result and "
+            "cannot be opened in the saved-artifact viewer."
+        )
+
+    manifest, manifest_error = _read_json_dict(os.path.join(resolved, "MANIFEST.json"))
+    if manifest_error is not None:
+        raise SavedArtifactIndexError(
+            "This completed analysis cannot be opened because its output manifest "
+            "is missing or invalid."
+        )
+    completion = manifest.get(COMPLETION_KEY)
+    if not isinstance(completion, dict):
+        raise SavedArtifactIndexError(
+            "This completed analysis cannot be opened because its completion record is missing."
+        )
+    run_mode = completion.get("run_mode")
+    if not isinstance(run_mode, dict) or not is_guided_continuous_saved_artifact_run_mode(run_mode):
+        raise SavedArtifactIndexError(
+            "This completed analysis is not a native Guided continuous artifact package."
+        )
+    expected_rois = tuple(str(roi) for roi in (run_mode.get("expected_rois") or ()))
+    if not expected_rois:
+        raise SavedArtifactIndexError(
+            "This completed analysis has no manifest-declared regions of interest."
+        )
+
+    deliverables = completion.get("deliverables")
+    if not isinstance(deliverables, dict):
+        raise SavedArtifactIndexError(
+            "This completed analysis has no manifest-declared saved Results artifacts."
+        )
+    index = deliverables.get(CONTINUOUS_INDEX_KEY)
+    if not isinstance(index, dict):
+        raise SavedArtifactIndexError(
+            "This completed analysis has no manifest-declared continuous Results index."
+        )
+
+    saved_records = index.get("saved_artifacts")
+    if not isinstance(saved_records, list):
+        raise SavedArtifactIndexError(
+            "This completed analysis has no manifest-declared saved figure records."
+        )
+    saved_by_path: Dict[str, Dict[str, Any]] = {}
+    for record in saved_records:
+        if not isinstance(record, dict):
+            raise SavedArtifactIndexError(
+                "This completed analysis has an unreadable saved figure record."
+            )
+        relative_path = str(record.get("relative_path", "")).replace("\\", "/")
+        if relative_path in saved_by_path:
+            raise SavedArtifactIndexError(
+                f"This completed analysis declares the saved figure more than once: {relative_path}."
+            )
+        saved_by_path[relative_path] = record
+
+    report, report_error = _read_json_dict(os.path.join(resolved, "run_report.json"))
+    if report_error is not None:
+        raise SavedArtifactIndexError(
+            "This completed analysis cannot be opened because its run report is missing or invalid."
+        )
+
+    artifacts: List[Dict[str, Any]] = []
+    for roi in expected_rois:
+        for family, filename, analysis_family in guided_continuous_saved_artifact_specs(run_mode):
+            relative_path = f"{roi}/summary/{filename}"
+            record = saved_by_path.get(relative_path)
+            label = _CONTINUOUS_ARTIFACT_LABELS.get(filename, filename)
+            if record is None:
+                raise SavedArtifactIndexError(
+                    f"This completed analysis cannot be opened because the required "
+                    f"{label} image for {roi} is missing from its completion record."
+                )
+            if (
+                str(record.get("roi", "")) != roi
+                or str(record.get("family", "")) != family
+                or str(record.get("analysis_family", "")) != analysis_family
+                or str(record.get("artifact_type", "")) != "image"
+            ):
+                raise SavedArtifactIndexError(
+                    f"This completed analysis has invalid provenance for the required "
+                    f"{label} image for {roi}."
+                )
+            path = _continuous_artifact_path(
+                resolved, relative_path, description=f"{label} image for {roi}"
+            )
+            _validate_continuous_saved_image(path, label)
+            artifacts.append(
+                {
+                    **dict(record),
+                    "roi": roi,
+                    "label": label,
+                    "relative_path": relative_path,
+                    "path": path,
+                    "artifact_type": "image",
+                    "analysis_applicability": analysis_family,
+                    "order": _CONTINUOUS_ARTIFACT_ORDER[filename],
+                }
+            )
+
+    for family in expected_continuous_families(run_mode):
+        families = index.get("families")
+        if not isinstance(families, dict):
+            raise SavedArtifactIndexError(
+                "This completed analysis has an invalid manifest-declared table index."
+            )
+        family_record = families.get(family)
+        if not isinstance(family_record, dict):
+            raise SavedArtifactIndexError(
+                f"This completed analysis has no manifest-declared {family} table family."
+            )
+        paths = family_record.get("relative_paths")
+        if not isinstance(paths, dict):
+            raise SavedArtifactIndexError(
+                f"This completed analysis has an invalid manifest-declared {family} table family."
+            )
+        filename = CONTINUOUS_FAMILY_FILENAMES[family]
+        analysis_family = "phasic" if family.startswith("continuous_phasic") else "tonic"
+        label = _CONTINUOUS_ARTIFACT_LABELS[filename]
+        for roi in expected_rois:
+            relative_path = str(paths.get(roi, "")).replace("\\", "/")
+            expected_path = f"{roi}/tables/{filename}"
+            if relative_path != expected_path:
+                raise SavedArtifactIndexError(
+                    f"This completed analysis has an invalid {label} path for {roi}."
+                )
+            path = _continuous_artifact_path(
+                resolved, relative_path, description=f"{label} table for {roi}"
+            )
+            artifacts.append(
+                {
+                    "roi": roi,
+                    "label": label,
+                    "relative_path": relative_path,
+                    "path": path,
+                    "artifact_type": "table",
+                    "analysis_applicability": analysis_family,
+                    "order": _CONTINUOUS_ARTIFACT_ORDER[filename],
+                }
+            )
+
+    if run_mode.get("phasic_analysis") and run_mode.get("feature_extraction_ran"):
+        event_relative_path = "_analysis/phasic_out/features/continuous_phasic_events.csv"
+        completion_artifacts = completion.get("artifacts")
+        event_records = [
+            record
+            for record in (completion_artifacts if isinstance(completion_artifacts, list) else [])
+            if isinstance(record, dict)
+            and str(record.get("relative_path", "")).replace("\\", "/") == event_relative_path
+        ]
+        if len(event_records) != 1:
+            raise SavedArtifactIndexError(
+                "This completed analysis cannot be opened because its saved "
+                "Detected events table is missing from the completion record."
+            )
+        event_path = _continuous_artifact_path(
+            resolved, event_relative_path, description="Detected events table"
+        )
+        artifacts.append(
+            {
+                "roi": None,
+                "label": "Detected events",
+                "relative_path": event_relative_path,
+                "path": event_path,
+                "artifact_type": "table",
+                "analysis_applicability": "phasic",
+                "scope": "run",
+                "order": _CONTINUOUS_ARTIFACT_ORDER["continuous_phasic_events.csv"],
+            }
+        )
+
+    timeline = manifest.get("timeline")
+    if not isinstance(timeline, dict):
+        timeline = report.get("timeline") if isinstance(report.get("timeline"), dict) else {}
+    window_timing = index.get("window_timing")
+    if not isinstance(window_timing, dict):
+        window_timing = {}
+    return {
+        "run_dir": resolved,
+        "run_id": str(getattr(classification, "run_id", "") or ""),
+        "run_mode": dict(run_mode),
+        "roi_order": expected_rois,
+        "timeline": dict(timeline),
+        "window_timing": dict(window_timing),
+        "artifacts": sorted(
+            artifacts,
+            key=lambda item: (
+                int(item.get("order", 0)),
+                expected_rois.index(item["roi"]) if item.get("roi") in expected_rois else -1,
+            ),
+        ),
+    }
 
 
 def parse_run_report(report_path: str) -> Tuple[Dict[str, Any], str | None]:
@@ -478,6 +806,21 @@ def classify_completed_run_candidate(run_dir: str) -> Tuple[bool, str]:
     ok, evidence = is_successful_completed_run_dir(run_dir)
     if not ok:
         return False, evidence
+
+    # Native Guided continuous runs own an exhaustive manifest/completion
+    # index.  Their completed-run gate must not rediscover ROI folders to
+    # decide whether they are openable; the saved-artifact adapter performs
+    # the authoritative package validation instead.
+    classification = classify_run_terminal_state(run_dir)
+    run_mode = classification.run_mode or declared_completed_run_mode(run_dir)
+    if is_guided_continuous_saved_artifact_run_mode(run_mode):
+        try:
+            build_guided_continuous_saved_artifact_index(
+                run_dir, classification=classification
+            )
+        except SavedArtifactIndexError as exc:
+            return False, str(exc)
+        return True, evidence
 
     regions = resolve_region_deliverables(run_dir)
     if not regions:

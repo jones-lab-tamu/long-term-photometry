@@ -60,6 +60,10 @@ from gui.run_report_parser import (
     resolve_region_deliverables,
     classify_completed_run_candidate,
     is_continuous_rwd_run_mode,
+    declared_completed_run_mode,
+    is_guided_continuous_saved_artifact_run_mode,
+    build_guided_continuous_saved_artifact_index,
+    SavedArtifactIndexError,
 )
 from gui.validate_run_policy import (
     compute_run_signature,
@@ -1023,12 +1027,10 @@ class _GuidedCorrectionPreviewWorker(QObject):
 class _GuidedCompletedReviewLoadWorker(QObject):
     """Read one compact completed-run overview without retaining GUI state.
 
-    Branches to the continuous-RWD review loader (CR1-E1-A) for a completed
-    continuous recording, emitting a `ContinuousRunOverview` instead of a
-    dict; callers distinguish the two by type (see CR1-E1-B handoff section
-    7). This never routes a continuous run through the intermittent
-    `load_completed_review_overview`, which requires provenance evidence the
-    continuous producers do not write.
+    Native Guided continuous runs prepare the complete manifest-backed
+    saved-artifact index here, off the GUI thread.  Retained non-native
+    continuous callers still use the CR1-E1 review loader; intermittent
+    completed runs continue through `load_completed_review_overview`.
     """
 
     succeeded = Signal(object)
@@ -1039,14 +1041,35 @@ class _GuidedCompletedReviewLoadWorker(QObject):
         self._run_dir = str(run_dir)
 
     def run(self) -> None:
+        run_dir = os.path.realpath(self._run_dir)
         try:
-            classification = classify_run_terminal_state(self._run_dir)
-            routing_run_mode = classification.run_mode or {}
+            classification = classify_run_terminal_state(run_dir)
+            routing_run_mode = (
+                classification.run_mode
+                or declared_completed_run_mode(run_dir)
+                or {}
+            )
+            if is_guided_continuous_saved_artifact_run_mode(routing_run_mode):
+                try:
+                    artifact_index = build_guided_continuous_saved_artifact_index(
+                        run_dir, classification=classification
+                    )
+                except SavedArtifactIndexError as exc:
+                    self.failed.emit(str(exc))
+                    return
+                self.succeeded.emit(
+                    {
+                        "native_saved_artifacts": True,
+                        "run_dir": run_dir,
+                        "artifact_index": artifact_index,
+                    }
+                )
+                return
             if classification.is_success and is_continuous_rwd_run_mode(
                 routing_run_mode
             ):
                 try:
-                    overview = load_continuous_run_overview(self._run_dir)
+                    overview = load_continuous_run_overview(run_dir)
                 except CompletedContinuousRwdReviewError as exc:
                     # Already scientist-facing text (see
                     # completed_continuous_rwd_review.py); no exception-class
@@ -1056,7 +1079,7 @@ class _GuidedCompletedReviewLoadWorker(QObject):
                     return
                 self.succeeded.emit(overview)
                 return
-            overview = load_completed_review_overview(self._run_dir)
+            overview = load_completed_review_overview(run_dir)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
@@ -4756,6 +4779,9 @@ class MainWindow(QMainWindow):
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
         accepted_overview = self._accepted_completed_review_for(run_dir)
+        retained_continuous_run = os.path.realpath(
+            str(getattr(self, "_guided_continuous_rwd_completed_run_dir", "") or "")
+        )
         has_loaded_results = (
             bool(run_dir)
             and bool(
@@ -4764,6 +4790,7 @@ class MainWindow(QMainWindow):
                     hasattr(self, "_report_viewer")
                     and self._report_viewer.has_loaded_results()
                 )
+                or retained_continuous_run == run_dir
             )
         )
         if hasattr(self, "_guided_mode_banner_label"):
@@ -4831,6 +4858,9 @@ class MainWindow(QMainWindow):
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
         accepted_overview = self._accepted_completed_review_for(run_dir)
+        retained_continuous_run = os.path.realpath(
+            str(getattr(self, "_guided_continuous_rwd_completed_run_dir", "") or "")
+        )
         has_loaded_results = (
             bool(run_dir)
             and bool(
@@ -4839,6 +4869,7 @@ class MainWindow(QMainWindow):
                     hasattr(self, "_report_viewer")
                     and self._report_viewer.has_loaded_results()
                 )
+                or retained_continuous_run == run_dir
             )
         )
         lines = []
@@ -4997,9 +5028,57 @@ class MainWindow(QMainWindow):
     def _on_guided_start_open_results_succeeded(
         self, overview: dict[str, object]
     ) -> None:
-        selected = str(self._guided_start_open_results_path or "")
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_start_open_results_worker", None)
+        if sender is not None and sender is not active_worker:
+            return
+        reported_path = (
+            str(overview.get("run_dir") or "")
+            if isinstance(overview, dict)
+            else str(getattr(overview, "run_dir", "") or "")
+        )
+        selected = str(self._guided_start_open_results_path or "") or reported_path
+        current_selection = str(
+            self._guided_start_open_results_selected_path or ""
+        )
+        if (
+            reported_path
+            and current_selection
+            and os.path.realpath(reported_path) != os.path.realpath(current_selection)
+        ):
+            return
         guided_viewer = getattr(self, "_guided_report_viewer", None)
-        if isinstance(overview, ContinuousRunOverview):
+        if isinstance(overview, dict) and overview.get("native_saved_artifacts"):
+            prepared_index = overview.get("artifact_index")
+            if isinstance(prepared_index, dict):
+                prepared_path = str(prepared_index.get("run_dir") or "")
+                if (
+                    not selected
+                    or not prepared_path
+                    or os.path.realpath(prepared_path)
+                    != os.path.realpath(selected)
+                ):
+                    self._on_guided_start_open_results_failed(
+                        "The prepared completed-analysis package belongs to a different run."
+                    )
+                    return
+                loaded = bool(
+                    guided_viewer is not None
+                    and guided_viewer.install_prepared_native_continuous_artifacts(
+                        selected, prepared_index
+                    )
+                )
+            else:
+                # Direct/non-worker callers retain the bounded synchronous
+                # fallback; the real Guided worker always supplies the index.
+                loaded = bool(
+                    selected
+                    and guided_viewer is not None
+                    and guided_viewer.load_report(
+                        selected, review_overview=dict(overview)
+                    )
+                )
+        elif isinstance(overview, ContinuousRunOverview):
             loaded = bool(
                 selected
                 and guided_viewer is not None
@@ -5024,7 +5103,22 @@ class MainWindow(QMainWindow):
 
         self._current_run_dir = selected
         self._accepted_completed_review_path = os.path.realpath(selected)
-        self._accepted_completed_review_overview = dict(overview)
+        if isinstance(overview, dict) and overview.get("native_saved_artifacts"):
+            self._accepted_completed_review_overview = {
+                "format": "continuous",
+                "included_rois": (
+                    guided_viewer.available_regions() if guided_viewer is not None else ()
+                ),
+                "review_status": "success",
+            }
+        elif isinstance(overview, ContinuousRunOverview):
+            self._accepted_completed_review_overview = {
+                "format": "continuous",
+                "included_rois": tuple(overview.included_roi_ids),
+                "review_status": "success",
+            }
+        else:
+            self._accepted_completed_review_overview = dict(overview)
         self._guided_compact_review_defer_diagnostics = True
         self._set_guided_start_open_results_loading(False)
         self._set_guided_workflow_mode("open_results")
@@ -5038,6 +5132,10 @@ class MainWindow(QMainWindow):
         )
 
     def _on_guided_start_open_results_failed(self, message: str) -> None:
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_start_open_results_worker", None)
+        if sender is not None and sender is not active_worker:
+            return
         selected = str(
             self._guided_start_open_results_path
             or self._guided_start_open_results_selected_path
@@ -14910,6 +15008,9 @@ class MainWindow(QMainWindow):
             self._refresh_guided_run_readiness_display()
             return
         self._guided_continuous_rwd_completed_run_dir = run_dir
+        self._current_run_dir = run_dir
+        self._refresh_guided_mode_display()
+        self._refresh_guided_start_panel()
         # The prepared run has been consumed: its output directory is
         # allocated and its results are written. Require a fresh preparation
         # before another run rather than reusing consumed authorities.
@@ -16764,12 +16865,66 @@ class MainWindow(QMainWindow):
     def _on_guided_completed_review_load_succeeded(
         self, overview: dict[str, object]
     ) -> None:
-        candidate = str(
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_completed_review_load_worker", None)
+        if sender is not None and sender is not active_worker:
+            return
+        reported_path = (
+            str(overview.get("run_dir") or "")
+            if isinstance(overview, dict)
+            else str(getattr(overview, "run_dir", "") or "")
+        )
+        active_candidate = str(
             getattr(self, "_guided_completed_review_load_path", "") or ""
         )
+        current_candidate = active_candidate or str(self._current_run_dir or "")
+        if (
+            reported_path
+            and current_candidate
+            and os.path.realpath(reported_path) != os.path.realpath(current_candidate)
+        ):
+            return
+        candidate = active_candidate or reported_path
         self._set_guided_completed_review_loading(False)
         guided_viewer = getattr(self, "_guided_report_viewer", None)
-        if isinstance(overview, ContinuousRunOverview):
+        if isinstance(overview, dict) and overview.get("native_saved_artifacts"):
+            prepared_index = overview.get("artifact_index")
+            if isinstance(prepared_index, dict):
+                prepared_path = str(prepared_index.get("run_dir") or "")
+                if (
+                    not candidate
+                    or not prepared_path
+                    or os.path.realpath(prepared_path)
+                    != os.path.realpath(candidate)
+                ):
+                    self._append_log(
+                        "Completed Review display rejected a prepared package "
+                        "for a different run."
+                    )
+                    label = getattr(self, "_guided_run_readiness_label", None)
+                    if label is not None:
+                        label.setText(
+                            "The completed analysis could not be opened for review. "
+                            "The prepared output belongs to a different run."
+                        )
+                    return
+                loaded = bool(
+                    guided_viewer is not None
+                    and guided_viewer.install_prepared_native_continuous_artifacts(
+                        candidate, prepared_index
+                    )
+                )
+            else:
+                # Direct/non-worker callers retain the bounded synchronous
+                # fallback; the real Guided worker always supplies the index.
+                loaded = bool(
+                    candidate
+                    and guided_viewer is not None
+                    and guided_viewer.load_report(
+                        candidate, review_overview=dict(overview)
+                    )
+                )
+        elif isinstance(overview, ContinuousRunOverview):
             loaded = bool(
                 candidate
                 and guided_viewer is not None
@@ -16805,6 +16960,10 @@ class MainWindow(QMainWindow):
             label.setText("Completed run loaded for review.")
 
     def _on_guided_completed_review_load_failed(self, message: str) -> None:
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_completed_review_load_worker", None)
+        if sender is not None and sender is not active_worker:
+            return
         self._set_guided_completed_review_loading(False)
         self._append_log(f"Completed Review load failed: {message}")
         guided_viewer = getattr(self, "_guided_report_viewer", None)
