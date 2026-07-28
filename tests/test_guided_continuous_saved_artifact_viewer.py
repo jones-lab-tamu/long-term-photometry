@@ -270,10 +270,9 @@ def test_combined_native_results_index_and_switching_use_saved_files(
         assert viewer._continuous_workspace.isHidden()
         assert not viewer._workspace.isHidden()
         assert _tab_labels(viewer) == [
-            "Correction impact",
-            "Tonic overview",
-            "Phasic signal AUC",
-            "Peak rate",
+            "Verification",
+            "Tonic",
+            "Phasic Summary",
         ]
         indexed = viewer._native_continuous_artifact_index["artifacts"]
         assert len(indexed) == 13
@@ -295,6 +294,150 @@ def test_combined_native_results_index_and_switching_use_saved_files(
         }
         assert records[0]["path"].endswith("phasic_correction_impact.png")
         assert viewer.active_artifact_path().endswith("phasic_correction_impact.png")
+    finally:
+        viewer.close()
+
+
+def _select_native_tab(viewer: RunReportViewer, label: str) -> None:
+    index = _tab_labels(viewer).index(label)
+    viewer._tabs.setCurrentIndex(index)
+
+
+def test_native_continuous_phasic_summary_groups_saved_images_and_wraps(
+    qapp, combined_run, monkeypatch
+):
+    _forbid_scientific_continuous_work(monkeypatch)
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(combined_run.run_dir) is True
+        _select_native_tab(viewer, "Phasic Summary")
+
+        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_counter_label.text() == "1/2"
+        assert not viewer._prev_btn.isHidden()
+        assert not viewer._next_btn.isHidden()
+        assert viewer.active_artifact_path().endswith("phasic_auc_timeseries.png")
+
+        viewer._next_btn.click()
+        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_counter_label.text() == "2/2"
+        assert viewer.active_artifact_path().endswith("phasic_peak_rate_timeseries.png")
+
+        viewer._next_btn.click()
+        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_counter_label.text() == "1/2"
+        viewer._prev_btn.click()
+        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_counter_label.text() == "2/2"
+
+        viewer._region_combo.setCurrentIndex(1)
+        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_counter_label.text() == "1/2"
+        assert viewer.active_artifact_path().endswith(
+            os.path.join(viewer.selected_region(), "summary", "phasic_auc_timeseries.png")
+        )
+    finally:
+        viewer.close()
+
+
+def test_native_continuous_phasic_only_summary_uses_same_grouping(
+    qapp, phasic_run, monkeypatch
+):
+    _forbid_scientific_continuous_work(monkeypatch)
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(phasic_run.run_dir) is True
+        assert _tab_labels(viewer) == ["Verification", "Phasic Summary"]
+        _select_native_tab(viewer, "Phasic Summary")
+        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_counter_label.text() == "1/2"
+        viewer._next_btn.click()
+        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_counter_label.text() == "2/2"
+    finally:
+        viewer.close()
+
+
+def test_native_continuous_single_summary_image_hides_pagination(
+    qapp, combined_run, monkeypatch
+):
+    import copy
+
+    _forbid_scientific_continuous_work(monkeypatch)
+    source_viewer = RunReportViewer()
+    try:
+        assert source_viewer.load_report(combined_run.run_dir) is True
+        prepared = copy.deepcopy(source_viewer._native_continuous_artifact_index)
+    finally:
+        source_viewer.close()
+
+    prepared["artifacts"] = [
+        record
+        for record in prepared["artifacts"]
+        if not str(record.get("relative_path", "")).endswith(
+            "phasic_peak_rate_timeseries.png"
+        )
+    ]
+    viewer = RunReportViewer()
+    try:
+        assert viewer.install_prepared_native_continuous_artifacts(
+            combined_run.run_dir, prepared
+        ) is True
+        _select_native_tab(viewer, "Phasic Summary")
+        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_counter_label.text() == ""
+        assert viewer._prev_btn.isHidden()
+        assert viewer._next_btn.isHidden()
+    finally:
+        viewer.close()
+
+
+def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
+    qapp, combined_run, monkeypatch
+):
+    _forbid_scientific_continuous_work(monkeypatch)
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(combined_run.run_dir) is True
+        timeline = viewer._native_continuous_context["timeline"]
+
+        verification_metadata = viewer._artifact_metadata_label.text()
+        assert f"ROI: {viewer.selected_region()}" in verification_metadata
+        assert "Correction:" in verification_metadata
+        assert "Representative window:" in verification_metadata
+        assert "Artifact" not in verification_metadata
+        assert "Timeline:" not in verification_metadata
+
+        _select_native_tab(viewer, "Tonic")
+        tonic_metadata = viewer._artifact_metadata_label.text()
+        assert f"ROI: {viewer.selected_region()}" in tonic_metadata
+        assert "Timeline:" in tonic_metadata
+        if timeline.get("fixed_daily_anchor_clock"):
+            assert f"Plotted-day start: {timeline['fixed_daily_anchor_clock']}" in tonic_metadata
+        if timeline.get("recording_start_clock"):
+            assert f"Recording start: {timeline['recording_start_clock']}" in tonic_metadata
+        assert "Artifact" not in tonic_metadata
+
+        _select_native_tab(viewer, "Phasic Summary")
+        auc_metadata = viewer._artifact_metadata_label.text()
+        auc_record = next(
+            record
+            for record in viewer.available_artifacts()
+            if str(record.get("relative_path", "")).endswith(
+                "phasic_auc_timeseries.png"
+            )
+        )
+        assert f"ROI: {viewer.selected_region()}" in auc_metadata
+        assert "Timeline:" in auc_metadata
+        assert str(auc_record["auc_units"]) in auc_metadata
+        assert "Artifact" not in auc_metadata
+
+        viewer._next_btn.click()
+        peak_metadata = viewer._artifact_metadata_label.text()
+        assert "ROI:" in peak_metadata
+        assert "Timeline:" in peak_metadata
+        assert "AUC units:" not in peak_metadata
+        assert "Artifact" not in peak_metadata
     finally:
         viewer.close()
 
@@ -471,23 +614,18 @@ def test_large_detected_events_remains_saved_but_not_a_primary_tab(
         (
             "phasic_run",
             {"Tonic overview", "Tonic window summary"},
-                {
-                    "Correction impact",
-                    "Phasic signal AUC",
-                    "Peak rate",
-                },
-            ),
-            (
-                "tonic_run",
-                {
-                    "Correction impact",
-                    "Phasic signal AUC",
-                    "Peak rate",
-                    "Phasic window summary",
-                    "Detected events",
-                },
-                {"Tonic overview"},
-            ),
+            {"Verification", "Phasic Summary"},
+        ),
+        (
+            "tonic_run",
+            {
+                "Verification",
+                "Phasic Summary",
+                "Phasic window summary",
+                "Detected events",
+            },
+            {"Tonic"},
+        ),
     ],
 )
 def test_native_results_are_run_type_aware(

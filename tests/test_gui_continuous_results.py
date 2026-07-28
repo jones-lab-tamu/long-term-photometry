@@ -140,10 +140,9 @@ def test_native_continuous_load_report_routes_to_saved_artifact_viewer(
     assert viewer._continuous_workspace.isHidden()
     assert not viewer._workspace.isHidden()
     assert viewer.available_view_tabs() == [
-        "Correction impact",
-        "Tonic overview",
-        "Phasic signal AUC",
-        "Peak rate",
+        "Verification",
+        "Tonic",
+        "Phasic Summary",
     ]
 
 

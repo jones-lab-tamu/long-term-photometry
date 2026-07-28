@@ -176,6 +176,11 @@ def test_natural_tonic_publication_uses_two_shared_readable_panels(
         assert [line.get_label() for line in tonic_axis.get_lines()] == [
             "Tonic signal (deltaF)",
         ]
+        assert [line.get_color() for line in raw_axis.get_lines()] == [
+            "green",
+            "purple",
+        ]
+        assert [line.get_color() for line in tonic_axis.get_lines()] == ["black"]
         assert not any(
             line.get_label() == "Tonic signal (deltaF)"
             for line in raw_axis.get_lines()

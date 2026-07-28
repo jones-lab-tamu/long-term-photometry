@@ -96,6 +96,22 @@ TAB_ORDER = [
     TAB_CONTINUOUS_TRACE,
 ]
 
+_NATIVE_PHASIC_SUMMARY_IMAGE_ORDER = {
+    "phasic_auc_timeseries.png": 0,
+    "phasic_peak_rate_timeseries.png": 1,
+}
+_NATIVE_CONTINUOUS_IMAGE_TABS = {
+    "phasic_correction_impact.png": TAB_VERIFICATION,
+    "tonic_overview.png": TAB_TONIC,
+    "phasic_auc_timeseries.png": TAB_PHASIC_SUMMARY,
+    "phasic_peak_rate_timeseries.png": TAB_PHASIC_SUMMARY,
+}
+_NATIVE_CONTINUOUS_TAB_ORDER = (
+    TAB_VERIFICATION,
+    TAB_TONIC,
+    TAB_PHASIC_SUMMARY,
+)
+
 
 class RunReportViewer(QWidget):
     """Results workspace for completed runs."""
@@ -110,6 +126,9 @@ class RunReportViewer(QWidget):
         self._continuous_selected_roi = ""
         self._native_continuous_artifact_index: Dict[str, Any] | None = None
         self._native_continuous_artifacts_by_roi: Dict[str, List[Dict[str, Any]]] = {}
+        self._native_continuous_artifacts_by_tab: Dict[
+            Tuple[str, str], List[Dict[str, Any]]
+        ] = {}
         self._native_continuous_artifact_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._native_continuous_context: Dict[str, Any] = {}
         self._native_continuous_mode = False
@@ -568,6 +587,7 @@ class RunReportViewer(QWidget):
         self._continuous_selected_roi = ""
         self._native_continuous_artifact_index = None
         self._native_continuous_artifacts_by_roi = {}
+        self._native_continuous_artifacts_by_tab = {}
         self._native_continuous_artifact_by_key = {}
         self._native_continuous_context = {}
         self._native_continuous_mode = False
@@ -957,6 +977,7 @@ class RunReportViewer(QWidget):
         run_level_artifacts = [
             record for record in all_artifacts if record.get("scope") == "run"
         ]
+        self._native_continuous_artifacts_by_tab = {}
         for roi in roi_order:
             records = [
                 record for record in all_artifacts if record.get("roi") == roi
@@ -971,9 +992,29 @@ class RunReportViewer(QWidget):
                 if label:
                     self._native_continuous_artifact_by_key[(roi, label)] = record
                     if record.get("artifact_type") == "image":
-                        self._region_tab_images[roi][label] = [str(record["path"])]
+                        tab_label = self._native_continuous_tab_label(record)
+                        self._native_continuous_artifacts_by_tab.setdefault(
+                            (roi, tab_label), []
+                        ).append(record)
+                        self._region_tab_images[roi].setdefault(tab_label, []).append(
+                            str(record["path"])
+                        )
                     else:
                         self._region_tab_images[roi].setdefault(label, [])
+
+        for key, records in self._native_continuous_artifacts_by_tab.items():
+            if key[1] != TAB_PHASIC_SUMMARY:
+                continue
+            records.sort(
+                key=lambda record: (
+                    _NATIVE_PHASIC_SUMMARY_IMAGE_ORDER[
+                        os.path.basename(str(record.get("relative_path") or ""))
+                    ]
+                    if os.path.basename(str(record.get("relative_path") or ""))
+                    in _NATIVE_PHASIC_SUMMARY_IMAGE_ORDER
+                    else int(record.get("order", 0))
+                )
+            )
 
         self._current_run_dir = indexed_run_dir
         self._run_summary_path = os.path.join(self._current_run_dir, "run_report.json")
@@ -1722,8 +1763,11 @@ class RunReportViewer(QWidget):
             return self.active_image_path()
         region = self._selected_region()
         label = self._selected_tab()
-        record = self._native_continuous_artifact_by_key.get((region, label))
-        return str(record.get("path") or "") if record is not None else ""
+        records = self._native_continuous_artifacts_by_tab.get((region, label), [])
+        if not records:
+            return ""
+        idx = max(0, min(self._tab_indices.get((region, label), 0), len(records) - 1))
+        return str(records[idx].get("path") or "")
 
     def available_view_tabs(self) -> List[str]:
         """Return currently visible tab labels for the selected region."""
@@ -1784,15 +1828,22 @@ class RunReportViewer(QWidget):
         self._tabs.setCurrentIndex(idx)
         self._refresh_active_image(reset_index=True)
 
+    @staticmethod
+    def _native_continuous_tab_label(record: Dict[str, Any]) -> str:
+        """Return the scientist-facing tab for one saved native image."""
+        filename = os.path.basename(str(record.get("relative_path") or ""))
+        tab_label = _NATIVE_CONTINUOUS_IMAGE_TABS.get(filename)
+        if tab_label:
+            return tab_label
+        return str(record.get("label") or "")
+
     def _rebuild_native_tabs_for_selected_region(self, region: str) -> None:
-        """Build friendly artifact tabs from the in-memory manifest index."""
-        records = [
-            record
-            for record in self._native_continuous_artifacts_by_roi.get(region, [])
-            if record.get("artifact_type") == "image"
+        """Build the native scientist-facing tabs from saved image records."""
+        labels = [
+            label
+            for label in _NATIVE_CONTINUOUS_TAB_ORDER
+            if self._native_continuous_artifacts_by_tab.get((region, label))
         ]
-        labels = [str(record.get("label") or "") for record in records]
-        labels = [label for label in labels if label]
         current_tab = self._selected_tab()
         self._tabs.blockSignals(True)
         while self._tabs.count() > 0:
@@ -1813,10 +1864,12 @@ class RunReportViewer(QWidget):
         if not region or not tab:
             return []
         if self._native_continuous_mode:
-            record = self._native_continuous_artifact_by_key.get((region, tab))
-            if record is not None and record.get("artifact_type") == "image":
-                return [str(record.get("path") or "")]
-            return []
+            return [
+                str(record.get("path") or "")
+                for record in self._native_continuous_artifacts_by_tab.get(
+                    (region, tab), []
+                )
+            ]
         override = self._external_tab_image_overrides.get(key, [])
         if override:
             return list(override)
@@ -1830,6 +1883,8 @@ class RunReportViewer(QWidget):
 
     def _refresh_active_image(self, reset_index: bool):
         if self._native_continuous_mode:
+            if reset_index:
+                self._tab_indices[self._tab_key()] = 0
             self._refresh_native_artifact()
             return
         images = self._current_tab_images()
@@ -1860,15 +1915,20 @@ class RunReportViewer(QWidget):
     def _refresh_native_artifact(self) -> None:
         region = self._selected_region()
         label = self._selected_tab()
-        record = self._native_continuous_artifact_by_key.get((region, label))
-        if record is None:
+        key = (region, label)
+        records = self._native_continuous_artifacts_by_tab.get(key, [])
+        if not records:
             self._show_no_image("No saved artifact is available for this selection.")
             return
 
-        self._set_native_artifact_metadata(record, region)
-        self._prev_btn.setVisible(False)
-        self._next_btn.setVisible(False)
-        self._image_counter_label.setText("")
+        idx = max(0, min(self._tab_indices.get(key, 0), len(records) - 1))
+        self._tab_indices[key] = idx
+        record = records[idx]
+        self._set_native_artifact_metadata(record, region, tab=label)
+        multi = len(records) > 1
+        self._prev_btn.setVisible(multi)
+        self._next_btn.setVisible(multi)
+        self._image_counter_label.setText(f"{idx + 1}/{len(records)}" if multi else "")
         artifact_type = str(record.get("artifact_type") or "")
         path = str(record.get("path") or "")
         if artifact_type == "image":
@@ -1876,7 +1936,12 @@ class RunReportViewer(QWidget):
             self._image_scroll.setVisible(True)
             self._active_image_path = path
             self._active_pixmap = QPixmap()
-            self._image_title_label.setText(str(record.get("label") or "Saved figure"))
+            title = (
+                str(record.get("label") or "Saved figure")
+                if label == TAB_PHASIC_SUMMARY
+                else label
+            )
+            self._image_title_label.setText(title)
             self._set_zoom_mode(False)
             self._set_image(path)
             return
@@ -1960,8 +2025,10 @@ class RunReportViewer(QWidget):
         record: Dict[str, Any],
         region: str,
         *,
+        tab: str | None = None,
         table_preview: str | None = None,
     ) -> None:
+        selected_tab = str(tab or self._selected_tab()).strip()
         lines = [f"Artifact: {record.get('label', '')}"]
         if record.get("scope") == "run":
             lines.append("Scope: Run-level (all included ROIs)")
@@ -2002,6 +2069,27 @@ class RunReportViewer(QWidget):
                 lines.append(f"Window length: {float(length):g}s; step: {float(step):g}s")
         if table_preview:
             lines.append(table_preview)
+        if selected_tab == TAB_VERIFICATION:
+            allowed_prefixes = ("ROI:", "Correction:", "Representative window:")
+        elif selected_tab in {TAB_TONIC, TAB_PHASIC_SUMMARY}:
+            allowed_prefixes = (
+                "ROI:",
+                "Timeline:",
+                "Plotted-day start:",
+                "Recording start:",
+            )
+            if selected_tab == TAB_PHASIC_SUMMARY:
+                allowed_prefixes += ("AUC units:",)
+        else:
+            allowed_prefixes = (
+                "ROI:",
+                "Timeline:",
+                "Plotted-day start:",
+                "Recording start:",
+                "Window length:",
+                "Showing first ",
+            )
+        lines = [line for line in lines if line.startswith(allowed_prefixes)]
         self._artifact_metadata_label.setText("  •  ".join(lines))
         self._artifact_metadata_label.setVisible(True)
 

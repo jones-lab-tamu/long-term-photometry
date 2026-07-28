@@ -804,12 +804,14 @@ def _publish_tonic_overview(
         data["x_hours"],
         data["raw_signal"],
         linewidth=0.7,
+        color="green",
         label="Raw signal",
     )
     raw_ax.plot(
         data["x_hours"],
         data["raw_reference"],
         linewidth=0.7,
+        color="purple",
         label="Raw reference",
     )
     raw_ax.set_ylabel("Raw signal")
@@ -821,6 +823,7 @@ def _publish_tonic_overview(
         data["x_hours"],
         data["tonic_signal"],
         linewidth=1.0,
+        color="black",
         label="Tonic signal (deltaF)",
     )
     tonic_ax.set_xlabel(_timeline_axis_label(timeline_contract))
