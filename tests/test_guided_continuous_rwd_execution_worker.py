@@ -6,8 +6,8 @@ py`'s `_build_case`/`_pass_inputs`) -- the same objects the accepted
 `execute_guided_continuous_rwd_*_run` entry points already require -- rather
 than hand-building shallow mocks for every authority.
 
-Continuous Guided Run remains hidden/disabled: nothing here enables the Run
-button or wires a real GUI trigger. These tests exercise
+The live Guided continuous Run now wires this bridge through the existing
+worker; these tests exercise
 `gui.main_window._execute_guided_continuous_rwd` /
 `_GuidedRunExecutionWorker` directly, exactly as the worker's own `run()`
 would call them off the GUI thread.
@@ -16,6 +16,7 @@ would call them off the GUI thread.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 
 import pytest
@@ -437,8 +438,24 @@ def test_backend_receives_every_accepted_authority_unchanged_by_identity(
 
 
 def test_worker_real_combined_run_succeeds_and_reopens_through_continuous_results(
-    real_config, tmp_path_factory
+    real_config, tmp_path_factory, monkeypatch
 ):
+    import photometry_pipeline.guided_continuous_rwd_combined_run as combined_module
+
+    phases = []
+    real_write_progress = combined_module._write_continuous_progress_status
+
+    def capture_progress(run_dir, *, run_id, run_mode, phase):
+        phases.append(str(phase))
+        return real_write_progress(
+            run_dir, run_id=run_id, run_mode=run_mode, phase=phase
+        )
+
+    monkeypatch.setattr(
+        combined_module,
+        "_write_continuous_progress_status",
+        capture_progress,
+    )
     inputs = _build_case_for_mode(
         tmp_path_factory.mktemp("cr1_e2_worker_success_case") / "recording",
         execution_mode="both",
@@ -455,6 +472,10 @@ def test_worker_real_combined_run_succeeds_and_reopens_through_continuous_result
 
     worker = _GuidedRunExecutionWorker(None, None, continuous_execution=request)
     outcomes = {"succeeded": None, "failed": None}
+    started = []
+    worker.continuous_run_started.connect(
+        lambda run_dir, run_id: started.append((run_dir, run_id))
+    )
     worker.succeeded.connect(lambda result: outcomes.__setitem__("succeeded", result))
     worker.failed.connect(lambda message: outcomes.__setitem__("failed", message))
 
@@ -464,6 +485,21 @@ def test_worker_real_combined_run_succeeds_and_reopens_through_continuous_result
     result = outcomes["succeeded"]
     assert result is not None
     assert os.path.isdir(result.run_dir)
+    assert started == [(result.run_dir, result.run_id)]
+    assert phases == [
+        "preparing_recording",
+        "correcting_signals",
+        "analyzing_tonic_signal",
+        "detecting_features",
+        "building_summaries",
+        "saving_results",
+    ]
+
+    with open(os.path.join(result.run_dir, "status.json"), encoding="utf-8") as handle:
+        status = json.load(handle)
+    assert status["run_id"] == result.run_id
+    assert status["phase"] == "final"
+    assert status["status"] == "success"
 
     classification = classify_run_terminal_state(result.run_dir)
     assert classification.state == TERMINAL_SUCCESS_CURRENT

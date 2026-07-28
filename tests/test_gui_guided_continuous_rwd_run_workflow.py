@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import json
 import threading
 
 import numpy as np
@@ -963,6 +964,166 @@ def test_live_run_calls_exactly_one_accepted_backend(
     assert seen["args"][0] is prepared.request.review_binding
     assert seen["args"][1] is prepared.request.target_grid
     assert seen["kwargs"]["config"] is prepared.request.config
+
+
+def test_live_progress_attaches_after_run_allocation_and_tracks_stages(
+    window, qapp, monkeypatch, tmp_path
+):
+    """The real worker boundary attaches the existing live-status machinery
+    only after the backend has created its authoritative run directory."""
+    _prepared_window(window, qapp, monkeypatch, tmp_path, "live_progress")
+    module = importlib.import_module(
+        "photometry_pipeline.guided_continuous_rwd_combined_run"
+    )
+    completion_contract = importlib.import_module(
+        "photometry_pipeline.run_completion_contract"
+    )
+    terminal_success = completion_contract.TERMINAL_SUCCESS_CURRENT
+    monkeypatch.setattr(
+        completion_contract,
+        "classify_run_terminal_state",
+        lambda _run_dir: type(
+            "Classification", (), {"state": terminal_success}
+        )(),
+    )
+
+    run_dir = tmp_path / "live_progress_run"
+    run_id = "continuous-live-progress"
+    release = threading.Event()
+
+    def write_status(phase, status="running"):
+        run_dir.joinpath("status.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "phase": phase,
+                    "status": status,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def running_backend(*_args, **kwargs):
+        run_dir.mkdir()
+        write_status("initializing")
+        kwargs["run_started_callback"](str(run_dir), run_id)
+        release.wait(30.0)
+        write_status("final", status="success")
+        return _FakeRunResult(run_dir=str(run_dir))
+
+    monkeypatch.setattr(module, "execute_guided_continuous_rwd_combined_run", running_backend)
+    window._on_guided_run_clicked_backend_guarded()
+    try:
+        attached = _pump(
+            qapp,
+            lambda: getattr(window, "_guided_run_status_follower", None)
+            is not None,
+            timeout_ms=20_000,
+        )
+        assert attached
+        follower = window._guided_run_status_follower
+        elapsed_timer = window._guided_run_elapsed_timer
+        assert follower is not None and follower.is_active
+        assert elapsed_timer is not None and elapsed_timer.isActive()
+        assert window._guided_run_live_status_group.isHidden() is False
+
+        window._on_guided_continuous_rwd_run_started(
+            str(tmp_path / "stale_run"), "stale-run"
+        )
+        assert window._guided_continuous_rwd_live_run_dir == str(run_dir.resolve())
+        assert window._guided_run_status_follower is follower
+
+        expected = (
+            ("preparing_recording", "Currently: Preparing recording"),
+            ("correcting_signals", "Currently: Correcting signals"),
+            ("analyzing_tonic_signal", "Currently: Analyzing tonic signal"),
+            ("detecting_features", "Currently: Detecting features"),
+            ("building_summaries", "Currently: Building summaries"),
+            ("saving_results", "Currently: Saving results"),
+        )
+        for phase, label in expected:
+            write_status(phase)
+            follower._poll()
+            assert window._guided_run_live_phase_label.text() == label
+            assert window._guided_run_elapsed_timer is elapsed_timer
+            assert elapsed_timer.isActive()
+
+        current_phase = window._guided_run_live_phase_label.text()
+        window._on_guided_run_live_status_received(
+            {"run_id": "stale-run", "phase": "detecting_features"}
+        )
+        assert window._guided_run_live_phase_label.text() == current_phase
+
+        visible = " ".join(
+            (
+                window._guided_run_live_status_label.text(),
+                window._guided_run_live_phase_label.text(),
+                window._guided_run_live_elapsed_label.text(),
+            )
+        ).lower()
+        assert "%" not in visible
+        assert "eta" not in visible
+    finally:
+        release.set()
+
+    assert _pump(
+        qapp,
+        lambda: window._guided_continuous_rwd_execution_active is False,
+        timeout_ms=20_000,
+    )
+    assert window._guided_run_status_follower is None
+    assert window._guided_run_elapsed_timer is None
+    assert window._guided_run_live_status_group.isHidden()
+    assert window._guided_continuous_rwd_completed_run_dir == str(run_dir)
+
+
+def test_live_progress_stops_after_forced_failure(
+    window, qapp, monkeypatch, tmp_path
+):
+    _prepared_window(window, qapp, monkeypatch, tmp_path, "live_progress_failure")
+    module = importlib.import_module(
+        "photometry_pipeline.guided_continuous_rwd_combined_run"
+    )
+    run_dir = tmp_path / "live_progress_failure_run"
+    run_id = "continuous-live-failure"
+    release = threading.Event()
+
+    def failing_backend(*_args, **kwargs):
+        run_dir.mkdir()
+        run_dir.joinpath("status.json").write_text(
+            json.dumps({"run_id": run_id, "phase": "initializing", "status": "running"}),
+            encoding="utf-8",
+        )
+        kwargs["run_started_callback"](str(run_dir), run_id)
+        release.wait(30.0)
+        raise RuntimeError("forced backend failure")
+
+    monkeypatch.setattr(module, "execute_guided_continuous_rwd_combined_run", failing_backend)
+    window._on_guided_run_clicked_backend_guarded()
+    try:
+        assert _pump(
+            qapp,
+            lambda: getattr(window, "_guided_run_status_follower", None)
+            is not None,
+            timeout_ms=20_000,
+        )
+        assert window._guided_run_elapsed_timer is not None
+    finally:
+        release.set()
+
+    assert _pump(
+        qapp,
+        lambda: window._guided_continuous_rwd_execution_active is False,
+        timeout_ms=20_000,
+    )
+    assert window._guided_run_status_follower is None
+    assert window._guided_run_elapsed_timer is None
+    assert window._guided_run_live_status_group.isHidden()
+    assert window._guided_continuous_rwd_completed_run_dir is None
+    assert window._guided_continuous_rwd_status_message == (
+        "Continuous analysis could not be completed."
+    )
 
 
 def test_run_press_rebuilds_no_authority(

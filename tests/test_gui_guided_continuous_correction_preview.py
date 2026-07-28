@@ -170,6 +170,26 @@ def _select_all_preview_methods(window):
         checkbox.setChecked(True)
 
 
+def _generate_and_confirm_corrections(window, qapp):
+    """Drive the existing Step 4 evidence/confirmation path to Step 5."""
+    _select_all_preview_methods(window)
+    for roi_index in range(window._guided_preview_roi_combo.count()):
+        window._guided_preview_roi_combo.setCurrentIndex(roi_index)
+        _generate_preview(window, qapp)
+    window._refresh_guided_diagnostics_panel()
+    window._refresh_guided_correction_next_action()
+    for row in dict(
+        getattr(window, "_guided_local_preview_confirmation_rows", {})
+    ).values():
+        combo = row["strategy_combo"]
+        for index in range(combo.count()):
+            combo.setCurrentIndex(index)
+            if combo.currentData():
+                break
+        row["action_button"].click()
+        qapp.processEvents()
+
+
 def _is_inside(widget, ancestor):
     parent = widget.parentWidget()
     while parent is not None:
@@ -380,6 +400,85 @@ def test_window_longer_than_the_recording_is_explained(window, qapp, tmp_path):
     assert message != GUIDED_PREVIEW_MISSING_PREREQUISITES_TEXT
     assert "shorter analysis window" in message
 
+
+def test_feature_detection_reuses_continuous_window_selector_and_bounded_preview(
+    window, qapp, tmp_path, monkeypatch
+):
+    folder = _continuous_folder(tmp_path / "rec", samples=12_000)
+    _select_data(window, qapp, folder)
+    window._continuous_window_sec_spin.setValue(200.0)
+    _check_recording(window, qapp)
+    _open_correction_approach(window)
+    _generate_and_confirm_corrections(window, qapp)
+
+    window._on_guided_continue_to_feature_detection()
+    qapp.processEvents()
+
+    combo = window._guided_feature_preview_segment_combo
+    native_plan = window._guided_continuous_rwd_native_segment_plan()
+    assert native_plan is not None
+    target_grid, segment_plan = native_plan
+    draft = window._guided_continuous_rwd_live_draft()
+    assert draft is not None
+    assert draft.continuous_step_sec == pytest.approx(
+        draft.continuous_window_sec
+    )
+    assert window._continuous_step_sec_spin.isEnabled() is False
+    expected_descriptors = segment_plan.descriptors
+    selector_data = [combo.itemData(index) for index in range(combo.count())]
+    assert [
+        int(item["continuous_window_index"]) for item in selector_data
+    ] == [int(item.segment_index) for item in expected_descriptors]
+    cadence = target_grid.cadence_fraction
+    np.testing.assert_allclose(
+        [float(item["window_start_sec"]) for item in selector_data],
+        [float(item.start_target_index * cadence) for item in expected_descriptors],
+    )
+    np.testing.assert_allclose(
+        [float(item["window_end_sec"]) for item in selector_data],
+        [float(item.stop_target_index * cadence) for item in expected_descriptors],
+    )
+    assert combo.count() == 6
+    assert combo.currentIndex() == 0
+    assert combo.itemText(0).startswith("Window 1 (0:00:00")
+    assert "0:03:20" in combo.itemText(0)
+    assert combo.itemText(5).startswith("Window 6 (0:16:40")
+    assert "0:20:00" in combo.itemText(5)
+
+    window._guided_feature_event_apply_btn.click()
+    qapp.processEvents()
+    window._guided_feature_preview_segment_combo.setCurrentIndex(4)
+
+    real_compute = main_window_module.compute_guided_local_preview_dff_trace_in_memory
+    captured = []
+
+    def counted_compute(*args, **kwargs):
+        captured.append(dict(kwargs))
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        counted_compute,
+    )
+    window._on_guided_generate_feature_detection_preview()
+
+    assert captured
+    selected_window = window._guided_feature_preview_on_demand_trace[
+        "continuous_analysis_window"
+    ]
+    assert selected_window["window_index"] == 4
+    assert selected_window["window_start_sec"] == pytest.approx(800.0)
+    assert selected_window["window_end_sec"] == pytest.approx(1000.0)
+    assert (
+        selected_window["row_stop"] - selected_window["row_start"]
+    ) < 12_000
+    assert window._guided_feature_preview_last_result is not None
+
+    # The existing shared ROI-change refresh preserves the selected window.
+    window._guided_feature_preview_roi_combo.setCurrentIndex(1)
+    qapp.processEvents()
+    assert window._guided_feature_preview_segment_combo.currentIndex() == 4
 
 # ---------------------------------------------------------------------------
 # The intermittent path is untouched

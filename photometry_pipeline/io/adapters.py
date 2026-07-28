@@ -1184,6 +1184,50 @@ def resolve_continuous_source_metadata(
     return _resolve_source_data(path, format_type, config, source_cache=source_cache)
 
 
+def resolve_continuous_window_for_source(
+    path: str,
+    format_type: str,
+    config: Config,
+    window: Dict[str, Any],
+    *,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Attach bounded source-row support to one accepted window descriptor.
+
+    This maps an already-authoritative analysis window to the raw rows needed
+    for interpolation.  It does not enumerate or redefine analysis windows;
+    callers supply the accepted start/end/duration and this helper performs
+    only the existing time-column row-bound scan.
+    """
+    fmt = str(format_type).strip().lower()
+    if fmt not in {"rwd", "custom_tabular"}:
+        raise ValueError(
+            f"Continuous acquisition mode is not yet implemented for format '{format_type}'."
+        )
+    if not isinstance(window, dict):
+        raise ValueError("continuous window descriptor must be a dictionary")
+    required = ("window_start_sec", "window_end_sec", "window_duration_sec")
+    missing = [key for key in required if key not in window]
+    if missing:
+        raise ValueError(f"Continuous window is missing required fields: {missing}")
+
+    source = _resolve_source_data(path, fmt, config, source_cache=source_cache)
+    selected = dict(window)
+    selected.setdefault("source_file", path)
+    selected.setdefault("original_file_duration_sec", float(source["duration_sec"]))
+    selected.setdefault(
+        "continuous_window_sec",
+        float(getattr(config, "continuous_window_sec", selected["window_duration_sec"])),
+    )
+    selected.setdefault(
+        "continuous_step_sec",
+        float(getattr(config, "continuous_step_sec", selected["continuous_window_sec"])),
+    )
+    selected.setdefault("is_partial_final_window", False)
+    _attach_streaming_window_row_bounds(source, [selected])
+    return selected
+
+
 def _compute_window_row_bounds(
     t_rel: np.ndarray,
     *,

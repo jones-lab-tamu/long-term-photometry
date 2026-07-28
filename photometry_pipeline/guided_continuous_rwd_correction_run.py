@@ -188,7 +188,13 @@ def _build_run_mode(included_roi_ids: tuple[str, ...]) -> dict:
     )
 
 
-def _write_running_status(run_dir: str, *, run_id: str, run_mode: dict) -> None:
+def _write_running_status(
+    run_dir: str,
+    *,
+    run_id: str,
+    run_mode: dict,
+    phase: str = "running",
+) -> None:
     status = {
         "schema_version": 1,
         "run_id": run_id,
@@ -196,12 +202,34 @@ def _write_running_status(run_dir: str, *, run_id: str, run_mode: dict) -> None:
         "run_type": run_mode["run_type"],
         "acquisition_mode": run_mode["acquisition_mode"],
         "traces_only": run_mode["traces_only"],
-        "phase": "running",
+        "phase": str(phase),
         "status": "running",
         "errors": [],
         "warnings": [],
     }
     _write_json(os.path.join(run_dir, STATUS_FILENAME), status)
+
+
+def _write_continuous_progress_status(
+    run_dir: str, *, run_id: str, run_mode: dict, phase: str
+) -> None:
+    """Write one truthful running milestone through the existing status file."""
+    _write_running_status(
+        run_dir,
+        run_id=run_id,
+        run_mode=run_mode,
+        phase=str(phase),
+    )
+
+
+def _notify_continuous_run_started(
+    callback: Callable[[str, str], None] | None,
+    run_dir: str,
+    run_id: str,
+) -> None:
+    """Notify the GUI only after the run directory/status authority exists."""
+    if callback is not None:
+        callback(str(run_dir), str(run_id))
 
 
 def _write_terminal_failure_status(
@@ -324,6 +352,7 @@ def execute_guided_continuous_rwd_correction_run(
     output_base: str,
     config: Config,
     cancellation_requested: Callable[[], bool] | None = None,
+    run_started_callback: Callable[[str, str], None] | None = None,
 ) -> GuidedContinuousRwdCorrectionRunResult:
     """Produce one coherent continuous-RWD correction run inside the existing
     run-directory / completed-run lifecycle.
@@ -357,11 +386,26 @@ def execute_guided_continuous_rwd_correction_run(
         accepted_draft.execution_intent
     )
     run_id, run_dir = _allocate_run_directory(output_base)
-    _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
+    _write_running_status(
+        run_dir, run_id=run_id, run_mode=run_mode, phase="initializing"
+    )
+    _notify_continuous_run_started(run_started_callback, run_dir, run_id)
 
     cache_path = os.path.join(run_dir, CORRECTED_CACHE_RELATIVE_PATH)
     traversal: GuidedContinuousRwdCorrectionPassTraversal | None = None
     try:
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="preparing_recording",
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="correcting_signals",
+        )
         traversal = iterate_guided_continuous_rwd_corrected_segments(
             review_binding,
             target_grid,
@@ -384,6 +428,12 @@ def execute_guided_continuous_rwd_correction_run(
             review_binding=review_binding,
             target_grid=target_grid,
             completion=completion,
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="saving_results",
         )
 
         provenance = _per_roi_provenance(cache_path, included_roi_ids, first_chunk_id=0)

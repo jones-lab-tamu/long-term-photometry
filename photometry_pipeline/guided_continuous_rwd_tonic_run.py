@@ -91,8 +91,10 @@ from photometry_pipeline.guided_continuous_rwd_correction_run import (
     CORRECTED_CACHE_RELATIVE_PATH,
     _allocate_run_directory,
     _is_cancelled_traversal,
+    _notify_continuous_run_started,
     _per_roi_provenance,
     _validate_persisted_cache,
+    _write_continuous_progress_status,
     _write_running_status,
     _write_terminal_failure_status,
 )
@@ -365,6 +367,7 @@ def execute_guided_continuous_rwd_tonic_run(
     output_base: str,
     config: Config,
     cancellation_requested: Callable[[], bool] | None = None,
+    run_started_callback: Callable[[str, str], None] | None = None,
 ) -> GuidedContinuousRwdTonicRunResult:
     """Produce one coherent continuous-RWD run whose established tonic
     computation has completed and been published through the existing tonic
@@ -400,13 +403,28 @@ def execute_guided_continuous_rwd_tonic_run(
     )
     window_timing = accepted_continuous_window_timing(accepted_draft)
     run_id, run_dir = _allocate_run_directory(output_base)
-    _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
+    _write_running_status(
+        run_dir, run_id=run_id, run_mode=run_mode, phase="initializing"
+    )
+    _notify_continuous_run_started(run_started_callback, run_dir, run_id)
 
     cache_path = os.path.join(run_dir, CORRECTED_CACHE_RELATIVE_PATH)
     tonic_out_dir = os.path.join(run_dir, TONIC_ANALYSIS_RELATIVE_DIR)
     tonic_cache_path = os.path.join(tonic_out_dir, TONIC_CACHE_FILENAME)
     traversal: GuidedContinuousRwdCorrectionPassTraversal | None = None
     try:
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="preparing_recording",
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="correcting_signals",
+        )
         traversal = iterate_guided_continuous_rwd_corrected_segments(
             review_binding,
             target_grid,
@@ -432,6 +450,12 @@ def execute_guided_continuous_rwd_tonic_run(
         )
 
         os.makedirs(tonic_out_dir, exist_ok=True)
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="analyzing_tonic_signal",
+        )
         _write_tonic_trace_cache(
             corrected_cache_path=cache_path,
             tonic_cache_path=tonic_cache_path,
@@ -442,10 +466,22 @@ def execute_guided_continuous_rwd_tonic_run(
         _validate_tonic_cache(
             tonic_cache_path, included_roi_ids=included_roi_ids, completion=completion
         )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="building_summaries",
+        )
         generate_run_report(config, tonic_out_dir, traces_only=False)
 
         tonic_paths, tonic_row_counts = _generate_tonic_summary(
             run_dir, tonic_out_dir, included_roi_ids
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="saving_results",
         )
         saved_artifacts = publish_guided_continuous_saved_artifacts(
             run_dir,

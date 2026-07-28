@@ -80,8 +80,10 @@ from photometry_pipeline.guided_continuous_rwd_correction_run import (
     CORRECTED_CACHE_RELATIVE_PATH,
     _allocate_run_directory,
     _is_cancelled_traversal,
+    _notify_continuous_run_started,
     _per_roi_provenance,
     _validate_persisted_cache,
+    _write_continuous_progress_status,
     _write_json,
     _write_running_status,
     _write_terminal_failure_status,
@@ -290,6 +292,7 @@ def execute_guided_continuous_rwd_combined_run(
     output_base: str,
     config: Config,
     cancellation_requested: Callable[[], bool] | None = None,
+    run_started_callback: Callable[[str, str], None] | None = None,
 ) -> GuidedContinuousRwdCombinedRunResult:
     """Produce one coherent continuous-RWD run whose tonic AND phasic
     analysis have both completed and been published, sharing one correction
@@ -323,7 +326,10 @@ def execute_guided_continuous_rwd_combined_run(
     )
     window_timing = accepted_continuous_window_timing(accepted_draft)
     run_id, run_dir = _allocate_run_directory(output_base)
-    _write_running_status(run_dir, run_id=run_id, run_mode=run_mode)
+    _write_running_status(
+        run_dir, run_id=run_id, run_mode=run_mode, phase="initializing"
+    )
+    _notify_continuous_run_started(run_started_callback, run_dir, run_id)
 
     cache_path = os.path.join(run_dir, CORRECTED_CACHE_RELATIVE_PATH)
     tonic_out_dir = os.path.join(run_dir, TONIC_ANALYSIS_RELATIVE_DIR)
@@ -333,6 +339,18 @@ def execute_guided_continuous_rwd_combined_run(
     features_dir = os.path.join(phasic_out_dir, PHASIC_FEATURES_RELATIVE_DIR)
     traversal: GuidedContinuousRwdCorrectionPassTraversal | None = None
     try:
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="preparing_recording",
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="correcting_signals",
+        )
         (
             effective_feature_config_by_roi,
             per_roi_feature_config,
@@ -368,6 +386,12 @@ def execute_guided_continuous_rwd_combined_run(
         )
 
         # --- tonic publication, reading the one shared corrected cache ---
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="analyzing_tonic_signal",
+        )
         os.makedirs(tonic_out_dir, exist_ok=True)
         _write_tonic_trace_cache(
             corrected_cache_path=cache_path,
@@ -385,6 +409,12 @@ def execute_guided_continuous_rwd_combined_run(
         )
 
         # --- phasic detection + publication, reading the same shared cache ---
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="detecting_features",
+        )
         detection = detect_guided_continuous_rwd_phasic_features(
             cache_path,
             review_binding=review_binding,
@@ -392,6 +422,12 @@ def execute_guided_continuous_rwd_combined_run(
             config=config,
             per_roi_config=effective_feature_config_by_roi,
             cancellation_requested=cancellation_requested,
+        )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="building_summaries",
         )
         os.makedirs(phasic_out_dir, exist_ok=True)
         feature_rows, event_rows = _publish_phasic_cache_and_features(
@@ -449,14 +485,20 @@ def execute_guided_continuous_rwd_combined_run(
         _validate_summary_conserves_events(
             run_dir, relative_paths=phasic_paths, detection=detection
         )
-
-        # --- cross-family coherence, before either family can claim success ---
         _validate_cross_family_coherence(
             tonic_cache_path=tonic_cache_path,
             phasic_cache_path=phasic_cache_path,
             included_roi_ids=included_roi_ids,
             completion=completion,
         )
+        _write_continuous_progress_status(
+            run_dir,
+            run_id=run_id,
+            run_mode=run_mode,
+            phase="saving_results",
+        )
+
+        # --- cross-family coherence, before either family can claim success ---
         saved_artifacts = publish_guided_continuous_saved_artifacts(
             run_dir,
             included_roi_ids=included_roi_ids,

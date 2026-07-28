@@ -44,6 +44,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 from photometry_pipeline.io.adapters import (
     load_chunk,
     plan_continuous_windows_for_source,
+    resolve_continuous_window_for_source,
 )
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
 from photometry_pipeline.run_completion_contract import classify_run_terminal_state
@@ -551,6 +552,7 @@ def compute_guided_local_preview_dff_trace_in_memory(
     strategy: str,
     dynamic_fit_mode: str | None = None,
     config_overrides: dict[str, Any] | None = None,
+    continuous_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute one local fractional dF/F trace without creating artifacts."""
     family = str(strategy_family or "").strip()
@@ -598,11 +600,25 @@ def compute_guided_local_preview_dff_trace_in_memory(
             cfg_values = dataclasses.asdict(cfg)
             cfg_values.update(overrides)
             cfg = Config(**cfg_values)
+        load_kwargs: dict[str, Any] = {}
+        selected_window = None
+        if continuous_window is not None:
+            source_cache: dict[str, Any] = {}
+            selected_window = resolve_continuous_window_for_source(
+                source_path,
+                str(input_format).strip().lower(),
+                cfg,
+                dict(continuous_window),
+                source_cache=source_cache,
+            )
+            load_kwargs["continuous_window"] = selected_window
+            load_kwargs["source_cache"] = source_cache
         raw_chunk = load_chunk(
             source_path,
             str(input_format).strip().lower(),
             cfg,
             int(adapter_chunk_index),
+            **load_kwargs,
         )
         if roi not in raw_chunk.channel_names:
             raise GuidedCorrectionPreviewError(
@@ -613,8 +629,11 @@ def compute_guided_local_preview_dff_trace_in_memory(
             raw_chunk.time_sec, dtype=float
         ).reshape(-1)
         segment_start = float(source_time[0])
-        segment_end = segment_start + float(cfg.chunk_duration_sec)
-        mask = (source_time >= segment_start) & (source_time < segment_end)
+        if selected_window is not None:
+            mask = np.ones(source_time.shape, dtype=bool)
+        else:
+            segment_end = segment_start + float(cfg.chunk_duration_sec)
+            mask = (source_time >= segment_start) & (source_time < segment_end)
         if int(np.count_nonzero(mask)) < 3:
             raise GuidedCorrectionPreviewError(
                 "Selected preview segment contains too few samples."
@@ -704,6 +723,9 @@ def compute_guided_local_preview_dff_trace_in_memory(
             "trace_source": "local_correction_preview_dff",
             "dff_scale": "fractional_ratio",
             "issues": [],
+            "continuous_analysis_window": (
+                dict(selected_window) if selected_window is not None else None
+            ),
         }
     except Exception as exc:
         return {
@@ -1915,6 +1937,7 @@ def _select_continuous_preview_window(
     base_cfg: Config,
     window_index: int,
     source_cache: dict[str, Any],
+    analysis_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return one planned continuous analysis window, bounded to its own rows.
 
@@ -1929,6 +1952,19 @@ def _select_continuous_preview_window(
         raise GuidedCorrectionPreviewError(
             "Continuous correction previews are supported for RWD recordings only."
         )
+    if analysis_window is not None:
+        try:
+            return resolve_continuous_window_for_source(
+                source_path,
+                input_format,
+                base_cfg,
+                dict(analysis_window),
+                source_cache=source_cache,
+            )
+        except Exception as exc:
+            raise GuidedCorrectionPreviewError(
+                "The selected analysis window could not be read."
+            ) from exc
     windows = plan_continuous_windows_for_source(
         source_path, input_format, base_cfg, source_cache=source_cache
     )
@@ -1958,6 +1994,7 @@ def run_guided_local_correction_preview(
     preview_id: str | None = None,
     config_overrides: dict[str, Any] | None = None,
     continuous_window_index: int | None = None,
+    continuous_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run preview-only correction methods on one raw source segment.
 
@@ -2052,14 +2089,15 @@ def run_guided_local_correction_preview(
         if str(input_format).strip().lower() == "npm":
             load_kwargs["selected_roi"] = str(roi)
         selected_window = None
-        if continuous_window_index is not None:
+        if continuous_window is not None or continuous_window_index is not None:
             source_cache: dict[str, Any] = {}
             selected_window = _select_continuous_preview_window(
                 source_path,
                 str(input_format).strip().lower(),
                 base_cfg,
-                int(continuous_window_index),
+                int(continuous_window_index or 0),
                 source_cache,
+                analysis_window=continuous_window,
             )
             load_kwargs["continuous_window"] = selected_window
             load_kwargs["source_cache"] = source_cache

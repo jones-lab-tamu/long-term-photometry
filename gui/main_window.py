@@ -1359,6 +1359,8 @@ def _guided_continuous_rwd_execution_is_cancellation(exc: Exception) -> bool:
 
 def _execute_guided_continuous_rwd(
     execution_request: "_GuidedContinuousRwdExecutionRequest",
+    *,
+    run_started_callback=None,
 ):
     """Execute exactly one accepted continuous-RWD backend for the analysis
     selection the accepted Guided plan already carries.
@@ -1413,17 +1415,22 @@ def _execute_guided_continuous_rwd(
         )
 
     backend = _select_guided_continuous_rwd_backend(tonic_analysis, phasic_analysis)
+    backend_kwargs = {
+        "accepted_draft": execution_request.accepted_draft,
+        "startup_mapping_contract": execution_request.startup_mapping_contract,
+        "output_base": execution_request.output_base,
+        "config": execution_request.config,
+        "cancellation_requested": execution_request.cancellation_requested,
+    }
+    if run_started_callback is not None:
+        backend_kwargs["run_started_callback"] = run_started_callback
     return backend(
         execution_request.review_binding,
         execution_request.target_grid,
         execution_request.block_plan,
         execution_request.segment_plan,
         execution_request.dynamic_f0_authority,
-        accepted_draft=execution_request.accepted_draft,
-        startup_mapping_contract=execution_request.startup_mapping_contract,
-        output_base=execution_request.output_base,
-        config=execution_request.config,
-        cancellation_requested=execution_request.cancellation_requested,
+        **backend_kwargs,
     )
 
 
@@ -1438,16 +1445,18 @@ class _GuidedRunExecutionWorker(QObject):
     function; it must never call a MainWindow method or read a MainWindow
     attribute, since it runs on a separate thread.
 
-    `continuous_execution` (CR1-E2) is an optional
+    `continuous_execution` (CR1-E3) is an optional
     `_GuidedContinuousRwdExecutionRequest`. When supplied, `run()` executes
     exactly one accepted continuous-RWD backend instead of
-    `execute_guided_backend_run`, and `request`/`runner` are ignored. No
-    existing call site passes this parameter yet -- Guided continuous Run
-    remains hidden/disabled; this is the internal execution bridge only.
+    `execute_guided_backend_run`, and `request`/`runner` are ignored. The
+    live continuous Run handler supplies this request and receives the
+    allocated run directory through `continuous_run_started` so the existing
+    Analysis progress panel can attach to the real status file.
     """
 
     succeeded = Signal(object)
     failed = Signal(str)
+    continuous_run_started = Signal(str, str)
 
     def __init__(self, request, runner, continuous_execution=None):
         super().__init__()
@@ -1458,7 +1467,10 @@ class _GuidedRunExecutionWorker(QObject):
     def run(self) -> None:
         if self._continuous_execution is not None:
             try:
-                result = _execute_guided_continuous_rwd(self._continuous_execution)
+                result = _execute_guided_continuous_rwd(
+                    self._continuous_execution,
+                    run_started_callback=self.continuous_run_started.emit,
+                )
             except Exception as exc:
                 if _guided_continuous_rwd_execution_is_cancellation(exc):
                     self.failed.emit(f"cancelled: {exc}")
@@ -3417,6 +3429,7 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_status_message = ""
         self._guided_continuous_rwd_execution_active = False
         self._guided_continuous_rwd_execution_cancel_event = None
+        self._guided_continuous_rwd_live_run_dir = ""
         self._guided_continuous_rwd_completed_run_dir = None
         self._guided_startup_authority = None
         self._guided_execution_payload_result = None
@@ -3452,6 +3465,7 @@ class MainWindow(QMainWindow):
         self._guided_npm_completed_output_dir = None
         self._guided_completed_output_format = None
         self._guided_run_status_follower = None
+        self._guided_run_live_status_run_id = ""
         self._guided_run_started_monotonic = None
         self._guided_run_elapsed_timer = None
         self._guided_raw_setup_controls = {}
@@ -7655,6 +7669,18 @@ class MainWindow(QMainWindow):
             resolved["continuous_window_sec"] = float(
                 segment.get("continuous_window_sec", 0.0)
             )
+            for key in (
+                "continuous_read_window",
+                "window_start_sec",
+                "window_end_sec",
+                "window_duration_sec",
+                "is_partial_final_window",
+                "continuous_window_start_target_index",
+                "continuous_window_stop_target_index",
+                "continuous_window_plan_identity",
+            ):
+                if key in segment:
+                    resolved[key] = segment[key]
         return resolved
 
     def _resolve_current_guided_preview_diagnostic_cache_source(self):
@@ -8110,20 +8136,79 @@ class MainWindow(QMainWindow):
         accepted = self._guided_continuous_rwd_accepted_plan()
         if accepted is None:
             return []
-        _draft, binding, _identity = accepted
+        draft, binding, _identity = accepted
+        native_plan = self._guided_continuous_rwd_native_segment_plan()
+        if native_plan is None:
+            # The correction segment authority is intentionally not available
+            # until every ROI has an accepted correction choice.  Keep the
+            # existing Step 4 preview usable during that earlier page state;
+            # once choices exist, the authoritative analysis plan above is
+            # the only source used by the selector and final summaries.
+            if getattr(draft, "per_roi_correction_strategy_choices", ()):
+                return []
+            duration_sec = float(binding.recording.time.measured_duration_seconds)
+            window_sec = float(draft.continuous_window_sec)
+            if window_sec <= 0.0 or duration_sec <= 0.0:
+                return []
+            count = int(math.floor((duration_sec + 1e-9) / window_sec))
+            source_path = os.path.realpath(
+                str(binding.recording.source.fluorescence_path_canonical)
+            )
+            return [
+                {
+                    "discovered_session_index": index,
+                    "segment_label": (
+                        f"Window {index + 1} "
+                        f"({self._guided_elapsed_label(index * window_sec)}"
+                        f"–{self._guided_elapsed_label((index + 1) * window_sec)})"
+                    ),
+                    "source_path": source_path,
+                    "adapter_chunk_index": 0,
+                    "continuous_window_index": index,
+                    "continuous_window_sec": window_sec,
+                    "window_start_sec": float(index * window_sec),
+                    "window_end_sec": float((index + 1) * window_sec),
+                    "window_duration_sec": window_sec,
+                    "is_partial_final_window": False,
+                }
+                for index in range(count)
+            ]
+        target_grid, segment_plan = native_plan
         recording = binding.recording
         source_path = os.path.realpath(
             str(recording.source.fluorescence_path_canonical)
         )
-        duration_sec = float(recording.time.measured_duration_seconds)
-        window_sec = float(self._continuous_window_sec_spin.value())
-        if window_sec <= 0.0 or duration_sec <= 0.0:
-            return []
-        count = int(math.floor((duration_sec + 1e-9) / window_sec))
+        window_sec = float(draft.continuous_window_sec)
+        cadence = target_grid.cadence_fraction
         segments: list[dict[str, object]] = []
-        for index in range(count):
-            start = float(index * window_sec)
-            end = float(start + window_sec)
+        for item in segment_plan.descriptors:
+            start_index = int(item.start_target_index)
+            stop_index = int(item.stop_target_index)
+            start = float(start_index * cadence)
+            planned_end = float(stop_index * cadence)
+            end = min(
+                planned_end,
+                float(recording.time.measured_duration_seconds),
+            )
+            window_duration = max(0.0, planned_end - start)
+            is_partial = bool(
+                item.is_final
+                and item.sample_count < segment_plan.nominal_segment_sample_count
+            )
+            read_window = {
+                "source_file": source_path,
+                "window_index": int(item.segment_index),
+                "window_start_sec": start,
+                "window_end_sec": end,
+                "window_duration_sec": window_duration,
+                "original_file_duration_sec": float(
+                    recording.time.measured_duration_seconds
+                ),
+                "is_partial_final_window": is_partial,
+                "continuous_window_sec": window_sec,
+                "continuous_step_sec": float(draft.continuous_step_sec),
+            }
+            index = int(item.segment_index)
             segments.append(
                 {
                     # The generic "which segment" identity the existing local
@@ -8136,14 +8221,66 @@ class MainWindow(QMainWindow):
                         f"–{self._guided_elapsed_label(end)})"
                     ),
                     "source_path": source_path,
-                    "adapter_chunk_index": index,
+                    "adapter_chunk_index": 0,
                     "continuous_window_index": index,
                     "continuous_window_sec": window_sec,
                     "window_start_sec": start,
-                    "window_end_sec": end,
+                    "window_end_sec": planned_end,
+                    "window_duration_sec": window_duration,
+                    "is_partial_final_window": is_partial,
+                    "continuous_window_start_target_index": start_index,
+                    "continuous_window_stop_target_index": stop_index,
+                    "continuous_window_plan_identity": str(
+                        segment_plan.plan_identity
+                    ),
+                    "continuous_read_window": read_window,
                 }
             )
         return segments
+
+    def _guided_continuous_rwd_native_segment_plan(self):
+        """Build the current production segment authority for preview labels."""
+        if self._guided_continuous_rwd_live_draft() is None:
+            return None
+        accepted = self._guided_continuous_rwd_accepted_plan()
+        if accepted is None:
+            return None
+        draft, binding, _identity = accepted
+        try:
+            from photometry_pipeline.guided_continuous_rwd_correction_segments import (
+                build_guided_continuous_rwd_correction_segment_plan,
+            )
+            from photometry_pipeline.guided_continuous_rwd_target_grid import (
+                build_guided_continuous_rwd_target_grid,
+            )
+            from photometry_pipeline.guided_execution_payloads import (
+                build_guided_execution_startup_mapping_contract,
+            )
+
+            target_grid = build_guided_continuous_rwd_target_grid(
+                binding.recording, binding.continuity_evaluation
+            )
+            segment_plan = build_guided_continuous_rwd_correction_segment_plan(
+                binding,
+                target_grid,
+                accepted_draft=draft,
+                startup_mapping_contract=build_guided_execution_startup_mapping_contract(),
+            )
+            return target_grid, segment_plan
+        except Exception as exc:
+            self._append_log(f"Continuous preview windows unavailable: {exc}")
+            return None
+
+    @staticmethod
+    def _guided_continuous_window_display_label(segment: dict[str, object]) -> str:
+        label = str(segment.get("segment_label") or "")
+        if (
+            bool(segment.get("is_partial_final_window"))
+            and label.endswith(")")
+            and ", partial)" not in label
+        ):
+            return f"{label[:-1]}, partial)"
+        return label
 
     def _guided_continuous_recording_check_running(self) -> bool:
         """Whether a recording check is running for the plan on screen now."""
@@ -8241,11 +8378,10 @@ class MainWindow(QMainWindow):
     def _guided_continuous_preview_config_overrides(self) -> dict[str, object]:
         """Config for reading one correction-preview window.
 
-        The recording's own reader settings, plus the window policy this
-        preview operation uses. The partial-final-window setting here is the
-        preview's alone: a preview is only ever generated from whole windows,
-        which says nothing about whether the final analysis should report a
-        short last window (CR1-F1-D).
+        The recording's own reader settings plus the configured preview
+        window. The selected continuous descriptor is passed separately to
+        the preview loader, so this legacy override is not allowed to invent
+        or re-plan the final partial-window decision (CR1-F1-D).
         """
         overrides = dict(self._guided_continuous_recording_reader_overrides())
         window_sec = float(self._continuous_window_sec_spin.value())
@@ -8253,7 +8389,8 @@ class MainWindow(QMainWindow):
             {
                 "continuous_window_sec": window_sec,
                 "continuous_step_sec": window_sec,
-                # Preview-only: whole windows are the only preview evidence.
+                # The explicit selected descriptor is authoritative when one
+                # is present. Keep the generic fallback whole-window-only.
                 "allow_partial_final_window": False,
             }
         )
@@ -8323,7 +8460,12 @@ class MainWindow(QMainWindow):
                             )
                         for segment in segments:
                             self._guided_preview_chunk_combo.addItem(
-                                str(segment["segment_label"]), dict(segment)
+                                (
+                                    self._guided_continuous_window_display_label(segment)
+                                    if continuous
+                                    else str(segment["segment_label"])
+                                ),
+                                dict(segment),
                             )
                         if previous_roi:
                             index = self._guided_preview_roi_combo.findData(
@@ -9828,6 +9970,9 @@ class MainWindow(QMainWindow):
                     preview_kwargs["continuous_window_index"] = int(
                         continuous_window_index
                     )
+                    read_window = segment.get("continuous_read_window")
+                    if isinstance(read_window, dict):
+                        preview_kwargs["continuous_window"] = dict(read_window)
                 if (
                     str(segment["input_format"]).lower() == "npm"
                     or continuous_window_index is not None
@@ -15158,6 +15303,8 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_execution_active = True
         self._guided_backend_execution_active = True
         self._guided_continuous_rwd_completed_run_dir = None
+        self._guided_continuous_rwd_live_run_dir = ""
+        self._stop_guided_run_live_status()
         self._refresh_guided_review_handoff_display()
         button = getattr(self, "_guided_run_btn", None)
         if button is not None:
@@ -15175,6 +15322,40 @@ class MainWindow(QMainWindow):
         self._set_guided_continuous_rwd_status("Running continuous analysis…")
         self._start_guided_run_execution_worker(None, continuous_execution=request)
 
+    def _on_guided_continuous_rwd_run_started(
+        self, run_dir: str, run_id: str
+    ) -> None:
+        """Start shared live Analysis status after status.json exists."""
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_run_execution_worker", None)
+        if (
+            sender is not None
+            and active_worker is not None
+            and sender != active_worker
+        ):
+            return
+        if not getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return
+        raw_run_dir = str(run_dir or "").strip()
+        if not raw_run_dir:
+            return
+        candidate_run_dir = os.path.realpath(raw_run_dir)
+        current_run_dir_raw = str(
+            getattr(self, "_guided_continuous_rwd_live_run_dir", "") or ""
+        ).strip()
+        current_run_dir = (
+            os.path.realpath(current_run_dir_raw) if current_run_dir_raw else ""
+        )
+        if current_run_dir and candidate_run_dir != current_run_dir:
+            self._append_log(
+                "Ignored a continuous run-start notification from an older run."
+            )
+            return
+        self._guided_continuous_rwd_live_run_dir = candidate_run_dir
+        self._start_guided_run_live_status(
+            raw_run_dir, run_identity=str(run_id or "")
+        )
+
     def _on_guided_continuous_rwd_execution_succeeded(self, result) -> None:
         """GUI-thread slot: an accepted continuous backend returned a result.
 
@@ -15183,13 +15364,35 @@ class MainWindow(QMainWindow):
         through the existing completion contract before anything is
         presented as completed or offered for review.
         """
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_run_execution_worker", None)
+        if (
+            sender is not None
+            and active_worker is not None
+            and sender != active_worker
+        ):
+            return
+        if not getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return
         from photometry_pipeline.run_completion_contract import (
             TERMINAL_SUCCESS_CURRENT,
             classify_run_terminal_state,
         )
 
-        self._guided_continuous_rwd_finish_execution()
         run_dir = str(getattr(result, "run_dir", "") or "")
+        expected_run_dir = str(
+            getattr(self, "_guided_continuous_rwd_live_run_dir", "") or ""
+        )
+        if (
+            expected_run_dir
+            and run_dir
+            and os.path.realpath(run_dir) != os.path.realpath(expected_run_dir)
+        ):
+            self._append_log(
+                "Ignored a continuous analysis result from an older run."
+            )
+            return
+        self._guided_continuous_rwd_finish_execution()
         classification = None
         if run_dir:
             try:
@@ -15231,6 +15434,16 @@ class MainWindow(QMainWindow):
         reported as a failure or as a success. Neither outcome retries, calls
         another backend, or falls back to the intermittent path.
         """
+        sender = self.sender()
+        active_worker = getattr(self, "_guided_run_execution_worker", None)
+        if (
+            sender is not None
+            and active_worker is not None
+            and sender != active_worker
+        ):
+            return
+        if not getattr(self, "_guided_continuous_rwd_execution_active", False):
+            return
         self._guided_continuous_rwd_finish_execution()
         text = str(message or "")
         self._append_log(f"Continuous analysis ended: {text}")
@@ -15246,9 +15459,11 @@ class MainWindow(QMainWindow):
         self._refresh_guided_run_readiness_display()
 
     def _guided_continuous_rwd_finish_execution(self) -> None:
+        self._stop_guided_run_live_status()
         self._guided_continuous_rwd_execution_active = False
         self._guided_backend_execution_active = False
         self._guided_continuous_rwd_execution_cancel_event = None
+        self._guided_continuous_rwd_live_run_dir = ""
         validate_btn = getattr(self, "_guided_backend_validate_btn", None)
         if validate_btn is not None:
             validate_btn.setEnabled(True)
@@ -16329,6 +16544,19 @@ class MainWindow(QMainWindow):
         self._guided_run_execution_thread = thread
         self._guided_run_execution_worker = worker
         thread.started.connect(worker.run)
+        if continuous_execution is not None:
+            worker.continuous_run_started.connect(
+                lambda run_dir, run_id, w=worker: self._post_to_guided_gui_thread(
+                    lambda: (
+                        self._on_guided_continuous_rwd_run_started(
+                            run_dir, run_id
+                        )
+                        if w
+                        is getattr(self, "_guided_run_execution_worker", None)
+                        else None
+                    )
+                )
+            )
         worker.succeeded.connect(self._on_guided_run_execution_succeeded)
         worker.failed.connect(self._on_guided_run_execution_failed)
         worker.succeeded.connect(thread.quit)
@@ -19119,6 +19347,48 @@ class MainWindow(QMainWindow):
             or provenance.get("preview_id")
             or ""
         )
+        discovery_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format"
+            )
+            or (
+                self._guided_format_combo.currentText()
+                if hasattr(self, "_guided_format_combo")
+                else ""
+            )
+        ).strip().lower()
+        continuous_segments = (
+            self._guided_continuous_preview_window_segments()
+            if self._guided_effective_acquisition_mode() == "continuous"
+            and discovery_format == "rwd"
+            else None
+        )
+        if continuous_segments is not None:
+            feature_segments: list[dict[str, object]] = []
+            for segment in continuous_segments:
+                data = dict(segment)
+                retained = bool(
+                    retained_preview_id
+                    and retained_index is not None
+                    and int(retained_index)
+                    == int(data.get("discovered_session_index", -1))
+                    and (
+                        not retained_source
+                        or retained_source
+                        == os.path.realpath(str(data.get("source_path") or ""))
+                    )
+                )
+                data["retained_preview_id"] = (
+                    retained_preview_id if retained else ""
+                )
+                segments_label = self._guided_continuous_window_display_label(
+                    data
+                )
+                data["segment_label"] = segments_label
+                if retained:
+                    data["retained_preview_id"] = retained_preview_id
+                feature_segments.append(data)
+            return feature_segments
         segments: list[dict[str, object]] = []
         discovery = getattr(self, "_discovery_cache", None) or {}
         for fallback_index, session in enumerate(
@@ -19181,16 +19451,21 @@ class MainWindow(QMainWindow):
         roi_id = self._guided_feature_preview_roi_combo.currentText()
         segments = self._guided_feature_preview_segments_for_roi(roi_id)
         current_segment_index = None
+        current_plan_identity = None
         current_data = self._guided_feature_preview_segment_combo.currentData()
         if isinstance(current_data, dict):
             current_segment_index = current_data.get(
                 "discovered_session_index"
             )
+            current_plan_identity = current_data.get(
+                "continuous_window_plan_identity"
+            )
         with QSignalBlocker(self._guided_feature_preview_segment_combo):
             self._guided_feature_preview_segment_combo.clear()
             for segment in segments:
                 self._guided_feature_preview_segment_combo.addItem(
-                    str(segment["segment_label"]), dict(segment)
+                    self._guided_continuous_window_display_label(segment),
+                    dict(segment),
                 )
             if current_segment_index is not None:
                 for index in range(
@@ -19203,6 +19478,11 @@ class MainWindow(QMainWindow):
                         isinstance(data, dict)
                         and data.get("discovered_session_index")
                         == current_segment_index
+                        and (
+                            current_plan_identity is None
+                            or data.get("continuous_window_plan_identity")
+                            == current_plan_identity
+                        )
                     ):
                         self._guided_feature_preview_segment_combo.setCurrentIndex(
                             index
@@ -19396,11 +19676,114 @@ class MainWindow(QMainWindow):
             == self._guided_local_preview_setup_signature()
         )
 
+    @staticmethod
+    def _guided_feature_preview_segment_identity(
+        segment: dict[str, object] | None,
+    ) -> str:
+        if not isinstance(segment, dict):
+            return ""
+        return json.dumps(
+            {
+                key: segment.get(key)
+                for key in (
+                    "discovered_session_index",
+                    "source_path",
+                    "adapter_chunk_index",
+                    "continuous_window_index",
+                    "window_start_sec",
+                    "window_end_sec",
+                    "window_duration_sec",
+                    "is_partial_final_window",
+                    "continuous_window_start_target_index",
+                    "continuous_window_stop_target_index",
+                    "continuous_window_plan_identity",
+                    "continuous_read_window",
+                )
+            },
+            sort_keys=True,
+            default=str,
+        )
+
+    def _guided_feature_preview_request_identity(
+        self,
+        *,
+        roi_id: str,
+        segment: dict[str, object] | None,
+        choice_key: object,
+        choice: object,
+        feature_settings: dict[str, object] | None,
+    ) -> str:
+        return json.dumps(
+            {
+                "roi_id": str(roi_id),
+                "choice_key": choice_key,
+                "choice": choice,
+                "feature_settings": feature_settings or {},
+                "setup_signature": self._guided_local_preview_setup_signature(),
+                "segment": self._guided_feature_preview_segment_identity(segment),
+                "input_format": str(
+                    (getattr(self, "_discovery_cache", None) or {}).get(
+                        "resolved_format",
+                        self._guided_format_combo.currentText(),
+                    )
+                ).strip().lower(),
+            },
+            sort_keys=True,
+            default=str,
+        )
+
+    def _guided_feature_preview_current_request_identity(
+        self, choice_key: object
+    ) -> str | None:
+        roi_id = self._guided_feature_preview_roi_combo.currentText()
+        segment = self._guided_feature_preview_segment_combo.currentData()
+        choices = getattr(self, "_guided_strategy_choices", {})
+        choice = choices.get(choice_key)
+        if not roi_id or not isinstance(segment, dict) or not isinstance(choice, dict):
+            return None
+        roi_override = getattr(
+            self, "_guided_per_roi_feature_event_overrides", {}
+        ).get(roi_id)
+        if roi_override:
+            feature_settings = (
+                self._guided_effective_feature_event_config_fields_for_roi(
+                    roi_id
+                )
+            )
+            error = None
+        else:
+            feature_settings, error = self._guided_feature_event_current_values()
+        if error:
+            return None
+        feature_settings = normalize_feature_settings_for_active_threshold_method(
+            dict(feature_settings or {})
+        )
+        return self._guided_feature_preview_request_identity(
+            roi_id=roi_id,
+            segment=segment,
+            choice_key=choice_key,
+            choice=choice,
+            feature_settings=feature_settings,
+        )
+
     def _guided_feature_preview_config_overrides(
         self, segment: dict[str, object], input_format: str
     ) -> dict[str, object]:
         source_path = str(segment.get("source_path") or "")
         if input_format == "rwd":
+            if segment.get("continuous_window_index") is not None:
+                overrides = dict(
+                    self._guided_continuous_recording_reader_overrides()
+                )
+                if segment.get("continuous_window_sec") is not None:
+                    overrides["continuous_window_sec"] = float(
+                        segment["continuous_window_sec"]
+                    )
+                if segment.get("continuous_step_sec") is not None:
+                    overrides["continuous_step_sec"] = float(
+                        segment["continuous_step_sec"]
+                    )
+                return overrides
             contract = self._infer_rwd_chunk_contract(source_path)
             return {
                 "target_fs_hz": float(contract["fs_hz"]),
@@ -19570,6 +19953,29 @@ class MainWindow(QMainWindow):
             dynamic_fit_mode=dynamic_fit_mode,
             feature_settings=config_fields,
             feature_profile_id="preview-profile",
+            segment_start_sec=(
+                float(segment["window_start_sec"])
+                if segment.get("continuous_window_index") is not None
+                and segment.get("window_start_sec") is not None
+                else None
+            ),
+            segment_duration_sec=(
+                float(segment["window_duration_sec"])
+                if segment.get("continuous_window_index") is not None
+                and segment.get("window_duration_sec") is not None
+                else None
+            ),
+            setup_signature=str(choice.get("setup_signature") or ""),
+            correction_signature=str(
+                choice.get("source_setup_signature") or ""
+            ),
+        )
+        request_identity = self._guided_feature_preview_request_identity(
+            roi_id=roi_id,
+            segment=segment,
+            choice_key=choice_key,
+            choice=choice,
+            feature_settings=config_fields,
         )
 
         if correction_strategy == "dynamic_fit" and request.event_signal != "dff":
@@ -19635,6 +20041,13 @@ class MainWindow(QMainWindow):
                                 segment, input_format
                             )
                         ),
+                        continuous_window=(
+                            dict(segment["continuous_read_window"])
+                            if isinstance(
+                                segment.get("continuous_read_window"), dict
+                            )
+                            else None
+                        ),
                     )
                 )
             except Exception as exc:
@@ -19649,6 +20062,14 @@ class MainWindow(QMainWindow):
                         and self._guided_feature_preview_segment_combo.count()
                     )
                 )
+            if (
+                self._guided_feature_preview_current_request_identity(choice_key)
+                != request_identity
+            ):
+                self._clear_guided_feature_detection_preview_result(
+                    "Preview selection changed. Generate preview to update."
+                )
+                return
             if (
                 not isinstance(trace_result, dict)
                 or trace_result.get("valid") is not True
@@ -19672,6 +20093,14 @@ class MainWindow(QMainWindow):
             )
 
         # Run preview
+        if (
+            self._guided_feature_preview_current_request_identity(choice_key)
+            != request_identity
+        ):
+            self._clear_guided_feature_detection_preview_result(
+                "Preview selection changed. Generate preview to update."
+            )
+            return
         try:
             result = build_guided_feature_detection_preview(
                 trace_request=request,
@@ -19710,6 +20139,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._guided_feature_preview_status_label.setText(f"Preview generation failed: {exc}")
             self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        if (
+            self._guided_feature_preview_current_request_identity(choice_key)
+            != request_identity
+        ):
+            self._clear_guided_feature_detection_preview_result(
+                "Preview selection changed. Generate preview to update."
+            )
             return
 
         # Success! Render results
@@ -29424,6 +29862,12 @@ class MainWindow(QMainWindow):
 
     _GUIDED_RUN_PHASE_LABELS = {
         "initializing": "Starting analysis",
+        "preparing_recording": "Preparing recording",
+        "correcting_signals": "Correcting signals",
+        "analyzing_tonic_signal": "Analyzing tonic signal",
+        "detecting_features": "Detecting features",
+        "building_summaries": "Building summaries",
+        "saving_results": "Saving results",
         "validating": "Checking inputs",
         "tonic_analysis": "Analyzing tonic signal",
         "phasic_analysis": "Correcting phasic dF/F traces",
@@ -29447,9 +29891,12 @@ class MainWindow(QMainWindow):
             return f"Creating plots for {roi}" if roi else "Creating plots"
         return "Working"
 
-    def _start_guided_run_live_status(self, run_dir: str) -> None:
+    def _start_guided_run_live_status(
+        self, run_dir: str, *, run_identity: str | None = None
+    ) -> None:
         """Show and begin driving the Guided-scoped run progress panel."""
         self._stop_guided_run_live_status(hide=False)
+        self._guided_run_live_status_run_id = str(run_identity or "")
         group = getattr(self, "_guided_run_live_status_group", None)
         if group is None:
             return
@@ -29504,6 +29951,7 @@ class MainWindow(QMainWindow):
             follower.deleteLater()
             self._guided_run_status_follower = None
         self._guided_run_started_monotonic = None
+        self._guided_run_live_status_run_id = ""
         if hide:
             group = getattr(self, "_guided_run_live_status_group", None)
             if group is not None:
@@ -29529,6 +29977,11 @@ class MainWindow(QMainWindow):
         """Translate a status.json update into a scientist-facing phase label."""
         label = getattr(self, "_guided_run_live_phase_label", None)
         if label is None:
+            return
+        expected_run_id = str(
+            getattr(self, "_guided_run_live_status_run_id", "") or ""
+        )
+        if expected_run_id and str(data.get("run_id") or "") != expected_run_id:
             return
         phase = data.get("phase", "")
         friendly = self._guided_friendly_phase_label(phase)
