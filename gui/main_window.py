@@ -15356,7 +15356,9 @@ class MainWindow(QMainWindow):
             raw_run_dir, run_identity=str(run_id or "")
         )
 
-    def _on_guided_continuous_rwd_execution_succeeded(self, result) -> None:
+    def _on_guided_continuous_rwd_execution_succeeded(
+        self, worker, result
+    ) -> None:
         """GUI-thread slot: an accepted continuous backend returned a result.
 
         A returned object is not by itself proof of a completed analysis:
@@ -15364,13 +15366,7 @@ class MainWindow(QMainWindow):
         through the existing completion contract before anything is
         presented as completed or offered for review.
         """
-        sender = self.sender()
-        active_worker = getattr(self, "_guided_run_execution_worker", None)
-        if (
-            sender is not None
-            and active_worker is not None
-            and sender != active_worker
-        ):
+        if worker is not getattr(self, "_guided_run_execution_worker", None):
             return
         if not getattr(self, "_guided_continuous_rwd_execution_active", False):
             return
@@ -15392,7 +15388,6 @@ class MainWindow(QMainWindow):
                 "Ignored a continuous analysis result from an older run."
             )
             return
-        self._guided_continuous_rwd_finish_execution()
         classification = None
         if run_dir:
             try:
@@ -15401,6 +15396,7 @@ class MainWindow(QMainWindow):
                 self._append_log(
                     f"Continuous analysis completion check failed: {exc}"
                 )
+        self._guided_continuous_rwd_finish_execution()
         if (
             classification is None
             or getattr(classification, "state", None) != TERMINAL_SUCCESS_CURRENT
@@ -15426,7 +15422,9 @@ class MainWindow(QMainWindow):
         self._refresh_guided_review_handoff_display()
         self._refresh_guided_run_readiness_display()
 
-    def _on_guided_continuous_rwd_execution_failed(self, message: str) -> None:
+    def _on_guided_continuous_rwd_execution_failed(
+        self, worker, message: str
+    ) -> None:
         """GUI-thread slot: the accepted backend raised, or was cancelled.
 
         Cancellation is classified by the accepted backends themselves (see
@@ -15434,13 +15432,7 @@ class MainWindow(QMainWindow):
         reported as a failure or as a success. Neither outcome retries, calls
         another backend, or falls back to the intermittent path.
         """
-        sender = self.sender()
-        active_worker = getattr(self, "_guided_run_execution_worker", None)
-        if (
-            sender is not None
-            and active_worker is not None
-            and sender != active_worker
-        ):
+        if worker is not getattr(self, "_guided_run_execution_worker", None):
             return
         if not getattr(self, "_guided_continuous_rwd_execution_active", False):
             return
@@ -16557,24 +16549,38 @@ class MainWindow(QMainWindow):
                     )
                 )
             )
-        worker.succeeded.connect(self._on_guided_run_execution_succeeded)
-        worker.failed.connect(self._on_guided_run_execution_failed)
+        worker.succeeded.connect(
+            lambda result, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_run_execution_succeeded(w, result)
+            )
+        )
+        worker.failed.connect(
+            lambda message, w=worker: self._post_to_guided_gui_thread(
+                lambda: self._on_guided_run_execution_failed(w, message)
+            )
+        )
         worker.succeeded.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.succeeded.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda w=worker, th=thread: self._post_to_guided_gui_thread(
+                lambda: self._cleanup_guided_run_execution_worker(w, th)
+            )
+        )
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._cleanup_guided_run_execution_worker)
         thread.start()
 
-    def _on_guided_run_execution_succeeded(self, result) -> None:
+    def _on_guided_run_execution_succeeded(self, worker, result) -> None:
         """GUI-thread slot: worker returned a normal execution result."""
+        if worker is not getattr(self, "_guided_run_execution_worker", None):
+            return
         if getattr(self, "_guided_continuous_rwd_execution_active", False):
             # Continuous-RWD results implement none of the wrapper result
             # contract this handler and
             # _finish_guided_backend_execution_with_result read, so they must
             # never be routed through it.
-            self._on_guided_continuous_rwd_execution_succeeded(result)
+            self._on_guided_continuous_rwd_execution_succeeded(worker, result)
             return
         self._guided_backend_execution_active = False
         self._stop_guided_run_live_status()
@@ -16583,10 +16589,12 @@ class MainWindow(QMainWindow):
             validate_btn.setEnabled(True)
         self._finish_guided_backend_execution_with_result(result)
 
-    def _on_guided_run_execution_failed(self, _message: str) -> None:
+    def _on_guided_run_execution_failed(self, worker, _message: str) -> None:
         """GUI-thread slot: worker raised an unexpected exception."""
+        if worker is not getattr(self, "_guided_run_execution_worker", None):
+            return
         if getattr(self, "_guided_continuous_rwd_execution_active", False):
-            self._on_guided_continuous_rwd_execution_failed(_message)
+            self._on_guided_continuous_rwd_execution_failed(worker, _message)
             return
         self._guided_backend_execution_active = False
         self._stop_guided_run_live_status()
@@ -16883,7 +16891,12 @@ class MainWindow(QMainWindow):
             else:
                 details_label.setText("")
 
-    def _cleanup_guided_run_execution_worker(self) -> None:
+    def _cleanup_guided_run_execution_worker(self, worker, thread) -> None:
+        if (
+            worker is not getattr(self, "_guided_run_execution_worker", None)
+            or thread is not getattr(self, "_guided_run_execution_thread", None)
+        ):
+            return
         self._guided_run_execution_worker = None
         self._guided_run_execution_thread = None
 

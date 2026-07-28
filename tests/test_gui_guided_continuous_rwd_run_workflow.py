@@ -979,17 +979,68 @@ def test_live_progress_attaches_after_run_allocation_and_tracks_stages(
         "photometry_pipeline.run_completion_contract"
     )
     terminal_success = completion_contract.TERMINAL_SUCCESS_CURRENT
+    markers: list[str] = []
+    handler_thread_ids: list[int] = []
+    worker_signal_thread_ids: list[int] = []
+    gui_thread_id = threading.get_ident()
     monkeypatch.setattr(
         completion_contract,
         "classify_run_terminal_state",
-        lambda _run_dir: type(
-            "Classification", (), {"state": terminal_success}
-        )(),
+        lambda _run_dir: (
+            markers.append("classifier")
+            or type("Classification", (), {"state": terminal_success})()
+        ),
     )
 
     run_dir = tmp_path / "live_progress_run"
     run_id = "continuous-live-progress"
     release = threading.Event()
+
+    real_start_status = window._start_guided_run_live_status
+
+    def record_start_status(*args, **kwargs):
+        markers.append("run_start_callback_delivered")
+        result = real_start_status(*args, **kwargs)
+        markers.append("follower_attached")
+        return result
+
+    monkeypatch.setattr(
+        window, "_start_guided_run_live_status", record_start_status
+    )
+
+    real_success_handler = (
+        window._on_guided_continuous_rwd_execution_succeeded
+    )
+
+    def record_success_handler(worker, result):
+        markers.append("gui_success_handler_entered")
+        handler_thread_ids.append(threading.get_ident())
+        try:
+            return real_success_handler(worker, result)
+        finally:
+            markers.append("gui_success_handler_finished")
+
+    monkeypatch.setattr(
+        window,
+        "_on_guided_continuous_rwd_execution_succeeded",
+        record_success_handler,
+    )
+
+    real_worker = main_window_module._GuidedRunExecutionWorker
+
+    class RecordingWorker(real_worker):
+        def __init__(self, request, runner, continuous_execution=None):
+            super().__init__(request, runner, continuous_execution)
+
+            def record_success(_result):
+                markers.append("worker_succeeded_emitted")
+                worker_signal_thread_ids.append(threading.get_ident())
+
+            self.succeeded.connect(record_success)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRunExecutionWorker", RecordingWorker
+    )
 
     def write_status(phase, status="running"):
         run_dir.joinpath("status.json").write_text(
@@ -1005,11 +1056,14 @@ def test_live_progress_attaches_after_run_allocation_and_tracks_stages(
         )
 
     def running_backend(*_args, **kwargs):
+        markers.append("run_directory_allocated")
         run_dir.mkdir()
         write_status("initializing")
         kwargs["run_started_callback"](str(run_dir), run_id)
         release.wait(30.0)
         write_status("final", status="success")
+        markers.append("terminal_success_written")
+        markers.append("backend_returned")
         return _FakeRunResult(run_dir=str(run_dir))
 
     monkeypatch.setattr(module, "execute_guided_continuous_rwd_combined_run", running_backend)
@@ -1076,6 +1130,46 @@ def test_live_progress_attaches_after_run_allocation_and_tracks_stages(
     assert window._guided_run_elapsed_timer is None
     assert window._guided_run_live_status_group.isHidden()
     assert window._guided_continuous_rwd_completed_run_dir == str(run_dir)
+    assert handler_thread_ids == [gui_thread_id]
+    assert worker_signal_thread_ids
+    assert worker_signal_thread_ids[0] != gui_thread_id
+    assert markers.index("run_directory_allocated") < markers.index(
+        "run_start_callback_delivered"
+    )
+    assert markers.index("follower_attached") < markers.index(
+        "terminal_success_written"
+    )
+    assert markers.index("terminal_success_written") < markers.index(
+        "backend_returned"
+    )
+    assert markers.index("backend_returned") < markers.index(
+        "worker_succeeded_emitted"
+    )
+    assert markers.index("worker_succeeded_emitted") < markers.index(
+        "gui_success_handler_entered"
+    )
+    assert markers.index("gui_success_handler_entered") < markers.index(
+        "classifier"
+    )
+    assert markers.index("classifier") < markers.index(
+        "gui_success_handler_finished"
+    )
+    assert _pump(
+        qapp,
+        lambda: getattr(window, "_guided_run_execution_thread", None) is None,
+        timeout_ms=20_000,
+    )
+    assert getattr(window, "_guided_run_execution_worker", None) is None
+    assert getattr(window, "_guided_run_execution_thread", None) is None
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "_start_guided_completed_review_load",
+        lambda candidate: opened.append(candidate),
+    )
+    window._on_guided_load_completed_run_for_review_clicked()
+    assert opened == [str(run_dir)]
 
 
 def test_live_progress_stops_after_forced_failure(
@@ -1088,6 +1182,19 @@ def test_live_progress_stops_after_forced_failure(
     run_dir = tmp_path / "live_progress_failure_run"
     run_id = "continuous-live-failure"
     release = threading.Event()
+    gui_thread_id = threading.get_ident()
+    failure_thread_ids: list[int] = []
+    real_failure_handler = window._on_guided_continuous_rwd_execution_failed
+
+    def record_failure_handler(worker, message):
+        failure_thread_ids.append(threading.get_ident())
+        return real_failure_handler(worker, message)
+
+    monkeypatch.setattr(
+        window,
+        "_on_guided_continuous_rwd_execution_failed",
+        record_failure_handler,
+    )
 
     def failing_backend(*_args, **kwargs):
         run_dir.mkdir()
@@ -1124,6 +1231,126 @@ def test_live_progress_stops_after_forced_failure(
     assert window._guided_continuous_rwd_status_message == (
         "Continuous analysis could not be completed."
     )
+    assert failure_thread_ids == [gui_thread_id]
+    assert _pump(
+        qapp,
+        lambda: getattr(window, "_guided_run_execution_thread", None) is None,
+        timeout_ms=20_000,
+    )
+    assert getattr(window, "_guided_run_execution_worker", None) is None
+    assert getattr(window, "_guided_run_execution_thread", None) is None
+
+
+def test_stale_continuous_terminal_worker_is_ignored(
+    window, qapp, monkeypatch, tmp_path
+):
+    current_worker = object()
+    stale_worker = object()
+    run_dir = tmp_path / "current_run"
+    run_dir.mkdir()
+    run_dir.joinpath("status.json").write_text(
+        json.dumps(
+            {
+                "run_id": "current-run",
+                "phase": "running",
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window._guided_run_execution_worker = current_worker
+    window._guided_continuous_rwd_execution_active = True
+    window._guided_continuous_rwd_live_run_dir = str(run_dir.resolve())
+    window._start_guided_run_live_status(
+        str(run_dir), run_identity="current-run"
+    )
+    follower = window._guided_run_status_follower
+    elapsed_timer = window._guided_run_elapsed_timer
+
+    window._on_guided_continuous_rwd_execution_succeeded(
+        stale_worker, _FakeRunResult(run_dir=str(run_dir))
+    )
+    window._on_guided_continuous_rwd_execution_failed(
+        stale_worker, "stale failure"
+    )
+
+    assert window._guided_continuous_rwd_execution_active is True
+    assert window._guided_run_status_follower is follower
+    assert window._guided_run_elapsed_timer is elapsed_timer
+    assert window._guided_continuous_rwd_completed_run_dir is None
+
+    completion_contract = importlib.import_module(
+        "photometry_pipeline.run_completion_contract"
+    )
+    monkeypatch.setattr(
+        completion_contract,
+        "classify_run_terminal_state",
+        lambda _run_dir: type(
+            "Classification", (), {"state": completion_contract.TERMINAL_SUCCESS_CURRENT}
+        )(),
+    )
+    window._on_guided_continuous_rwd_execution_succeeded(
+        current_worker, _FakeRunResult(run_dir=str(run_dir))
+    )
+    assert window._guided_continuous_rwd_execution_active is False
+    assert window._guided_run_status_follower is None
+    assert window._guided_run_elapsed_timer is None
+    assert window._guided_continuous_rwd_completed_run_dir == str(run_dir)
+
+
+def test_continuous_terminal_run_directory_guard_preserves_current_run(
+    window, qapp, monkeypatch, tmp_path
+):
+    current_worker = object()
+    current_dir = tmp_path / "current_run"
+    stale_dir = tmp_path / "stale_run"
+    current_dir.mkdir()
+    stale_dir.mkdir()
+    current_dir.joinpath("status.json").write_text(
+        json.dumps(
+            {
+                "run_id": "current-run",
+                "phase": "running",
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window._guided_run_execution_worker = current_worker
+    window._guided_continuous_rwd_execution_active = True
+    window._guided_continuous_rwd_live_run_dir = str(current_dir.resolve())
+    window._start_guided_run_live_status(
+        str(current_dir), run_identity="current-run"
+    )
+    follower = window._guided_run_status_follower
+    elapsed_timer = window._guided_run_elapsed_timer
+
+    window._on_guided_continuous_rwd_execution_succeeded(
+        current_worker, _FakeRunResult(run_dir=str(stale_dir))
+    )
+
+    assert window._guided_continuous_rwd_execution_active is True
+    assert window._guided_run_status_follower is follower
+    assert window._guided_run_elapsed_timer is elapsed_timer
+    assert window._guided_continuous_rwd_completed_run_dir is None
+
+    completion_contract = importlib.import_module(
+        "photometry_pipeline.run_completion_contract"
+    )
+    monkeypatch.setattr(
+        completion_contract,
+        "classify_run_terminal_state",
+        lambda _run_dir: type(
+            "Classification", (), {"state": completion_contract.TERMINAL_SUCCESS_CURRENT}
+        )(),
+    )
+    window._on_guided_continuous_rwd_execution_succeeded(
+        current_worker, _FakeRunResult(run_dir=str(current_dir))
+    )
+    assert window._guided_continuous_rwd_execution_active is False
+    assert window._guided_run_status_follower is None
+    assert window._guided_run_elapsed_timer is None
+    assert window._guided_continuous_rwd_completed_run_dir == str(current_dir)
 
 
 def test_run_press_rebuilds_no_authority(
@@ -1628,11 +1855,15 @@ def test_live_workflow_produces_a_completed_run_that_opens_in_results(
     )
     assert redetections == {}
 
-    # Both outputs exist, so Results presents both sections. This reflects
-    # what the one run produced -- it is not an execution choice.
+    # The completed run uses the current manifest-backed native Results
+    # workspace. The former legacy continuous tab widget is intentionally not
+    # used for this package.
     viewer = window._guided_report_viewer
-    tabs = viewer._continuous_tabs
-    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Tonic", "Phasic"]
+    assert viewer._native_continuous_mode is True
+    assert viewer._native_continuous_artifact_index is not None
+    assert [
+        viewer._tabs.tabText(i) for i in range(viewer._tabs.count())
+    ] == ["Verification", "Tonic", "Phasic Summary"]
 
 
 # ---------------------------------------------------------------------------
