@@ -274,9 +274,6 @@ def test_combined_native_results_index_and_switching_use_saved_files(
             "Tonic overview",
             "Phasic signal AUC",
             "Peak rate",
-            "Phasic window summary",
-            "Tonic window summary",
-            "Detected events",
         ]
         indexed = viewer._native_continuous_artifact_index["artifacts"]
         assert len(indexed) == 13
@@ -287,41 +284,58 @@ def test_combined_native_results_index_and_switching_use_saved_files(
         )
         records = viewer.available_artifacts()
         assert sum(record["label"] == "Detected events" for record in records) == 1
+        assert {
+            record["label"]
+            for record in records
+            if record["artifact_type"] == "table"
+        } == {
+            "Phasic window summary",
+            "Tonic window summary",
+            "Detected events",
+        }
         assert records[0]["path"].endswith("phasic_correction_impact.png")
         assert viewer.active_artifact_path().endswith("phasic_correction_impact.png")
+    finally:
+        viewer.close()
 
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Phasic window summary"))
-        headers = [
-            viewer._artifact_table.horizontalHeaderItem(i).text()
-            for i in range(viewer._artifact_table.columnCount())
+
+def test_native_continuous_navigation_uses_selected_roi_folders(
+    qapp, combined_run, monkeypatch
+):
+    _forbid_scientific_continuous_work(monkeypatch)
+    viewer = RunReportViewer()
+    opened = []
+    monkeypatch.setattr(viewer, "_open_path", opened.append)
+    try:
+        assert viewer.load_report(combined_run.run_dir) is True
+        assert [
+            viewer._open_run_report_btn.text(),
+            viewer._open_region_summary_btn.text(),
+            viewer._open_region_day_plots_btn.text(),
+            viewer._open_region_tables_btn.text(),
+        ] == ["Run Report", "Summary", "Day Plots", "Tables"]
+        assert not viewer._open_region_day_plots_btn.isHidden()
+        assert viewer._open_region_day_plots_btn.isEnabled() is False
+        assert viewer._open_region_tables_btn.isEnabled() is True
+
+        first_roi = viewer.selected_region()
+        viewer._open_region_summary_btn.click()
+        viewer._open_region_tables_btn.click()
+        assert opened == [
+            os.path.join(combined_run.run_dir, first_roi, "summary"),
+            os.path.join(combined_run.run_dir, first_roi, "tables"),
         ]
-        assert headers[0] == "roi"
-        assert viewer.active_artifact_path().endswith(
-            "continuous_phasic_window_summary.csv"
-        )
-        with open(viewer.active_artifact_path(), "r", encoding="utf-8-sig", newline="") as handle:
-            stored_rows = list(csv.reader(handle))
-        displayed_rows = [
-            [
-                viewer._artifact_table.item(row_idx, col_idx).text()
-                for col_idx in range(viewer._artifact_table.columnCount())
-            ]
-            for row_idx in range(viewer._artifact_table.rowCount())
-        ]
-        assert stored_rows[0] == headers
-        assert displayed_rows == stored_rows[1:]
 
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Detected events"))
-        assert "Run-level" in viewer._artifact_metadata_label.text()
-        assert f"ROI: {viewer.selected_region()}" not in viewer._artifact_metadata_label.text()
-
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Phasic window summary"))
         viewer._region_combo.setCurrentIndex(1)
-        assert viewer.active_artifact_path().endswith(
-            f"{viewer.selected_region()}\\tables\\continuous_phasic_window_summary.csv"
-        )
-        assert viewer._artifact_table.rowCount() > 0
-        assert "Showing first" not in viewer._artifact_metadata_label.text()
+        second_roi = viewer.selected_region()
+        assert second_roi != first_roi
+        viewer._open_region_summary_btn.click()
+        viewer._open_region_tables_btn.click()
+        assert opened[-2:] == [
+            os.path.join(combined_run.run_dir, second_roi, "summary"),
+            os.path.join(combined_run.run_dir, second_roi, "tables"),
+        ]
+        assert "Open CSV" not in viewer._open_region_tables_btn.text()
     finally:
         viewer.close()
 
@@ -419,10 +433,9 @@ def test_guided_worker_prepares_index_and_callback_installs_without_rebuild(
         window.deleteLater()
 
 
-def test_large_detected_events_preview_is_bounded_and_openable(
+def test_large_detected_events_remains_saved_but_not_a_primary_tab(
     qapp, combined_run, tmp_path, monkeypatch
 ):
-    from PySide6.QtWidgets import QTableWidgetItem
     from gui.run_report_viewer import NATIVE_CSV_PREVIEW_ROW_LIMIT
 
     data_rows = NATIVE_CSV_PREVIEW_ROW_LIMIT + 123
@@ -434,29 +447,20 @@ def test_large_detected_events_preview_is_bounded_and_openable(
     opened = []
     try:
         assert viewer.load_report(str(broken)) is True
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Detected events"))
-        QApplication.processEvents()
-
-        assert viewer._artifact_table.rowCount() == NATIVE_CSV_PREVIEW_ROW_LIMIT
-        assert viewer._artifact_table.columnCount() > 0
-        assert isinstance(viewer._artifact_table.item(0, 0), QTableWidgetItem)
-        metadata = viewer._artifact_metadata_label.text()
-        assert (
-            f"Showing first {NATIVE_CSV_PREVIEW_ROW_LIMIT:,} of {data_rows:,} rows."
-            in metadata
-        )
-        assert "Run-level (all included ROIs)" in metadata
-        assert viewer.active_artifact_path() == str(event_path)
-        assert viewer._open_region_tables_btn.text() == "Open CSV"
-
         monkeypatch.setattr(viewer, "_open_path", opened.append)
+        assert "Detected events" not in _tab_labels(viewer)
+        assert any(
+            record["relative_path"]
+            == "_analysis/phasic_out/features/continuous_phasic_events.csv"
+            and record["scope"] == "run"
+            for record in viewer._native_continuous_artifact_index["artifacts"]
+        )
+        assert event_path.is_file()
+        assert viewer._open_region_tables_btn.text() == "Tables"
         viewer._open_region_tables_btn.click()
-        assert opened == [str(event_path)]
-
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Phasic signal AUC"))
-        viewer._tabs.setCurrentIndex(_tab_labels(viewer).index("Detected events"))
-        QApplication.processEvents()
-        assert viewer._artifact_table.rowCount() == NATIVE_CSV_PREVIEW_ROW_LIMIT
+        assert opened == [
+            os.path.join(broken, viewer.selected_region(), "tables")
+        ]
     finally:
         viewer.close()
 
@@ -467,15 +471,23 @@ def test_large_detected_events_preview_is_bounded_and_openable(
         (
             "phasic_run",
             {"Tonic overview", "Tonic window summary"},
-            {
-                "Correction impact",
-                "Phasic signal AUC",
-                "Peak rate",
-                "Phasic window summary",
-                "Detected events",
-            },
-        ),
-        ("tonic_run", {"Correction impact", "Phasic signal AUC", "Peak rate", "Phasic window summary", "Detected events"}, {"Tonic overview", "Tonic window summary"}),
+                {
+                    "Correction impact",
+                    "Phasic signal AUC",
+                    "Peak rate",
+                },
+            ),
+            (
+                "tonic_run",
+                {
+                    "Correction impact",
+                    "Phasic signal AUC",
+                    "Peak rate",
+                    "Phasic window summary",
+                    "Detected events",
+                },
+                {"Tonic overview"},
+            ),
     ],
 )
 def test_native_results_are_run_type_aware(

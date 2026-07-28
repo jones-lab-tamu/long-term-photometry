@@ -799,26 +799,36 @@ def _publish_tonic_overview(
     }
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(12, 4.8))
-    ax.plot(data["x_hours"], data["raw_signal"], linewidth=0.7, label="Raw signal")
-    ax.plot(
+    fig, (raw_ax, tonic_ax) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    raw_ax.plot(
+        data["x_hours"],
+        data["raw_signal"],
+        linewidth=0.7,
+        label="Raw signal",
+    )
+    raw_ax.plot(
         data["x_hours"],
         data["raw_reference"],
         linewidth=0.7,
         label="Raw reference",
     )
-    ax.plot(
+    raw_ax.set_ylabel("Raw signal")
+    raw_ax.set_title(f"{roi} Raw signal and reference")
+    raw_ax.grid(True, alpha=0.3)
+    raw_ax.legend(loc="best")
+
+    tonic_ax.plot(
         data["x_hours"],
         data["tonic_signal"],
         linewidth=1.0,
         label="Tonic signal (deltaF)",
     )
-    ax.set_xlabel(_timeline_axis_label(timeline_contract))
-    ax.set_ylabel("Tonic signal (deltaF)")
-    ax.set_title(f"{roi} Tonic overview")
-    ax.set_xlim(left=0.0, right=max(1.0, float(np.nanmax(data["x_hours"]))))
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    tonic_ax.set_xlabel(_timeline_axis_label(timeline_contract))
+    tonic_ax.set_ylabel("Tonic signal (deltaF)")
+    tonic_ax.set_title(f"{roi} Tonic overview")
+    tonic_ax.set_xlim(left=0.0, right=max(1.0, float(np.nanmax(data["x_hours"]))))
+    tonic_ax.grid(True, alpha=0.3)
+    tonic_ax.legend(loc="best")
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig.savefig(output_path, dpi=150)

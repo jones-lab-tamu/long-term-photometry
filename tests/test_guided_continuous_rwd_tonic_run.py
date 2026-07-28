@@ -135,6 +135,79 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
             "Tonic signal (deltaF)",
         ]
 
+    with open(os.path.join(result.run_dir, "MANIFEST.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    tonic_record = next(
+        record
+        for record in manifest["completion"]["deliverables"]["continuous_window_index"][
+            "saved_artifacts"
+        ]
+        if record["relative_path"] == "ROI1/summary/tonic_overview.png"
+    )
+    assert tonic_record["family"] == "tonic_overview"
+    assert tonic_record["analysis_family"] == "tonic"
+
+
+def test_natural_tonic_publication_uses_two_shared_readable_panels(
+    accepted_case, real_config, tmp_path, monkeypatch
+):
+    import matplotlib.pyplot as pyplot
+
+    captured = []
+    real_subplots = pyplot.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = real_subplots(*args, **kwargs)
+        flat_axes = np.asarray(axes, dtype=object).reshape(-1)
+        if flat_axes.size == 2 and kwargs.get("sharex") is True:
+            captured.append(flat_axes)
+        return figure, axes
+
+    monkeypatch.setattr(pyplot, "subplots", capture_subplots)
+    result = _run(_pass_inputs(accepted_case), real_config, tmp_path)
+
+    assert len(captured) == 2
+    for raw_axis, tonic_axis in captured:
+        assert raw_axis.get_shared_x_axes().joined(raw_axis, tonic_axis)
+        assert [line.get_label() for line in raw_axis.get_lines()] == [
+            "Raw signal",
+            "Raw reference",
+        ]
+        assert [line.get_label() for line in tonic_axis.get_lines()] == [
+            "Tonic signal (deltaF)",
+        ]
+        assert not any(
+            line.get_label() == "Tonic signal (deltaF)"
+            for line in raw_axis.get_lines()
+        )
+        assert not any(
+            line.get_label() in {"Raw signal", "Raw reference"}
+            for line in tonic_axis.get_lines()
+        )
+
+        raw_y = np.concatenate(
+            [line.get_ydata() for line in raw_axis.get_lines()]
+        )
+        tonic_y = tonic_axis.get_lines()[0].get_ydata()
+        raw_y = raw_y[np.isfinite(raw_y)]
+        tonic_y = tonic_y[np.isfinite(tonic_y)]
+        assert raw_y.size > 0
+        assert tonic_y.size > 0
+        assert raw_axis.get_ylim() != tonic_axis.get_ylim()
+        assert (tonic_axis.get_ylim()[1] - tonic_axis.get_ylim()[0]) < (
+            raw_axis.get_ylim()[1] - raw_axis.get_ylim()[0]
+        )
+
+        tonic_x = tonic_axis.get_lines()[0].get_xdata()
+        assert all(
+            np.array_equal(line.get_xdata(), tonic_x)
+            for line in raw_axis.get_lines()
+        )
+
+    assert os.path.isfile(
+        os.path.join(result.run_dir, "ROI1", "summary", "tonic_overview.png")
+    )
+
 
 def test_one_chunk_run_is_one_continuous_recording(real_config, tmp_path, tmp_path_factory):
     folder = tmp_path_factory.mktemp("cr1_d3a_single") / "recording"

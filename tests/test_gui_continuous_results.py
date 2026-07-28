@@ -144,9 +144,6 @@ def test_native_continuous_load_report_routes_to_saved_artifact_viewer(
         "Tonic overview",
         "Phasic signal AUC",
         "Peak rate",
-        "Phasic window summary",
-        "Tonic window summary",
-        "Detected events",
     ]
 
 

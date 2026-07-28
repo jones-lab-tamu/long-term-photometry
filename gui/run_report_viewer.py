@@ -1786,7 +1786,11 @@ class RunReportViewer(QWidget):
 
     def _rebuild_native_tabs_for_selected_region(self, region: str) -> None:
         """Build friendly artifact tabs from the in-memory manifest index."""
-        records = self._native_continuous_artifacts_by_roi.get(region, [])
+        records = [
+            record
+            for record in self._native_continuous_artifacts_by_roi.get(region, [])
+            if record.get("artifact_type") == "image"
+        ]
         labels = [str(record.get("label") or "") for record in records]
         labels = [label for label in labels if label]
         current_tab = self._selected_tab()
@@ -2089,33 +2093,19 @@ class RunReportViewer(QWidget):
         )
         self._set_open_button_state(
             self._open_region_day_plots_btn,
-            os.path.join(region_path, "day_plots") if region_path else "",
+            ""
+            if self._native_continuous_mode
+            else (os.path.join(region_path, "day_plots") if region_path else ""),
         )
         table_target = os.path.join(region_path, "tables") if region_path else ""
-        selected_native_table = False
         self._open_region_tables_btn.setText("Tables")
         self._open_region_tables_btn.setToolTip(
             "Open the selected region tables folder."
         )
-        if self._native_continuous_mode:
-            record = self._native_continuous_artifact_by_key.get(
-                (region, self._selected_tab())
-            )
-            if record is not None and record.get("artifact_type") == "table":
-                table_target = str(record.get("path") or "")
-                selected_native_table = True
-                self._open_region_tables_btn.setText("Open CSV")
-                self._open_region_tables_btn.setToolTip(
-                    "Open the complete saved CSV file."
-                )
         self._set_open_button_state(
             self._open_region_tables_btn,
             table_target,
         )
-        if selected_native_table:
-            self._open_region_tables_btn.setToolTip(
-                "Open the complete saved CSV file."
-            )
 
     def _set_open_button_state(self, button: QPushButton, path: str) -> None:
         exists = bool(path and os.path.exists(path))
@@ -2132,13 +2122,6 @@ class RunReportViewer(QWidget):
         self._open_path(target)
 
     def _open_selected_table_or_region_tables(self) -> None:
-        if self._native_continuous_mode:
-            record = self._native_continuous_artifact_by_key.get(
-                (self._selected_region(), self._selected_tab())
-            )
-            if record is not None and record.get("artifact_type") == "table":
-                self._open_path(str(record.get("path") or ""))
-                return
         self._open_selected_region_subpath("tables")
 
     def _open_path(self, path: str):
