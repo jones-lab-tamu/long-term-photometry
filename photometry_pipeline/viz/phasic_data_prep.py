@@ -379,6 +379,48 @@ def build_authoritative_plot_sessions(
     return sessions
 
 
+def last_retained_plot_session_index(sessions: Optional[List[dict]]) -> Optional[int]:
+    """Highest authoritative session index that actually contributed data.
+
+    "Retained" means the session record reached the plotters as a processed
+    session with a real cache contribution, which is the same identity
+    ``build_authoritative_plot_sessions`` assigns from the completeness record's
+    ``process`` disposition.  Returns ``None`` when no session contributed.
+    """
+    retained = [
+        int(item["session_index"])
+        for item in (sessions or [])
+        if str(item.get("status", "")) == "valid"
+        and item.get("cache_chunk_id") is not None
+        and item.get("session_index") is not None
+    ]
+    return max(retained) if retained else None
+
+
+def missing_sessions_followed_by_retained_data(
+    sessions: Optional[List[dict]],
+) -> List[dict]:
+    """Missing/excluded sessions that sit between retained recording sessions.
+
+    Only these compress a real recording interval when the elapsed axis is made
+    gap-free.  A missing or excluded slot with no retained session after it --
+    the authorized incomplete final-session exclusion is the production case --
+    shortens the recording instead of collapsing an interval, so it is not
+    returned here.  Chronology and retained identity both come from the
+    authoritative session index, never from list position.
+    """
+    last_retained = last_retained_plot_session_index(sessions)
+    if last_retained is None:
+        return []
+    return [
+        item
+        for item in (sessions or [])
+        if str(item.get("status", "")) != "valid"
+        and item.get("session_index") is not None
+        and int(item["session_index"]) < last_retained
+    ]
+
+
 # ======================================================================
 # ROI Resolution
 # ======================================================================

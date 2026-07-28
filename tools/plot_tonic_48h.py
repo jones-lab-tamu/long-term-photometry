@@ -47,6 +47,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 )
 from photometry_pipeline.viz.phasic_data_prep import (
     build_authoritative_plot_sessions,
+    missing_sessions_followed_by_retained_data,
 )
 from photometry_pipeline.completed_run_review import (
     SCIENTIST_STRATEGY_LABELS,
@@ -56,6 +57,11 @@ from photometry_pipeline.completed_run_review import (
 
 
 TONIC_OVERVIEW_TARGET_DISPLAY_POINTS = 30000
+
+# Private assembly metadata: whether retained recording data follow a missing or
+# excluded session slot.  Kept out of the public session record schema, exactly
+# like the ``_timeline_*`` marker-placement metadata below.
+MISSING_SESSION_COMPRESSIBLE_KEY = "_compresses_retained_interval"
 
 
 def parse_args():
@@ -152,6 +158,20 @@ def assemble_arrays(cache, roi, args=None, *, return_missing_metadata=False):
         missing_sessions = [
             item for item in authoritative_sessions if item.get("status") != "valid"
         ]
+        # Tag each missing/excluded slot with whether retained recording data
+        # follow it.  Only those slots are compressible by a gap-free axis; an
+        # authorized incomplete final-session exclusion ends the recording
+        # earlier instead of collapsing an interval.
+        compressible_indices = {
+            int(item["session_index"])
+            for item in missing_sessions_followed_by_retained_data(
+                authoritative_sessions
+            )
+        }
+        for item in missing_sessions:
+            item[MISSING_SESSION_COMPRESSIBLE_KEY] = (
+                int(item.get("session_index", -1)) in compressible_indices
+            )
         # The authoritative index is also the timing contract.  When the CLI
         # does not receive ``--sessions-per-hour``, derive a regular stride
         # from validated expected starts so a missing middle session cannot be
@@ -358,6 +378,20 @@ def _build_missing_intervals(missing_sessions, *, sessions_per_hour=None):
             "missing_reason": str(item.get("missing_reason", "")),
         })
     return intervals
+
+
+def sessions_blocking_gap_free_timeline(missing_sessions):
+    """Missing/excluded sessions a gap-free elapsed axis would compress.
+
+    ``assemble_arrays`` tags every authoritative missing record with whether
+    retained recording data follow it.  A record without that tag cannot be
+    proven terminal here, so it keeps the original protective behavior.
+    """
+    return [
+        item
+        for item in (missing_sessions or [])
+        if bool(item.get(MISSING_SESSION_COMPRESSIBLE_KEY, True))
+    ]
 
 
 def _annotate_missing_intervals(ax, intervals):
@@ -720,10 +754,16 @@ def main():
         raise SystemExit(1)
     cache.close()
 
-    if missing_sessions and timeline_mode != TONIC_TIMELINE_MODE_REAL_ELAPSED:
+    blocking_sessions = sessions_blocking_gap_free_timeline(missing_sessions)
+    if blocking_sessions and timeline_mode != TONIC_TIMELINE_MODE_REAL_ELAPSED:
+        numbers = ", ".join(
+            str(int(item.get("session_index", 0)) + 1) for item in blocking_sessions
+        )
         raise RuntimeError(
-            "Approved missing sessions require the real elapsed-time tonic view; "
-            "gap-free elapsed time would compress the missing interval."
+            f"Recording session(s) {numbers} are missing or excluded and later "
+            "recording sessions were still analyzed, so gap-free elapsed time "
+            "would compress a real interval between retained sessions. Use the "
+            "real elapsed-time tonic view for this recording."
         )
 
     missing_intervals = _build_missing_intervals(
