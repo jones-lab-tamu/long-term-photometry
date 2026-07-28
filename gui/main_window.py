@@ -117,8 +117,10 @@ from photometry_pipeline.guided_capabilities import (
 from photometry_pipeline.guided_timeline import (
     GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK,
     GUIDED_TIMELINE_MODE_SET,
+    GuidedTimelineError,
     guided_clock_from_datetime,
     map_elapsed_coordinate,
+    normalize_guided_clock_source,
     timeline_mode_label,
     valid_guided_clock,
 )
@@ -435,6 +437,12 @@ GUIDED_TIMELINE_HELP_TEXT = (
 )
 GUIDED_TIMELINE_START_CLOCK_REQUIRED_MESSAGE = (
     "Enter the clock time when this recording began."
+)
+GUIDED_RECORDING_START_CLOCK_PREFILLED_MESSAGE = (
+    "Prefilled from the validated RWD recording timestamp. Edit if needed."
+)
+GUIDED_RECORDING_START_CLOCK_USER_ENTERED_MESSAGE = (
+    "Using the recording-start time entered here."
 )
 GUIDED_TIMELINE_FIXED_ANCHOR_REQUIRED_MESSAGE = (
     "Enter the start of the plotted circadian day."
@@ -798,11 +806,21 @@ def _discover_continuous_rwd_rois(
             "No usable signal/reference channel pairs were found in this "
             "continuous recording."
         )
+    # The accepted continuous source contract names exactly one validated
+    # recording folder.  Publishing it here lets the timeline read the
+    # recording's own acquisition timestamp through the same validated RWD
+    # naming convention intermittent chronology already trusts -- and only
+    # after this inspection completed, never from an unvalidated path.
+    identity = getattr(inspection, "source_identity", None)
+    recording_folder = str(
+        getattr(identity, "selected_folder_canonical", "") or ""
+    )
     return {
         "resolved_format": "rwd",
         "acquisition_mode": "continuous",
         "rois": [{"roi_id": pair.roi_id} for pair in roi_pairs],
         "sessions": [],
+        "continuous_recording_folder": recording_folder,
         "n_total_discovered": 0,
         "n_preview": 0,
     }
@@ -3278,6 +3296,13 @@ class MainWindow(QMainWindow):
         self._guided_recording_timing_user_edited = False
         self._guided_recording_timing_applying = False
         self._guided_recording_timing_inference = None
+        # Recording-start clock: the same narrow applying/user-edited pattern
+        # used for session timing above. The key identifies the validated
+        # recording whose timestamp is currently prefilled, so selecting a
+        # different recording replaces the value and drops the edited state.
+        self._guided_recording_start_clock_source_key = None
+        self._guided_recording_start_clock_user_edited = False
+        self._guided_recording_start_clock_applying = False
         # Guided owns these placement choices. They are deliberately not
         # synchronized with Full Control's separate plotting controls.
         self._guided_roi_discovery_running = False
@@ -3981,7 +4006,7 @@ class MainWindow(QMainWindow):
         self._guided_recording_start_clock_edit.setObjectName(
             "guidedRecordingStartClock"
         )
-        self._guided_recording_start_clock_edit.setPlaceholderText("HH:MM")
+        self._guided_recording_start_clock_edit.setPlaceholderText("HH:MM:SS")
         self._guided_recording_start_clock_label = QLabel(
             "Clock time at recording start:"
         )
@@ -3992,6 +4017,15 @@ class MainWindow(QMainWindow):
             self._guided_recording_start_clock_label,
             self._guided_recording_start_clock_edit,
         )
+        self._guided_recording_start_clock_help_label = QLabel("")
+        self._guided_recording_start_clock_help_label.setObjectName(
+            "guidedRecordingStartClockHelp"
+        )
+        self._guided_recording_start_clock_help_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_recording_start_clock_help_label.setWordWrap(True)
+        timeline_form.addRow("", self._guided_recording_start_clock_help_label)
 
         self._guided_timeline_help_label = QLabel(GUIDED_TIMELINE_HELP_TEXT)
         self._guided_timeline_help_label.setObjectName("guidedTimelineHelp")
@@ -4016,7 +4050,7 @@ class MainWindow(QMainWindow):
             self._on_guided_timeline_settings_changed
         )
         self._guided_recording_start_clock_edit.textChanged.connect(
-            self._on_guided_timeline_settings_changed
+            self._on_guided_recording_start_clock_user_edit
         )
         form.addRow("", self._guided_timeline_group)
         self._refresh_guided_timeline_controls()
@@ -4961,7 +4995,13 @@ class MainWindow(QMainWindow):
             self._guided_fixed_daily_anchor_clock_edit.setText(
                 GUIDED_DEFAULT_FIXED_DAILY_ANCHOR_CLOCK
             )
-            self._guided_recording_start_clock_edit.clear()
+            self._guided_recording_start_clock_applying = True
+            try:
+                self._guided_recording_start_clock_edit.clear()
+            finally:
+                self._guided_recording_start_clock_applying = False
+            self._guided_recording_start_clock_user_edited = False
+            self._guided_recording_start_clock_source_key = None
         self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
@@ -10938,6 +10978,20 @@ class MainWindow(QMainWindow):
         resolved_format = str(discovery.get("resolved_format") or "").strip().lower()
         if not resolved_format and hasattr(self, "_guided_format_combo"):
             resolved_format = self._guided_format_combo.currentText().strip().lower()
+        recording_folder = str(
+            discovery.get("continuous_recording_folder") or ""
+        ).strip()
+        if recording_folder and resolved_format == "rwd":
+            # Continuous RWD: the single accepted recording folder carries the
+            # acquisition timestamp, read with the same validated RWD naming
+            # convention used for intermittent session folders.  Discovery only
+            # publishes this folder once the continuous source inspection has
+            # accepted it.
+            from photometry_pipeline.io.rwd_chronology import (
+                parse_rwd_session_folder_timestamp,
+            )
+
+            return parse_rwd_session_folder_timestamp(Path(recording_folder).name)
         sessions = [
             item
             for item in discovery.get("sessions", ()) or ()
@@ -10965,6 +11019,99 @@ class MainWindow(QMainWindow):
         # normalized contract does not authorize a custom datetime source.
         return None
 
+    def _guided_recording_start_clock_recording_identity(self) -> str:
+        """Canonical identity of the recording that supplies the clock.
+
+        Continuous uses the single validated recording folder the accepted
+        source contract names.  Intermittent prefers the accepted canonical
+        source root discovery already reports, and otherwise falls back to the
+        first authoritative session source -- never to an empty path, which
+        ``realpath`` would resolve to the process working directory and would
+        make two different recordings look like the same one.
+        """
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        candidate = str(discovery.get("continuous_recording_folder") or "").strip()
+        if not candidate:
+            candidate = str(discovery.get("input_dir") or "").strip()
+        if not candidate:
+            sessions = [
+                item
+                for item in discovery.get("sessions", ()) or ()
+                if isinstance(item, dict) and item.get("path")
+            ]
+            if sessions:
+                candidate = str(sessions[0]["path"]).strip()
+        if not candidate:
+            return ""
+        return os.path.realpath(candidate)
+
+    def _guided_recording_start_clock_prefill_key(self) -> tuple[str, str] | None:
+        """Identity of the validated recording currently supplying the clock.
+
+        ``None`` means the accepted source contract offers no validated
+        acquisition timestamp or no validated recording identity, so nothing
+        may be prefilled.
+        """
+        validated = self._guided_authoritative_first_datetime()
+        if validated is None:
+            return None
+        recording = self._guided_recording_start_clock_recording_identity()
+        if not recording:
+            return None
+        try:
+            return (recording, guided_clock_from_datetime(validated))
+        except GuidedTimelineError:
+            return None
+
+    def _refresh_guided_recording_start_clock_prefill(self) -> None:
+        """Prefill the recording-start clock from the validated timestamp.
+
+        A newly validated recording replaces the field and resets its source to
+        the validated timestamp. An edit the scientist made for the recording
+        that is still selected is preserved.
+        """
+        edit = getattr(self, "_guided_recording_start_clock_edit", None)
+        if edit is None:
+            return
+        key = self._guided_recording_start_clock_prefill_key()
+        if key is None:
+            # No validated timestamp: never invent one, and never overwrite a
+            # value the scientist typed for this same (unvalidated) selection.
+            self._guided_recording_start_clock_source_key = None
+            return
+        if key == getattr(self, "_guided_recording_start_clock_source_key", None):
+            return
+        self._guided_recording_start_clock_source_key = key
+        self._guided_recording_start_clock_applying = True
+        try:
+            edit.setText(key[1])
+        finally:
+            self._guided_recording_start_clock_applying = False
+        self._guided_recording_start_clock_user_edited = False
+
+    def _on_guided_recording_start_clock_user_edit(self, _text: str = "") -> None:
+        if not getattr(self, "_guided_recording_start_clock_applying", False):
+            self._guided_recording_start_clock_user_edited = True
+        self._on_guided_timeline_settings_changed()
+
+    def _guided_effective_recording_start_clock(self) -> str | None:
+        """The clock the scientist sees, or None when it is unusable."""
+        edit = getattr(self, "_guided_recording_start_clock_edit", None)
+        candidate = edit.text().strip() if edit is not None else ""
+        return candidate if valid_guided_clock(candidate) else None
+
+    def _guided_effective_recording_start_clock_source(self) -> str:
+        """Whether the effective clock came from validated metadata or an edit.
+
+        Only the edited flag decides this. Retyping the prefilled text does not
+        turn an edit back into validated metadata.
+        """
+        if getattr(self, "_guided_recording_start_clock_user_edited", False):
+            return "user_entered"
+        if getattr(self, "_guided_recording_start_clock_source_key", None) is not None:
+            return "validated_metadata"
+        return "user_entered"
+
     def _guided_timeline_plan_values(self) -> dict[str, str | None]:
         mode = self._guided_timeline_mode_value()
         fixed = (
@@ -10984,27 +11131,49 @@ class MainWindow(QMainWindow):
             )
         ).strip().lower()
         if mode in {"civil", "fixed_daily_anchor"}:
-            if continuous and resolved_format == "rwd":
-                candidate = self._guided_recording_start_clock_edit.text().strip()
-                if valid_guided_clock(candidate):
+            if self._guided_recording_start_clock_is_visible():
+                # RWD (either structure) shows one editable field that is
+                # prefilled from the validated timestamp; its current value is
+                # the effective clock.
+                candidate = self._guided_effective_recording_start_clock()
+                if candidate is not None:
                     start_clock = candidate
-                    start_source = "user_confirmed"
-            elif not continuous and resolved_format in {"rwd", "npm"}:
+                    start_source = self._guided_effective_recording_start_clock_source()
+            elif not continuous and resolved_format == "npm":
                 first_datetime = self._guided_authoritative_first_datetime()
                 if first_datetime is not None:
                     start_clock = guided_clock_from_datetime(first_datetime)
                     start_source = "validated_metadata"
             elif self._guided_timeline_controls_require_recording_start():
-                candidate = self._guided_recording_start_clock_edit.text().strip()
-                if valid_guided_clock(candidate):
+                candidate = self._guided_effective_recording_start_clock()
+                if candidate is not None:
                     start_clock = candidate
-                    start_source = "user_confirmed"
+                    start_source = "user_entered"
         return {
             "timeline_anchor_mode": mode,
             "fixed_daily_anchor_clock": fixed,
             "recording_start_clock": start_clock,
             "recording_start_clock_source": start_source,
         }
+
+    def _guided_resolved_format_value(self) -> str:
+        return str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText()
+                if hasattr(self, "_guided_format_combo")
+                else "",
+            )
+        ).strip().lower()
+
+    def _guided_recording_start_clock_is_visible(self) -> bool:
+        """RWD shows the editable recording-start clock in every time display.
+
+        Both RWD structures can read their own acquisition timestamp, so the
+        scientist always sees and can correct the effective recording clock --
+        including in Elapsed, where the value is kept but not used.
+        """
+        return self._guided_resolved_format_value() == "rwd"
 
     def _guided_timeline_controls_require_recording_start(self) -> bool:
         if self._guided_timeline_mode_value() not in {
@@ -11013,22 +11182,18 @@ class MainWindow(QMainWindow):
         }:
             return False
         continuous = self._guided_effective_acquisition_mode() == "continuous"
-        resolved_format = str(
-            (getattr(self, "_discovery_cache", None) or {}).get(
-                "resolved_format",
-                self._guided_format_combo.currentText()
-                if hasattr(self, "_guided_format_combo")
-                else "",
-            )
-        ).strip().lower()
+        resolved_format = self._guided_resolved_format_value()
+        if resolved_format == "rwd":
+            # RWD prefills this field from its validated recording timestamp,
+            # but the value remains required: an unreadable timestamp leaves
+            # the field empty and the scientist must supply the clock.
+            return True
         if continuous:
-            # Guided continuous production is RWD-only and currently has no
-            # validated civil clock at elapsed zero.
-            return resolved_format == "rwd"
-        # RWD/NPM session chronology is authoritative once discovery has
-        # supplied a validated first session. Other current Guided formats
-        # remain elapsed-only until an existing normalized datetime contract
-        # is available, so their civil/fixed choice needs explicit input.
+            return False
+        # NPM session chronology is authoritative once discovery has supplied a
+        # validated first session. Other current Guided formats remain
+        # elapsed-only until an existing normalized datetime contract is
+        # available, so their civil/fixed choice needs explicit input.
         return self._guided_authoritative_first_datetime() is None
 
     def _guided_timeline_validation(self) -> tuple[bool, str]:
@@ -11047,9 +11212,16 @@ class MainWindow(QMainWindow):
     def _refresh_guided_timeline_controls(self) -> None:
         if not hasattr(self, "_guided_timeline_group"):
             return
+        self._refresh_guided_recording_start_clock_prefill()
         mode = self._guided_timeline_mode_value()
         fixed = mode == "fixed_daily_anchor"
         start_required = self._guided_timeline_controls_require_recording_start()
+        # RWD keeps the field on screen for every time display so the effective
+        # recording clock stays visible and editable; other formats keep the
+        # existing "shown only when required" behavior.
+        start_visible = (
+            self._guided_recording_start_clock_is_visible() or start_required
+        )
         fixed_edit = self._guided_fixed_daily_anchor_clock_edit
         start_edit = self._guided_recording_start_clock_edit
         fixed_label = self._guided_fixed_daily_anchor_clock_label
@@ -11057,9 +11229,26 @@ class MainWindow(QMainWindow):
         fixed_edit.setVisible(fixed)
         fixed_edit.setEnabled(fixed)
         fixed_label.setVisible(fixed)
-        start_edit.setVisible(start_required)
-        start_edit.setEnabled(start_required)
-        start_label.setVisible(start_required)
+        start_edit.setVisible(start_visible)
+        start_edit.setEnabled(start_visible)
+        start_label.setVisible(start_visible)
+        help_label = getattr(
+            self, "_guided_recording_start_clock_help_label", None
+        )
+        if help_label is not None:
+            if not start_visible:
+                help_text = ""
+            elif getattr(self, "_guided_recording_start_clock_user_edited", False):
+                help_text = GUIDED_RECORDING_START_CLOCK_USER_ENTERED_MESSAGE
+            elif (
+                getattr(self, "_guided_recording_start_clock_source_key", None)
+                is not None
+            ):
+                help_text = GUIDED_RECORDING_START_CLOCK_PREFILLED_MESSAGE
+            else:
+                help_text = GUIDED_TIMELINE_START_CLOCK_REQUIRED_MESSAGE
+            help_label.setText(help_text)
+            help_label.setVisible(bool(help_text))
         ok, message = self._guided_timeline_validation()
         self._guided_timeline_validation_label.setText(message)
         self._guided_timeline_validation_label.setVisible(not ok)
@@ -12979,14 +13168,29 @@ class MainWindow(QMainWindow):
                 "Start of plotted day: "
                 f"{intent.fixed_daily_anchor_clock or 'not set'}"
             )
-        if plan.acquisition_mode == "continuous":
-            if intent.recording_start_clock:
-                lines.append(
-                    "Clock time at recording start: "
-                    f"{intent.recording_start_clock}"
+        if intent.recording_start_clock:
+            lines.append(
+                "Clock time at recording start: "
+                f"{intent.recording_start_clock}"
+            )
+            lines.append(
+                "Source: "
+                + (
+                    "Validated RWD recording timestamp"
+                    if normalize_guided_clock_source(
+                        intent.recording_start_clock_source
+                    )
+                    == "validated_metadata"
+                    else "User entered"
                 )
-            elif mode in {"civil", "fixed_daily_anchor"}:
-                lines.append("Clock time at recording start: required")
+            )
+        elif mode in {"civil", "fixed_daily_anchor"}:
+            lines.append("Clock time at recording start: required")
+        if plan.acquisition_mode == "intermittent":
+            lines.append(
+                "Session spacing remains based on validated session timestamps."
+            )
+        if plan.acquisition_mode == "continuous":
             if mode == "fixed_daily_anchor" and intent.recording_start_clock:
                 try:
                     _day, offset = map_elapsed_coordinate(

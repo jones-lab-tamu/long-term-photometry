@@ -151,7 +151,7 @@ def _draft_for(
         # draft builder sets unconditionally.
         execution_intent=GuidedNewAnalysisExecutionIntent(
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
             execution_mode="both",
         ),
     )

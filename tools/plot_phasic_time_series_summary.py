@@ -106,6 +106,15 @@ def parse_args():
         default=None,
         help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
     )
+    parser.add_argument(
+        '--recording-start-clock',
+        default=None,
+        help=(
+            "Effective clock time at recording start (HH:MM or HH:MM:SS). "
+            "Shifts display placement only; session spacing and stored "
+            "acquisition timestamps are unchanged."
+        ),
+    )
     parser.add_argument('--session-duration-s', type=float, default=None, help="Explicit session duration (window seconds).")
     parser.add_argument('--out-rate-png', help="Output path for peak rate timeseries PNG")
     parser.add_argument('--out-auc-png', help="Output path for AUC timeseries PNG")
@@ -262,6 +271,7 @@ def main():
             timeline_anchor_mode=args.timeline_anchor_mode,
             fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
             session_index_entries=session_entries,
+            recording_start_clock=args.recording_start_clock,
         )
         timeline_key = 'session_index' if authoritative_sessions is not None else 'chunk_id'
         timeline_by_key = {

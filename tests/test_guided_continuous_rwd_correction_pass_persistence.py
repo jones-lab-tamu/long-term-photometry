@@ -107,7 +107,7 @@ def _build_case(folder, *, continuous_window_sec=20.0, phase=0.0):
         feature_event_values={},
         execution_intent=GuidedNewAnalysisExecutionIntent(
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         ),
     )
     binding = build_guided_continuous_rwd_review_binding(

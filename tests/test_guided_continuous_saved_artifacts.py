@@ -20,7 +20,7 @@ def _timeline(mode: str, *, start: str | None, fixed: str | None) -> dict:
         "timeline_mode": mode,
         "fixed_daily_anchor_clock": fixed,
         "recording_start_clock": start,
-        "recording_start_clock_source": "user_confirmed"
+        "recording_start_clock_source": "user_entered"
         if start is not None
         else "not_applicable",
     }

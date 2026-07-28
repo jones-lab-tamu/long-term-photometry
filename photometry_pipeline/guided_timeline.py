@@ -17,7 +17,7 @@ GUIDED_TIMELINE_MODES = ("elapsed", "civil", "fixed_daily_anchor")
 GUIDED_TIMELINE_MODE_SET = frozenset(GUIDED_TIMELINE_MODES)
 GUIDED_TIMELINE_CLOCK_SOURCES = (
     "validated_metadata",
-    "user_confirmed",
+    "user_entered",
     "not_applicable",
 )
 GUIDED_TIMELINE_CLOCK_SOURCE_SET = frozenset(GUIDED_TIMELINE_CLOCK_SOURCES)
@@ -66,6 +66,50 @@ def guided_clock_from_datetime(value: datetime) -> str:
     return text
 
 
+def normalize_guided_clock_source(value: str | None) -> str:
+    """Validate and return the recording-start clock source name.
+
+    Only the three current values are accepted.
+    """
+    source = str(value or "").strip().lower()
+    if source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
+        raise GuidedTimelineError(
+            f"Unsupported recording-start clock source: {value!r}."
+        )
+    return source
+
+
+def guided_clock_display_offset_sec(
+    effective_clock: str | None,
+    validated_clock: str | None,
+) -> float:
+    """Seconds to shift display placement so the recording starts at the
+    effective clock.
+
+    This is the single offset rule for intermittent placement: the effective
+    recording-start clock minus the validated first-session clock.  It is a
+    display-placement quantity only; stored acquisition timestamps keep their
+    validated values.
+
+    The field carries a clock time, not a date, so the raw difference between
+    two clocks is ambiguous across midnight: correcting a 23:59:30 start to
+    00:00:30 is a 60-second correction, not a 23 h 59 m one.  The offset is
+    therefore resolved to the *nearest clock occurrence* -- the smallest signed
+    difference among the raw difference and that difference plus or minus one
+    day.  This is a display-placement correction only; it introduces no date
+    field and no timezone handling.
+    """
+    effective_sec, _ = parse_guided_clock(
+        effective_clock, field_name="Clock time at recording start"
+    )
+    validated_sec, _ = parse_guided_clock(
+        validated_clock, field_name="Validated recording start clock"
+    )
+    raw = float(effective_sec - validated_sec)
+    day = 86400.0
+    return min((raw, raw + day, raw - day), key=abs)
+
+
 def timeline_provenance(
     *,
     timeline_anchor_mode: str,
@@ -77,11 +121,7 @@ def timeline_provenance(
     mode = str(timeline_anchor_mode or "").strip().lower()
     if mode not in GUIDED_TIMELINE_MODE_SET:
         raise GuidedTimelineError(f"Unsupported Guided timeline mode: {mode!r}.")
-    source = str(recording_start_clock_source or "").strip().lower()
-    if source not in GUIDED_TIMELINE_CLOCK_SOURCE_SET:
-        raise GuidedTimelineError(
-            f"Unsupported recording-start clock source: {source!r}."
-        )
+    source = normalize_guided_clock_source(recording_start_clock_source)
     fixed = None
     if mode == "fixed_daily_anchor":
         _, fixed = parse_guided_clock(

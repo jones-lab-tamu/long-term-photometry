@@ -190,9 +190,11 @@ def test_guided_timeline_hides_complete_conditional_form_rows(window, tmp_path):
     assert _timeline_row_visibility(
         window, "_guided_fixed_daily_anchor_clock_edit"
     ) == ("Start of plotted day:", False, False)
+    # RWD keeps the recording clock on screen in every time display so the
+    # scientist can see and correct it, including Elapsed where it is unused.
     assert _timeline_row_visibility(
         window, "_guided_recording_start_clock_edit"
-    ) == ("Clock time at recording start:", False, False)
+    ) == ("Clock time at recording start:", True, True)
 
     window._guided_acquisition_mode_combo.setCurrentIndex(
         window._guided_acquisition_mode_combo.findData("intermittent")
@@ -212,7 +214,7 @@ def test_guided_timeline_hides_complete_conditional_form_rows(window, tmp_path):
     ) == ("Start of plotted day:", True, True)
     assert _timeline_row_visibility(
         window, "_guided_recording_start_clock_edit"
-    ) == ("Clock time at recording start:", False, False)
+    ) == ("Clock time at recording start:", True, True)
 
     window._guided_timeline_mode_combo.setCurrentIndex(
         window._guided_timeline_mode_combo.findData("civil")
@@ -222,7 +224,7 @@ def test_guided_timeline_hides_complete_conditional_form_rows(window, tmp_path):
     ) == ("Start of plotted day:", False, False)
     assert _timeline_row_visibility(
         window, "_guided_recording_start_clock_edit"
-    ) == ("Clock time at recording start:", False, False)
+    ) == ("Clock time at recording start:", True, True)
 
 
 def test_guided_continuous_selection_produces_a_continuous_draft(window):
@@ -243,7 +245,7 @@ def test_guided_continuous_selection_produces_a_continuous_draft(window):
     assert draft.execution_intent.timeline_anchor_mode == "fixed_daily_anchor"
     assert draft.execution_intent.fixed_daily_anchor_clock == "07:00"
     assert draft.execution_intent.recording_start_clock == "11:00"
-    assert draft.execution_intent.recording_start_clock_source == "user_confirmed"
+    assert draft.execution_intent.recording_start_clock_source == "user_entered"
     # The session-timing questions do not apply to one long recording.
     assert window._guided_sessions_per_hour_edit.isHidden() is True
     assert window._guided_session_duration_edit.isHidden() is True
@@ -280,6 +282,7 @@ def test_guided_continuous_timeline_requires_start_clock_and_reviews_mapping(
         "Time display: Fixed daily anchor",
         "Start of plotted day: 07:00",
         "Clock time at recording start: 11:00",
+        "Source: User entered",
         "First data will appear 4 hours after the plotted day begins.",
     ]
 
@@ -292,6 +295,7 @@ def test_guided_continuous_timeline_requires_start_clock_and_reviews_mapping(
     assert window._guided_timeline_review_lines(civil_plan) == [
         "Time display: Civil clock",
         "Clock time at recording start: 11:00",
+        "Source: User entered",
         "Days begin at midnight.",
     ]
 
@@ -299,7 +303,10 @@ def test_guided_continuous_timeline_requires_start_clock_and_reviews_mapping(
         window._guided_timeline_mode_combo.findData("elapsed")
     )
     elapsed_plan = window._build_guided_new_analysis_draft_plan()
-    assert window._guided_recording_start_clock_edit.isHidden()
+    # The field stays visible and keeps its value, but Elapsed placement never
+    # carries a recording-start clock into the accepted plan.
+    assert window._guided_recording_start_clock_edit.isHidden() is False
+    assert window._guided_recording_start_clock_edit.text() == "11:00"
     assert elapsed_plan.execution_intent.recording_start_clock is None
     assert elapsed_plan.execution_intent.recording_start_clock_source == (
         "not_applicable"
@@ -310,7 +317,7 @@ def test_guided_continuous_timeline_requires_start_clock_and_reviews_mapping(
     ]
 
 
-def test_guided_intermittent_rwd_uses_validated_session_clock_without_editable_start(
+def test_guided_intermittent_rwd_prefills_validated_session_clock_and_stays_editable(
     window, tmp_path
 ):
     session = tmp_path / "2026_06_30-12_00_00" / "Fluorescence.csv"
@@ -325,7 +332,9 @@ def test_guided_intermittent_rwd_uses_validated_session_clock_without_editable_s
     }
     window._sync_guided_recording_visibility()
 
-    assert window._guided_recording_start_clock_edit.isHidden()
+    assert window._guided_recording_start_clock_edit.isHidden() is False
+    assert window._guided_recording_start_clock_edit.isEnabled() is True
+    assert window._guided_recording_start_clock_edit.text() == "12:00"
     values = window._guided_timeline_plan_values()
     assert values["recording_start_clock"] == "12:00"
     assert values["recording_start_clock_source"] == "validated_metadata"

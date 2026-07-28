@@ -465,6 +465,7 @@ def compute_day_layout(
     timeline_anchor_mode: str = "civil",
     fixed_daily_anchor_clock: Optional[str] = None,
     session_index_entries: Optional[List[dict]] = None,
+    recording_start_clock: Optional[str] = None,
 ) -> PhasicDataSet:
     """
     Build the canonical day/hour/rank layout for phasic plotting.
@@ -480,6 +481,11 @@ def compute_day_layout(
         The target ROI.
     sessions_per_hour : int or None
         If None, will be inferred from data.
+    recording_start_clock : str or None
+        Effective clock time at recording start.  When given, every session is
+        shifted for *display placement* by that clock minus the validated
+        first-session clock.  Stored acquisition timestamps, session indices,
+        spacing and missing-session structure are unchanged.
 
     Returns
     -------
@@ -561,7 +567,30 @@ def compute_day_layout(
         # - Placement semantics controlled by explicit anchor mode
         # - Slot placement from within-hour clock offset (not occurrence rank)
         datetimes = [r['datetime'] for r in raw_rows if r['datetime'] is not None]
-        t0 = min(datetimes)
+        validated_t0 = min(datetimes)
+        # One global display offset: the effective recording-start clock minus
+        # the validated first-session clock.  Every authoritative session
+        # datetime is shifted by the same amount for placement only, so real
+        # spacing, missing internal intervals, excluded-session positions and
+        # the stored acquisition timestamps are all preserved.
+        display_offset = timedelta(seconds=0.0)
+        if recording_start_clock is not None:
+            from photometry_pipeline.guided_timeline import (
+                guided_clock_display_offset_sec,
+                guided_clock_from_datetime,
+            )
+
+            display_offset = timedelta(
+                seconds=guided_clock_display_offset_sec(
+                    recording_start_clock,
+                    guided_clock_from_datetime(validated_t0),
+                )
+            )
+
+        def _placement_dt(dt_obj: datetime) -> datetime:
+            return dt_obj + display_offset
+
+        t0 = _placement_dt(validated_t0)
         base_date = t0.date()
 
         def _civil_components(dt_obj: datetime) -> Tuple[int, int, float]:
@@ -608,12 +637,13 @@ def compute_day_layout(
             dt = r['datetime']
             if dt is None:
                 continue
+            placed = _placement_dt(dt)
             if anchor_mode == "civil":
-                day_idx, hour_idx, _ = _civil_components(dt)
+                day_idx, hour_idx, _ = _civil_components(placed)
             elif anchor_mode == "elapsed":
-                day_idx, hour_idx, _ = _elapsed_components(dt)
+                day_idx, hour_idx, _ = _elapsed_components(placed)
             else:
-                day_idx, hour_idx, _ = _fixed_daily_anchor_components(dt)
+                day_idx, hour_idx, _ = _fixed_daily_anchor_components(placed)
             hour_counts[(day_idx, hour_idx)] += 1
 
         if sessions_per_hour is not None:
@@ -630,14 +660,16 @@ def compute_day_layout(
         for r in raw_rows:
             dt = r['datetime']
             if dt is not None:
-                elapsed = (dt - t0).total_seconds()
+                placed = _placement_dt(dt)
+                # A uniform shift leaves every inter-session interval intact.
+                elapsed = (placed - t0).total_seconds()
                 r['elapsed_from_start_sec'] = float(elapsed)
                 if anchor_mode == "civil":
-                    day_idx, hour_idx, offset_sec = _civil_components(dt)
+                    day_idx, hour_idx, offset_sec = _civil_components(placed)
                 elif anchor_mode == "elapsed":
-                    day_idx, hour_idx, offset_sec = _elapsed_components(dt)
+                    day_idx, hour_idx, offset_sec = _elapsed_components(placed)
                 else:
-                    day_idx, hour_idx, offset_sec = _fixed_daily_anchor_components(dt)
+                    day_idx, hour_idx, offset_sec = _fixed_daily_anchor_components(placed)
                 r['day_idx'] = int(day_idx)
                 r['hour_idx'] = int(hour_idx)
                 r['within_hour_offset_sec'] = float(offset_sec)

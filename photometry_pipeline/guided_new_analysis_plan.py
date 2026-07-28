@@ -428,11 +428,11 @@ class GuidedNewAnalysisExecutionIntent:
         "timeline_anchor_mode": "Guided default: fixed daily anchor",
         "fixed_daily_anchor_clock": "Guided default: start of plotted day 07:00",
         "recording_start_clock": (
-            "resolved from accepted metadata when available or explicitly "
-            "confirmed for elapsed-only continuous input"
+            "prefilled from the validated recording timestamp when available "
+            "and editable by the scientist"
         ),
         "recording_start_clock_source": (
-            "validated_metadata, user_confirmed, or not_applicable"
+            "validated_metadata, user_entered, or not_applicable"
         ),
         "execution_mode": "first_subset_fixed_default_phasic_for_global_dynamic_fit_only",
         "run_profile": "first_subset_fixed_default_matches_backend_default",
@@ -1483,12 +1483,17 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             severity="blocking",
         ))
 
+    # Continuous RWD has no session index for materialization to resolve a
+    # clock from, so the accepted plan must already carry one.  The source may
+    # now be either the prefilled validated recording timestamp or an edit;
+    # only its absence blocks.  Intermittent plans keep the existing behavior
+    # of resolving the validated session clock during materialization.
     if (
         acq_mode == "continuous"
         and plan.input_format == "rwd"
         and timeline_mode in {"civil", "fixed_daily_anchor"}
         and (
-            start_source != "user_confirmed"
+            start_source == "not_applicable"
             or intent.recording_start_clock is None
             or not start_clock_valid
         )

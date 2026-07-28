@@ -184,6 +184,15 @@ def parse_args():
         default=None,
         help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
     )
+    parser.add_argument(
+        '--recording-start-clock',
+        default=None,
+        help=(
+            "Effective clock time at recording start (HH:MM or HH:MM:SS). "
+            "Shifts display placement only; session spacing and stored "
+            "acquisition timestamps are unchanged."
+        ),
+    )
     
     # Optional / Tuning
     parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds")
@@ -2321,6 +2330,7 @@ def main():
         timeline_anchor_mode=args.timeline_anchor_mode,
         fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
         session_index_entries=authoritative_sessions,
+        recording_start_clock=args.recording_start_clock,
     )
     sph = pds.sessions_per_hour
     timeline_anchor_label = _timeline_anchor_label(

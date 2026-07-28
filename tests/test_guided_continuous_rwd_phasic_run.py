@@ -845,7 +845,7 @@ def test_standalone_provenance_keeps_accepted_window_length_and_step_distinct(
         "timeline_mode": "fixed_daily_anchor",
         "fixed_daily_anchor_clock": "07:00",
         "recording_start_clock": "11:00",
-        "recording_start_clock_source": "user_confirmed",
+        "recording_start_clock_source": "user_entered",
     }
     assert report["timeline"] == expected_timeline
     provenance = report["phasic_analysis"]["window_summary_provenance"]
@@ -947,12 +947,12 @@ def test_natural_saved_phasic_plots_follow_each_accepted_timeline_mode(
         "fixed_daily_anchor": {
             "fixed_daily_anchor_clock": "07:00",
             "recording_start_clock": "07:00",
-            "recording_start_clock_source": "user_confirmed",
+            "recording_start_clock_source": "user_entered",
         },
         "civil": {
             "fixed_daily_anchor_clock": None,
             "recording_start_clock": "11:00",
-            "recording_start_clock_source": "user_confirmed",
+            "recording_start_clock_source": "user_entered",
         },
         "elapsed": {
             "fixed_daily_anchor_clock": None,

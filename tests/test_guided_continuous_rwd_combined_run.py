@@ -249,7 +249,7 @@ def test_combined_provenance_uses_accepted_window_step_when_distinct(
         "timeline_mode": "fixed_daily_anchor",
         "fixed_daily_anchor_clock": "07:00",
         "recording_start_clock": "11:00",
-        "recording_start_clock_source": "user_confirmed",
+        "recording_start_clock_source": "user_entered",
     }
     assert report["timeline"] == expected_timeline
     provenance = report["phasic_analysis"]["window_summary_provenance"]

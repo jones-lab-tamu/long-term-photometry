@@ -848,7 +848,7 @@ def test_compile_propagates_accepted_timeline_fields_into_execution_request():
             timeline_anchor_mode="fixed_daily_anchor",
             fixed_daily_anchor_clock="07:00",
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         ),
     )
     facts = _complete_facts()
@@ -859,7 +859,7 @@ def test_compile_propagates_accepted_timeline_fields_into_execution_request():
             timeline_anchor_mode="fixed_daily_anchor",
             fixed_daily_anchor_clock="07:00",
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         ),
     )
 
@@ -874,7 +874,7 @@ def test_compile_propagates_accepted_timeline_fields_into_execution_request():
     assert acquisition.timeline_anchor_mode == "fixed_daily_anchor"
     assert acquisition.fixed_daily_anchor_clock == "07:00"
     assert acquisition.recording_start_clock == "11:00"
-    assert acquisition.recording_start_clock_source == "user_confirmed"
+    assert acquisition.recording_start_clock_source == "user_entered"
 
 
 def test_compiler_success_is_accepted_by_pure_backend_validator():

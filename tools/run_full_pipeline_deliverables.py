@@ -879,7 +879,7 @@ def parse_args():
     )
     parser.add_argument(
         '--guided-recording-start-clock-source',
-        choices=['validated_metadata', 'user_confirmed', 'not_applicable'],
+        choices=['validated_metadata', 'user_entered', 'not_applicable'],
         default='not_applicable',
         help="Guided timing provenance source for the recording-start clock.",
     )
@@ -3507,6 +3507,8 @@ def main():
                     cmd_ts.extend(['--timeline-anchor-mode', str(args.timeline_anchor_mode)])
                 if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
                     cmd_ts.extend(['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)])
+                if args.timeline_anchor_mode != "elapsed" and args.guided_recording_start_clock:
+                    cmd_ts.extend(['--recording-start-clock', str(args.guided_recording_start_clock)])
                 cmd_result = run_cmd(cmd_ts, roi_label=roi)
                 manifest['commands'].append(cmd_result)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
@@ -3562,6 +3564,8 @@ def main():
                     cmd_bundle.extend(['--timeline-anchor-mode', str(args.timeline_anchor_mode)])
                 if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
                     cmd_bundle.extend(['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)])
+                if args.timeline_anchor_mode != "elapsed" and args.guided_recording_start_clock:
+                    cmd_bundle.extend(['--recording-start-clock', str(args.guided_recording_start_clock)])
 
                 if not has_features:
                     cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])

@@ -389,7 +389,7 @@ def test_timeline_placement_change_changes_accepted_plan_identity():
         timeline_anchor_mode="fixed_daily_anchor",
         fixed_daily_anchor_clock="07:00",
         recording_start_clock="11:00",
-        recording_start_clock_source="user_confirmed",
+        recording_start_clock_source="user_entered",
     )
     plan_fixed = _base_plan(
         execution_intent=GuidedNewAnalysisExecutionIntent(**base_intent)

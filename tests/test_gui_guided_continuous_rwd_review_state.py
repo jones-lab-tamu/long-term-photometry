@@ -147,7 +147,7 @@ def test_timeline_change_rebuilds_timing_identity_without_rerunning_scientific_c
         execution_intent=replace(
             current["draft"].execution_intent,
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         ),
     )
 
@@ -190,7 +190,7 @@ def test_timeline_widget_handler_preserves_all_current_scientific_evidence(
         execution_intent=replace(
             current["draft"].execution_intent,
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         ),
         correction_preview_result_id="preview-1",
         correction_preview_status="current",
@@ -229,7 +229,7 @@ def test_timeline_widget_handler_preserves_all_current_scientific_evidence(
                 ),
                 recording_start_clock=start_clock,
                 recording_start_clock_source=(
-                    "user_confirmed" if start_clock else "not_applicable"
+                    "user_entered" if start_clock else "not_applicable"
                 ),
             ),
         )

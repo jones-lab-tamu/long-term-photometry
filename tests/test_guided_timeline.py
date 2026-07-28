@@ -60,13 +60,13 @@ def test_timeline_provenance_is_the_exact_four_field_contract():
         timeline_anchor_mode="fixed_daily_anchor",
         fixed_daily_anchor_clock="7:00",
         recording_start_clock="11:00",
-        recording_start_clock_source="user_confirmed",
+        recording_start_clock_source="user_entered",
     )
     assert provenance == {
         "timeline_mode": "fixed_daily_anchor",
         "fixed_daily_anchor_clock": "07:00",
         "recording_start_clock": "11:00",
-        "recording_start_clock_source": "user_confirmed",
+        "recording_start_clock_source": "user_entered",
     }
     assert timeline_provenance(
         timeline_anchor_mode="elapsed",
@@ -94,7 +94,7 @@ def test_civil_and_fixed_placement_require_an_explicit_recording_start_clock():
             timeline_anchor_mode="elapsed",
             fixed_daily_anchor_clock=None,
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
         )
 
 

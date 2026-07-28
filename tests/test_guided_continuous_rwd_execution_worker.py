@@ -153,7 +153,7 @@ def _build_case_for_mode(
         feature_event_values={},
         execution_intent=GuidedNewAnalysisExecutionIntent(
             recording_start_clock="11:00",
-            recording_start_clock_source="user_confirmed",
+            recording_start_clock_source="user_entered",
             execution_mode=execution_mode,
         ),
     )
