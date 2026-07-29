@@ -175,6 +175,32 @@ def test_fully_accepted_state_is_ready_but_hidden(ready_state):
     assert result.exposes_internal_cli_to_user is False
 
 
+def test_custom_tabular_uses_the_accepted_intermittent_readiness_path(
+    ready_state,
+):
+    rwd_authorization = ready_state["startup_authority"].rwd
+    production_intent = rwd_authorization.production_intent
+    input_source = _unchecked(
+        production_intent.input_source,
+        source_format="custom_tabular",
+    )
+    custom_authorization = _unchecked(
+        rwd_authorization,
+        production_intent=_unchecked(
+            production_intent,
+            input_source=input_source,
+        ),
+    )
+
+    result = _evaluate(
+        ready_state,
+        startup_authority=GuidedStartupAuthority(rwd=custom_authorization),
+    )
+
+    assert result.status == "ready_hidden"
+    assert result.ready is True
+
+
 def _npm_ready_state(intent, npm_payload):
     """Plain, non-fixture-dependent readiness kwargs for an NPM authority.
     Deliberately independent of the `ready_state`/`startup_request` RWD

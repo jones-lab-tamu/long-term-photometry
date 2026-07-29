@@ -2771,6 +2771,73 @@ def test_guided_format_change_status_uses_only_select_data_language(
     assert not any(term in text for term in prohibited)
 
 
+def test_guided_auto_enters_csv_interpretation_without_stealing_rwd_or_npm(
+    window, tmp_path
+):
+    csv_root = tmp_path / "csv_sessions"
+    csv_root.mkdir()
+    content = (
+        "ElapsedSeconds,CH1_signal,CH1_reference\n"
+        "0,2,1\n"
+        "0.5,2.1,1.1\n"
+    )
+    (csv_root / "session_10.csv").write_text(content, encoding="utf-8")
+    (csv_root / "session_2.csv").write_text(content, encoding="utf-8")
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("auto")
+    window._guided_input_dir_edit.setText(str(csv_root))
+
+    assert window._guided_format_combo.currentText() == "custom_tabular"
+    assert window._guided_format_combo.currentData() == "custom_tabular"
+    assert window._guided_format_combo.currentIndex() == (
+        window._guided_format_combo.findData("custom_tabular")
+    )
+    assert window._guided_csv_interpretation_group.isHidden() is False
+    assert window._guided_csv_status_label.text() == (
+        "Top-level CSV files were found. Confirm how their columns should "
+        "be interpreted."
+    )
+    assert [
+        window._guided_csv_session_order_list.item(index).text()
+        for index in range(window._guided_csv_session_order_list.count())
+    ] == ["session_2.csv", "session_10.csv"]
+    assert window._guided_csv_order_confirm_cb.isChecked() is False
+    assert window._guided_csv_time_column_combo.currentData() == ""
+    assert len(window._guided_csv_mapping_rows) == 1
+    mapping = window._guided_csv_mapping_rows[0]
+    assert mapping["name"].text() == ""
+    assert mapping["signal"].currentData() == ""
+    assert mapping["reference"].currentData() == ""
+
+    rwd_root = tmp_path / "rwd"
+    rwd_session = rwd_root / "2025_01_01-00_00_00"
+    rwd_session.mkdir(parents=True)
+    (rwd_session / "fluorescence.csv").write_text(
+        "TimeStamp,CH1-410,CH1-470\n0,1,2\n0.5,1.1,2.1\n",
+        encoding="utf-8",
+    )
+    window._guided_input_dir_edit.clear()
+    window._guided_format_combo.setCurrentText("auto")
+    window._guided_input_dir_edit.setText(str(rwd_root))
+    assert window._guided_format_combo.currentText() == "auto"
+    assert window._guided_csv_interpretation_group.isHidden() is True
+
+    npm_root = tmp_path / "npm"
+    npm_root.mkdir()
+    (npm_root / "photometryData2025-01-01T00_00_00.csv").write_text(
+        "Timestamp,LedState,Region0G\n"
+        "2025-01-01T00:00:00,1,2\n"
+        "2025-01-01T00:00:00.500,2,1\n",
+        encoding="utf-8",
+    )
+    window._guided_input_dir_edit.clear()
+    window._guided_format_combo.setCurrentText("auto")
+    window._guided_input_dir_edit.setText(str(npm_root))
+    assert window._guided_format_combo.currentText() == "auto"
+    assert window._guided_csv_interpretation_group.isHidden() is True
+
+
 def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"

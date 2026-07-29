@@ -1,6 +1,8 @@
 """GUI tests for the Guided Feature Detection selected-ROI preview UI."""
 
+import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 import pytest
 import numpy as np
@@ -743,6 +745,102 @@ def test_generate_preview_computes_selected_nonretained_segment_on_demand(
         window._guided_feature_preview_plot.trace, y
     )
     assert window._guided_feature_preview_on_demand_trace["valid"] is True
+
+
+def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
+    window, tmp_path, monkeypatch
+):
+    source = tmp_path / "session_0001.csv"
+    source.write_text(
+        "ElapsedSeconds,Green,Reference\n"
+        "0,2,1\n"
+        "0.5,2.1,1.1\n"
+        "1,2.2,1.2\n",
+        encoding="utf-8",
+    )
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
+    )
+    window._guided_local_preview_evidence_by_roi.clear()
+    window._discovery_cache = {
+        "resolved_format": "custom_tabular",
+        "sessions": [
+            {
+                "index": 0,
+                "session_id": "session_0001",
+                "path": str(source),
+                "included_in_preview": True,
+            }
+        ],
+    }
+    mappings = [
+        {
+            "roi_id": "CH1",
+            "signal_column": "Green",
+            "reference_column": "Reference",
+        }
+    ]
+    window._guided_new_analysis_dataset_contract_snapshot = replace(
+        window._default_guided_new_analysis_dataset_contract_snapshot(),
+        status="applied",
+        input_format="custom_tabular",
+        resolved_input_format="custom_tabular",
+        acquisition_mode="intermittent",
+        contract_values={
+            "custom_tabular_time_col": "ElapsedSeconds",
+            "custom_tabular_time_unit": "seconds",
+            "custom_tabular_roi_mapping_json": json.dumps(mappings),
+        },
+        explicitly_applied=True,
+    )
+    window._active_config_source_path = lambda: "C:/config.yaml"
+    calls = []
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+
+    def compute(source_file, **kwargs):
+        calls.append((source_file, kwargs))
+        return {
+            "valid": True,
+            "time_sec": t,
+            "preview_dff": y,
+            "fs_hz": 10.0,
+            "segment_label": kwargs["segment_label"],
+            "issues": [],
+        }
+
+    import gui.main_window as main_window_module
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        compute,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda *_args, **_kwargs: pytest.fail(
+            "CSV preview must not use legacy NPM/RWD inference"
+        ),
+    )
+    window._refresh_guided_feature_detection_preview_panel()
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert window._guided_feature_preview_status_label.text() == (
+        "Previewing CH1 with Default settings. Preview generated successfully."
+    )
+    assert len(calls) == 1
+    source_file, kwargs = calls[0]
+    assert source_file == str(source)
+    assert kwargs["input_format"] == "custom_tabular"
+    assert kwargs["config_overrides"] == {
+        "custom_tabular_time_col": "ElapsedSeconds",
+        "custom_tabular_time_unit": "seconds",
+        "custom_tabular_roi_mapping_json": json.dumps(mappings),
+    }
+    assert "time_sec" not in kwargs["config_overrides"].values()
 
 
 def test_on_demand_preview_refuses_stale_confirmed_choice(

@@ -2112,6 +2112,21 @@ def test_execution_subset_custom_tabular_with_explicit_mapping_satisfies_custom_
     assert fields["custom_tabular_column_mapping"].status == "present"
     assert fields["dataset_contract_overrides"].status == "present"
     assert subset.execution_available is False
+    spec = build_guided_new_analysis_execution_spec_preview(plan)
+    mapping = spec.first_subset_executable_mapping_preview
+    runner = spec.guided_runner_request_preview
+    assert subset.first_subset_executable is True
+    assert spec.spec_preview_available is True
+    assert spec.blocking_issue_categories == ()
+    assert mapping is not None
+    assert mapping.mapping_preview_available is True
+    assert mapping.supported_scope["input_format"] == "custom_tabular"
+    dataset_entries = _mapping_entries_by_field(mapping.dataset_mapping)
+    assert dataset_entries["custom_tabular_column_mapping"]["mapping_status"] == (
+        "would_emit_override"
+    )
+    assert runner is not None
+    assert runner.runner_request_preview_available is True
 
 
 def test_execution_subset_npm_continuous_remains_unsupported_with_current_snapshot():
@@ -2339,7 +2354,7 @@ def test_rwd_dataset_normalization_inconsistent_duplicate_fields_block(
     assert "inconsistent_rwd_contract_field" in preview.blocking_issue_categories
 
 
-@pytest.mark.parametrize("input_format", ["npm", "custom_tabular", "auto"])
+@pytest.mark.parametrize("input_format", ["npm", "auto"])
 def test_rwd_dataset_normalization_unsupported_formats_are_not_coerced(input_format):
     plan = _complete_new_analysis_plan_with_current_snapshot(input_format=input_format)
 
@@ -3035,7 +3050,6 @@ def test_first_subset_mapping_diagnostic_and_evidence_are_provenance_only():
     ("overrides", "expected_category"),
     [
         ({"input_format": "npm"}, "unsupported_input_format_for_first_subset_mapping"),
-        ({"input_format": "custom_tabular"}, "unsupported_input_format_for_first_subset_mapping"),
         ({"input_format": "auto"}, "unsupported_input_format_for_first_subset_mapping"),
         ({"acquisition_mode": "continuous"}, "unsupported_acquisition_mode_for_first_subset_mapping"),
     ],
@@ -3314,7 +3328,6 @@ def test_guided_runner_request_identity_and_boundaries_are_preview_only():
     ("case_name", "plan_overrides", "expected_category"),
     [
         ("npm", {"input_format": "npm"}, "unsupported_input_format_for_first_subset_mapping"),
-        ("custom_tabular", {"input_format": "custom_tabular"}, "unsupported_input_format_for_first_subset_mapping"),
         ("auto", {"input_format": "auto"}, "unsupported_input_format_for_first_subset_mapping"),
         ("continuous", {"acquisition_mode": "continuous"}, "unsupported_acquisition_mode_for_first_subset_mapping"),
         ("signal_only_f0", {}, "correction_mapping_not_ready"),

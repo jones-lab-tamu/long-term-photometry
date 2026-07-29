@@ -4183,6 +4183,8 @@ def _source_acquisition_mapping_section(
     spec_preview: GuidedNewAnalysisExecutionSpecPreview,
 ) -> dict[str, Any]:
     source = spec_preview.source_acquisition
+    input_format = str(source.get("input_format") or "")
+    supported_input = input_format in {"rwd", "custom_tabular"}
     entries = [
         _mapping_entry(
             "input_source_path",
@@ -4195,9 +4197,9 @@ def _source_acquisition_mapping_section(
         _mapping_entry(
             "input_format",
             source.get("input_format"),
-            "would_emit_override" if source.get("input_format") == "rwd" else "unsupported_first_subset",
+            "would_emit_override" if supported_input else "unsupported_first_subset",
             "guided_plan",
-            "first subset supports only concrete RWD format",
+            "first subset supports concrete RWD and CSV session formats",
             "future backend input format",
         ),
         _mapping_entry(
@@ -4245,7 +4247,7 @@ def _source_acquisition_mapping_section(
     ]
     return {
         "section_status": "ready_for_first_subset_mapping"
-        if source.get("input_format") == "rwd" and source.get("acquisition_mode") == "intermittent"
+        if supported_input and source.get("acquisition_mode") == "intermittent"
         else "unsupported_first_subset",
         "entries": _mapping_entry_dicts(entries),
         "no_file_inspection": True,
@@ -4256,6 +4258,82 @@ def _source_acquisition_mapping_section(
 def _dataset_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
     normalization = spec_preview.dataset_contract.get("rwd_normalization") or {}
     backend_values = normalization.get("backend_config_values") or {}
+    input_format = str(
+        spec_preview.source_acquisition.get("input_format") or ""
+    )
+    fields = {
+        field.field_name: field
+        for field in spec_preview.field_classifications
+    }
+    if input_format == "custom_tabular":
+        custom_mapping = fields.get("custom_tabular_column_mapping")
+        custom_ready = bool(
+            custom_mapping is not None
+            and custom_mapping.status == "present"
+            and not custom_mapping.blocks_subset
+        )
+        entries = [
+            _mapping_entry(
+                field_name,
+                None,
+                "not_applicable",
+                "dataset_contract",
+                "RWD fields are not applicable to CSV files",
+                "not mapped for CSV session input",
+                production_input=False,
+            )
+            for field_name in (
+                "rwd_time_col",
+                "sig_suffix",
+                "uv_suffix",
+                "exclude_incomplete_final_rwd_chunk",
+            )
+        ]
+        entries.extend(
+            (
+                _mapping_entry(
+                    "npm_channel_mapping",
+                    None,
+                    "not_applicable",
+                    "dataset_contract",
+                    "NPM channel mapping is not applicable to CSV files",
+                    "not mapped for CSV session input",
+                    production_input=False,
+                ),
+                _mapping_entry(
+                    "custom_tabular_column_mapping",
+                    custom_mapping.value if custom_mapping is not None else None,
+                    "would_emit_override" if custom_ready else "blocked",
+                    "dataset_contract",
+                    "current applied scientist-confirmed CSV interpretation",
+                    "future backend CSV parser fields",
+                ),
+                _mapping_entry(
+                    "continuous_window_sec",
+                    None,
+                    "not_applicable",
+                    "dataset_contract",
+                    "continuous windows are not applicable to CSV session input",
+                    "not mapped for CSV session input",
+                    production_input=False,
+                ),
+            )
+        )
+        return {
+            "section_status": (
+                "ready_for_first_subset_mapping"
+                if custom_ready
+                else "blocked"
+            ),
+            "normalization_status": "not_applicable_for_custom_tabular",
+            "entries": _mapping_entry_dicts(entries),
+            "blocker_categories": (
+                ()
+                if custom_ready
+                else ("missing_custom_tabular_column_mapping",)
+            ),
+            "no_config_dict": True,
+        }
     entries: list[GuidedFirstSubsetMappingEntry] = []
     for field_name in ("rwd_time_col", "sig_suffix", "uv_suffix", "exclude_incomplete_final_rwd_chunk"):
         entries.append(_mapping_entry(
@@ -4677,7 +4755,10 @@ def build_guided_first_subset_executable_mapping_preview(
     provenance_mapping = _provenance_mapping_section(spec_preview)
 
     unsupported_categories = []
-    if spec_preview.source_acquisition.get("input_format") != "rwd":
+    if spec_preview.source_acquisition.get("input_format") not in {
+        "rwd",
+        "custom_tabular",
+    }:
         unsupported_categories.append("unsupported_input_format_for_first_subset_mapping")
     if spec_preview.source_acquisition.get("acquisition_mode") != "intermittent":
         unsupported_categories.append("unsupported_acquisition_mode_for_first_subset_mapping")
@@ -4727,7 +4808,7 @@ def build_guided_first_subset_executable_mapping_preview(
         mapping_preview_available=mapping_available,
         first_subset_name=FIRST_EXECUTION_SUBSET_NAME,
         supported_scope={
-            "input_format": "rwd",
+            "input_format": spec_preview.source_acquisition.get("input_format"),
             "acquisition_mode": "intermittent",
             "execution_mode": "phasic",
             "run_profile": "full",
@@ -5190,8 +5271,22 @@ def build_guided_new_analysis_execution_spec_preview(
     feature_event_consumption = _feature_event_consumption_preview_dict(plan)
     feature_event_effective_values = feature_event_consumption["effective_values_preview"]
     feature_event_blockers = tuple(feature_event_effective_values["blocker_categories"])
-    rwd_normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
-    rwd_normalization_blockers = tuple(rwd_normalization["blocker_categories"])
+    if plan.input_format == "custom_tabular":
+        rwd_normalization = {
+            "normalization_status": "not_applicable_for_custom_tabular",
+            "backend_config_mapping_status": "not_applicable",
+            "blocker_categories": (),
+            "missing_required_fields": (),
+            "inconsistent_fields": (),
+        }
+        rwd_normalization_blockers = ()
+    else:
+        rwd_normalization = (
+            build_guided_rwd_dataset_contract_normalization_preview(plan)
+        )
+        rwd_normalization_blockers = tuple(
+            rwd_normalization["blocker_categories"]
+        )
     output_safety_ownership = build_guided_output_base_safety_ownership_preview(plan)
     output_safety_blockers = tuple(output_safety_ownership["blocker_categories"])
     issue_categories = tuple(

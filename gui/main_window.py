@@ -71,7 +71,7 @@ from gui.validate_run_policy import (
 )
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.utils import natural_sort_key
-from photometry_pipeline.io.adapters import inspect_custom_tabular_header
+from photometry_pipeline.io.adapters import inspect_custom_tabular_header, sniff_format
 from photometry_pipeline.core.tonic_output import (
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
     TONIC_OUTPUT_MODE_PRESERVE_RAW,
@@ -4363,10 +4363,53 @@ class MainWindow(QMainWindow):
         else:
             self._guided_csv_order_confirmed = False
             self._guided_csv_order_confirm_cb.setChecked(False)
+            if self._guided_format_combo.currentText() == "auto":
+                self._resolve_guided_auto_csv_fallback()
 
     def _on_guided_csv_source_changed(self, _text: str) -> None:
         if self._guided_csv_selected():
             self._refresh_guided_csv_source_interpretation()
+        elif self._guided_format_combo.currentText() == "auto":
+            self._resolve_guided_auto_csv_fallback()
+
+    def _resolve_guided_auto_csv_fallback(self) -> bool:
+        """Enter the existing CSV interpretation surface as Auto's last fallback."""
+        folder = self._guided_input_dir_edit.text().strip()
+        if not folder or not os.path.isdir(folder):
+            return False
+        try:
+            entries = [
+                item
+                for item in os.scandir(folder)
+                if item.is_file(follow_symlinks=False)
+                and item.name.lower().endswith(".csv")
+            ]
+        except OSError:
+            return False
+        if not entries:
+            return False
+        entries.sort(key=lambda item: natural_sort_key(item.name))
+        try:
+            baseline = self._active_baseline_config()
+            recognized = any(
+                sniff_format(item.path, baseline) in {"rwd", "npm"}
+                for item in entries
+            )
+        except (OSError, ValueError):
+            return False
+        if recognized:
+            return False
+
+        self._guided_format_combo.setCurrentText("custom_tabular")
+        self._guided_csv_status_label.setText(
+            "Top-level CSV files were found. Confirm how their columns "
+            "should be interpreted."
+        )
+        self._guided_format_help_label.setText(
+            "Top-level CSV files were found. Confirm how their columns "
+            "should be interpreted."
+        )
+        return True
 
     def _refresh_guided_csv_source_interpretation(self) -> None:
         folder = self._guided_input_dir_edit.text().strip()
@@ -20390,6 +20433,28 @@ class MainWindow(QMainWindow):
                 "uv_suffix": str(contract["uv_suffix"]),
                 "sig_suffix": str(contract["sig_suffix"]),
             }
+        if input_format == "custom_tabular":
+            snapshot = getattr(
+                self, "_guided_new_analysis_dataset_contract_snapshot", None
+            )
+            if snapshot is None or not getattr(
+                snapshot, "current_applied", False
+            ):
+                raise ValueError(
+                    "Confirm the CSV column interpretation before generating "
+                    "the Feature Detection preview."
+                )
+            values = dict(getattr(snapshot, "contract_values", {}) or {})
+            required = (
+                "custom_tabular_time_col",
+                "custom_tabular_time_unit",
+                "custom_tabular_roi_mapping_json",
+            )
+            if any(not values.get(name) for name in required):
+                raise ValueError(
+                    "The confirmed CSV column interpretation is incomplete."
+                )
+            return {name: values[name] for name in required}
         overrides = self._infer_dataset_contract_overrides(input_format)
         result = dict(overrides) if isinstance(overrides, dict) else {}
         duration_text = self._duration_edit.text().strip()

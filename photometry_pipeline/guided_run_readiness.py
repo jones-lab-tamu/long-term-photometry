@@ -139,7 +139,7 @@ def _rwd_first_subset_current(authorization) -> bool:
     intent = authorization.production_intent
     return bool(
         intent is not None
-        and intent.input_source.source_format == "rwd"
+        and intent.input_source.source_format in {"rwd", "custom_tabular"}
         and intent.acquisition.acquisition_mode == "intermittent"
         and intent.execution_profile.execution_mode in {"phasic", "tonic", "both"}
         and intent.execution_profile.run_type == "full"

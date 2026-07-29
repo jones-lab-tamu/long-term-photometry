@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, QSignalBlocker, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QWidget
 
 import photometry_pipeline.preview.correction_preview as correction_preview_module
@@ -1592,6 +1593,194 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     )
 
     assert window._guided_run_btn.isEnabled() is True
+
+
+def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
+    window, tmp_path, monkeypatch, qapp, no_real_modals
+):
+    import gui.main_window as main_window_module
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from photometry_pipeline.guided_startup_transaction import (
+        plan_guided_startup_transaction,
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    source_root = tmp_path / "csv_sessions"
+    output_base = tmp_path / "output"
+    source_root.mkdir()
+    output_base.mkdir()
+    rows = ["ElapsedSeconds,Green,Reference"]
+    rows.extend(
+        f"{index / 20.0:.2f},{2.0 + index * 0.0001:.6f},"
+        f"{1.0 + index * 0.0001:.6f}"
+        for index in range(12_001)
+    )
+    for name in ("session_2.csv", "session_10.csv"):
+        (source_root / name).write_text(
+            "\n".join(rows) + "\n", encoding="utf-8"
+        )
+
+    window._guided_format_combo.setCurrentText("auto")
+    window._guided_input_dir_edit.setText(str(source_root))
+    window._guided_output_dir_edit.setText(str(output_base))
+    assert window._guided_format_combo.currentText() == "custom_tabular"
+    assert window._guided_csv_interpretation_group.isHidden() is False
+
+    time_index = window._guided_csv_time_column_combo.findData(
+        "ElapsedSeconds"
+    )
+    assert time_index >= 0
+    window._guided_csv_time_column_combo.setCurrentIndex(time_index)
+    mapping = window._guided_csv_mapping_rows[0]
+    mapping["name"].setText("CH1")
+    mapping["signal"].setCurrentIndex(mapping["signal"].findData("Green"))
+    mapping["reference"].setCurrentIndex(
+        mapping["reference"].findData("Reference")
+    )
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    acquisition_index = window._guided_acquisition_mode_combo.findData(
+        "intermittent"
+    )
+    window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_index)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("600")
+    timeline_index = window._guided_timeline_mode_combo.findData("elapsed")
+    assert timeline_index >= 0
+    window._guided_timeline_mode_combo.setCurrentIndex(timeline_index)
+
+    window._guided_discover_rois_btn.click()
+    for _ in range(500):
+        qapp.processEvents()
+        if not window._guided_roi_discovery_running:
+            break
+        QTest.qWait(10)
+    assert window._guided_roi_discovery_running is False
+    assert (
+        window._discovery_cache["resolved_format"].lower()
+        == "custom_tabular"
+    )
+    assert window._guided_roi_list.count() == 1
+    assert window._guided_roi_list.item(0).text() == "CH1"
+
+    correction_calls = []
+    original_correction = (
+        main_window_module.run_guided_local_correction_preview
+    )
+
+    def capture_correction(*args, **kwargs):
+        correction_calls.append((args, kwargs))
+        return original_correction(*args, **kwargs)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_local_correction_preview",
+        capture_correction,
+    )
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._guided_preview_generate_btn.click()
+    result = window._guided_preview_last_result
+    assert result["status"] in {"success", "partial"}
+    assert correction_calls
+    correction_overrides = correction_calls[0][1]["config_overrides"]
+    assert correction_overrides["custom_tabular_time_col"] == (
+        "ElapsedSeconds"
+    )
+    assert correction_overrides["custom_tabular_time_unit"] == "seconds"
+    assert json.loads(
+        correction_overrides["custom_tabular_roi_mapping_json"]
+    ) == [
+        {
+            "roi_id": "CH1",
+            "signal_column": "Green",
+            "reference_column": "Reference",
+        }
+    ]
+
+    row = window._guided_local_preview_confirmation_rows["CH1"]
+    strategy_index = row["strategy_combo"].findData(
+        "global_linear_regression"
+    )
+    row["strategy_combo"].setCurrentIndex(strategy_index)
+    row["action_button"].click()
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    )
+    window._guided_feature_event_apply_btn.click()
+    window._refresh_guided_feature_detection_preview_panel()
+    window._guided_feature_preview_generate_btn.click()
+    assert "Preview generated successfully" in (
+        window._guided_feature_preview_status_label.text()
+    )
+
+    output_target = output_base / "guided_csv_run"
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_output_path_edit.setText(str(output_target))
+    window._guided_output_apply_btn.click()
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert plan.dataset_contract_snapshot.current_applied is True
+    assert readiness.plan_complete_for_handoff is True
+    assert subset.first_subset_executable is True, subset.blocking_issues
+    assert "does not yet support this configuration" not in (
+        window._guided_review_plan_status_label.text()
+    )
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+    window._guided_review_go_to_run_btn.click()
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == (
+        "validator_accepted"
+    ), window._guided_backend_validation_outcome.blocking_issues
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_run_readiness_label.text() == (
+        "Guided Run is ready to start."
+    )
+
+    dispatched = []
+
+    def capture_dispatch(request):
+        dispatched.append(request)
+        window._guided_backend_execution_active = False
+
+    monkeypatch.setattr(
+        window,
+        "_start_guided_run_execution_worker",
+        capture_dispatch,
+    )
+    monkeypatch.setattr(
+        window, "_start_guided_run_live_status", lambda *_args: None
+    )
+    window._guided_run_btn.click()
+    assert len(dispatched) == 1
+    startup_request = dispatched[0]
+    startup_plan = plan_guided_startup_transaction(startup_request)
+    assert startup_plan.ok is True
+    argv = startup_plan.command_plan.argv
+    assert argv[argv.index("--format") + 1] == "custom_tabular"
+    assert Path(argv[argv.index("--input") + 1]).resolve() == (
+        source_root.resolve()
+    )
 
 
 def test_dirty_shared_default_does_not_make_successful_setup_check_stale(
