@@ -199,20 +199,23 @@ def test_original_csv_reaches_pipeline_cache_and_completion_reconciliation(
 ):
     source_root = tmp_path / "csv_source"
     source_root.mkdir()
-    source_path = source_root / "Session_1.csv"
-    time_values = np.arange(5.0, 15.0, 0.1)
-    source_path.write_text(
-        "Elapsed,Green,Iso\n"
-        + "\n".join(
-            f"{time_value:.1f},{2.0 + 0.01 * index:.6f},"
-            f"{1.0 + 0.005 * index:.6f}"
-            for index, time_value in enumerate(time_values)
+    for session_name, sample_count in (
+        ("Session_1.csv", 201),
+        ("Session_2.csv", 200),
+    ):
+        time_values = 5.0 + np.arange(sample_count, dtype=float) * 0.049999
+        (source_root / session_name).write_text(
+            "Elapsed,Green,Iso\n"
+            + "\n".join(
+                f"{time_value:.6f},{2.0 + 0.01 * index:.6f},"
+                f"{1.0 + 0.005 * index:.6f}"
+                for index, time_value in enumerate(time_values)
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        + "\n",
-        encoding="utf-8",
-    )
     config = Config(
-        target_fs_hz=10.0,
+        target_fs_hz=50.0,
         chunk_duration_sec=10.0,
         custom_tabular_time_col="Elapsed",
         custom_tabular_time_unit="seconds",
@@ -241,7 +244,7 @@ def test_original_csv_reaches_pipeline_cache_and_completion_reconciliation(
     requested = build_custom_tabular_normalized_recording_description(
         source_root_canonical=snapshot.source_root_canonical,
         candidate_snapshot=snapshot,
-        session_metadata={"Session_1.csv": {}},
+        session_metadata={"Session_1.csv": {}, "Session_2.csv": {}},
         session_duration_sec=10.0,
         sessions_per_hour=1,
         timeline_anchor_mode="elapsed",
@@ -249,7 +252,7 @@ def test_original_csv_reaches_pipeline_cache_and_completion_reconciliation(
         discovered_roi_ids=("Fiber A",),
         included_roi_ids=("Fiber A",),
         interpretation=interpretation,
-        target_fs_hz=10.0,
+        target_fs_hz=50.0,
     )
     consumed = build_custom_tabular_consumed_normalized_recording_evidence(
         run_dir=str(run_dir),

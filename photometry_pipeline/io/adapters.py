@@ -792,6 +792,12 @@ def _resolve_strict_target_sample_count(
     """
     Resolve strict-grid target sample count.
 
+    For Custom Tabular input whose nominal grid endpoint is less than or equal
+    to one measured source interval beyond the final timestamp, end the target
+    grid at the last target sample inside measured support. This preserves a
+    half-open nominal session without padding or extrapolating its endpoint.
+    Larger shortfalls retain the nominal grid and fail strict coverage.
+
     For real/vendor RWD with over-precise inferred contracts, the strict config
     product can over-demand the grid by slightly more than the existing
     one-sample end-coverage tolerance.
@@ -817,14 +823,46 @@ def _resolve_strict_target_sample_count(
             f"and target_fs_hz={config.target_fs_hz}"
         )
 
-    if not context.lower().startswith("rwd"):
-        return n_target
-
     finite_t = t_rel[np.isfinite(t_rel)]
     if finite_t.size == 0:
         return n_target
 
     if n_target < 3:
+        return n_target
+
+    if context.lower().startswith("custom_tabular"):
+        diffs = np.diff(finite_t)
+        if np.any(~np.isfinite(diffs)) or np.any(diffs <= 0.0):
+            return n_target
+
+        raw_end = float(finite_t[-1])
+        fs = float(config.target_fs_hz)
+        grid_end = (n_target - 1) / fs
+        source_dt = _median_positive_dt_sec(finite_t)
+        if source_dt is None:
+            return n_target
+
+        endpoint_shortfall = grid_end - raw_end
+        roundoff_tol = (
+            np.finfo(float).eps
+            * max(1.0, abs(grid_end), abs(raw_end), abs(source_dt))
+            * 8.0
+        )
+        if (
+            endpoint_shortfall > roundoff_tol
+            and endpoint_shortfall <= source_dt + roundoff_tol
+        ):
+            # A nominal half-open session can legitimately contain one fewer
+            # source-cadence endpoint. Keep the strict target grid entirely
+            # inside measured support instead of allowing np.interp to hold
+            # the final value beyond raw_end.
+            supported_last_index = int(
+                np.floor(np.nextafter(raw_end * fs, np.inf))
+            )
+            return min(n_target, supported_last_index + 1)
+        return n_target
+
+    if not context.lower().startswith("rwd"):
         return n_target
 
     raw_end = float(np.nanmax(finite_t))

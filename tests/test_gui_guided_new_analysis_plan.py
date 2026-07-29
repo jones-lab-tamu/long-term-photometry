@@ -1611,20 +1611,27 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
     output_base = tmp_path / "output"
     source_root.mkdir()
     output_base.mkdir()
-    rows = [
-        "ElapsedSeconds,ROI1_Green,ROI1_Reference,"
-        "ROI2_Green,ROI2_Reference"
-    ]
-    rows.extend(
-        f"{index / 20.0:.2f},{2.0 + index * 0.0001:.6f},"
-        f"{1.0 + index * 0.0001:.6f},"
-        f"{3.0 + index * 0.0002:.6f},"
-        f"{1.5 + index * 0.0001:.6f}"
-        for index in range(12_001)
-    )
-    for name in ("session_0001.csv", "session_0002.csv"):
+    def session_rows(sample_count):
+        rows = [
+            "ElapsedSeconds,ROI1_Green,ROI1_Reference,"
+            "ROI2_Green,ROI2_Reference"
+        ]
+        rows.extend(
+            f"{index * 0.049999:.6f},"
+            f"{2.0 + index * 0.0001:.6f},"
+            f"{1.0 + index * 0.0001:.6f},"
+            f"{3.0 + index * 0.0002:.6f},"
+            f"{1.5 + index * 0.0001:.6f}"
+            for index in range(sample_count)
+        )
+        return rows
+
+    for name, sample_count in (
+        ("session_0001.csv", 12_001),
+        ("session_0002.csv", 12_000),
+    ):
         (source_root / name).write_text(
-            "\n".join(rows) + "\n", encoding="utf-8"
+            "\n".join(session_rows(sample_count)) + "\n", encoding="utf-8"
         )
 
     window._guided_format_combo.setCurrentText("auto")
@@ -1700,43 +1707,48 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     )
-    window._guided_preview_generate_btn.click()
-    result = window._guided_preview_last_result
-    assert result["status"] == "success", result
-    assert correction_calls
-    correction_overrides = correction_calls[0][1]["config_overrides"]
-    assert correction_overrides["custom_tabular_time_col"] == (
-        "ElapsedSeconds"
+    correction_matrix = (
+        ("ROI1", 0, "session_0001.csv"),
+        ("ROI2", 0, "session_0001.csv"),
+        ("ROI1", 1, "session_0002.csv"),
+        ("ROI2", 1, "session_0002.csv"),
     )
-    assert correction_overrides["custom_tabular_time_unit"] == "seconds"
-    assert json.loads(
-        correction_overrides["custom_tabular_roi_mapping_json"]
-    ) == [
-        {
-            "roi_id": "ROI1",
-            "signal_column": "ROI1_Green",
-            "reference_column": "ROI1_Reference",
-        },
-        {
-            "roi_id": "ROI2",
-            "signal_column": "ROI2_Green",
-            "reference_column": "ROI2_Reference",
-        },
+    correction_statuses = {}
+    for roi_id, chunk_index, session_name in correction_matrix:
+        roi_index = window._guided_preview_roi_combo.findData(roi_id)
+        assert roi_index >= 0
+        window._guided_preview_roi_combo.setCurrentIndex(roi_index)
+        segment_index = window._guided_preview_chunk_combo.findText(
+            Path(session_name).stem
+        )
+        assert segment_index >= 0
+        window._guided_preview_chunk_combo.setCurrentIndex(segment_index)
+        window._guided_preview_generate_btn.click()
+        result = window._guided_preview_last_result
+        correction_statuses[(roi_id, session_name)] = result["status"]
+        assert result["status"] == "success", result
+        if chunk_index == 1:
+            row = window._guided_local_preview_confirmation_rows[roi_id]
+            strategy_index = row["strategy_combo"].findData(
+                "global_linear_regression"
+            )
+            row["strategy_combo"].setCurrentIndex(strategy_index)
+            row["action_button"].click()
+
+    assert set(correction_statuses) == {
+        (roi_id, session_name)
+        for roi_id, _chunk_index, session_name in correction_matrix
+    }
+    assert len(correction_calls) == 4
+    assert [
+        (kwargs["roi"], Path(args[0]).name)
+        for args, kwargs in correction_calls
+    ] == [
+        ("ROI1", "session_0001.csv"),
+        ("ROI2", "session_0001.csv"),
+        ("ROI1", "session_0002.csv"),
+        ("ROI2", "session_0002.csv"),
     ]
-
-    row = window._guided_local_preview_confirmation_rows["ROI1"]
-    strategy_index = row["strategy_combo"].findData(
-        "global_linear_regression"
-    )
-    row["strategy_combo"].setCurrentIndex(strategy_index)
-    row["action_button"].click()
-
-    window._guided_preview_roi_combo.setCurrentIndex(
-        window._guided_preview_roi_combo.findData("ROI2")
-    )
-    window._guided_preview_generate_btn.click()
-    assert window._guided_preview_last_result["status"] == "success"
-    assert len(correction_calls) == 2
     for _args, kwargs in correction_calls:
         overrides = kwargs["config_overrides"]
         assert overrides["custom_tabular_time_col"] == "ElapsedSeconds"
@@ -1755,12 +1767,6 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
                 "reference_column": "ROI2_Reference",
             },
         ]
-    row = window._guided_local_preview_confirmation_rows["ROI2"]
-    strategy_index = row["strategy_combo"].findData(
-        "global_linear_regression"
-    )
-    row["strategy_combo"].setCurrentIndex(strategy_index)
-    row["action_button"].click()
     assert set(window._guided_local_preview_evidence_by_roi) == {
         "ROI1",
         "ROI2",
@@ -1820,8 +1826,8 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
         (kwargs["roi"], Path(source_path).name)
         for source_path, kwargs in feature_calls
     ] == [
-        ("ROI1", "session_0002.csv"),
-        ("ROI2", "session_0002.csv"),
+        ("ROI1", "session_0001.csv"),
+        ("ROI2", "session_0001.csv"),
     ]
     expected_mapping = [
         {

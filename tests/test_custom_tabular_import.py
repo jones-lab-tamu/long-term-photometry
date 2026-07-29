@@ -1,6 +1,7 @@
 import os
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 
@@ -44,6 +45,19 @@ def _base_cfg() -> Config:
     )
 
 
+def _write_custom_times(path, times) -> None:
+    path.write_text(
+        "time_sec,Region0_iso,Region0_sig\n"
+        + "\n".join(
+            f"{time_value:.9f},{1.0 + time_value:.9f},"
+            f"{2.0 + time_value:.9f}"
+            for time_value in times
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_custom_tabular_config_validation_rejects_identical_suffixes(tmp_path):
     cfg_path = tmp_path / "bad_custom_tabular.yaml"
     cfg_path.write_text(
@@ -70,6 +84,83 @@ def test_custom_tabular_load_chunk_valid_contract(tmp_path):
     assert contract.get("time_col") == "time_sec"
     assert contract.get("uv_suffix") == "_iso"
     assert contract.get("sig_suffix") == "_sig"
+
+
+def test_custom_tabular_strict_grid_stays_inside_one_source_interval_endpoint(
+    tmp_path,
+):
+    cfg = Config(
+        target_fs_hz=50.0,
+        chunk_duration_sec=600.0,
+        allow_partial_final_chunk=False,
+        custom_tabular_time_col="time_sec",
+        custom_tabular_uv_suffix="_iso",
+        custom_tabular_sig_suffix="_sig",
+    )
+
+    working_path = tmp_path / "working.csv"
+    working_times = np.arange(12_001, dtype=float) * 0.049999
+    _write_custom_times(working_path, working_times)
+    working = load_chunk(
+        str(working_path), "custom_tabular", cfg, chunk_id=0
+    )
+    assert working.time_sec.shape[0] == 30_000
+    assert working.time_sec[-1] == pytest.approx(599.98)
+
+    observed_path = tmp_path / "observed_near_endpoint.csv"
+    observed_times = np.arange(12_000, dtype=float) * 0.049999
+    _write_custom_times(observed_path, observed_times)
+    observed = load_chunk(
+        str(observed_path), "custom_tabular", cfg, chunk_id=1
+    )
+    assert observed_times[-1] == pytest.approx(599.938001)
+    assert observed.time_sec.shape[0] == 29_997
+    assert observed.time_sec[-1] == pytest.approx(599.92)
+    assert observed.time_sec[-1] <= observed_times[-1]
+    assert observed.sig_raw[-1, 0] == pytest.approx(
+        2.0 + observed.time_sec[-1]
+    )
+
+
+@pytest.mark.parametrize(
+    ("sample_count", "expected_shortfall_intervals"),
+    [
+        (11_995, 5.84),
+        (11_999, 1.84),
+    ],
+)
+def test_custom_tabular_strict_grid_rejects_endpoint_beyond_one_source_interval(
+    tmp_path, sample_count, expected_shortfall_intervals
+):
+    cfg = Config(
+        target_fs_hz=50.0,
+        chunk_duration_sec=600.0,
+        allow_partial_final_chunk=False,
+        custom_tabular_time_col="time_sec",
+        custom_tabular_uv_suffix="_iso",
+        custom_tabular_sig_suffix="_sig",
+    )
+    times = np.arange(sample_count, dtype=float) * 0.049999
+    shortfall_intervals = (599.98 - times[-1]) / 0.049999
+    assert shortfall_intervals == pytest.approx(
+        expected_shortfall_intervals, abs=0.01
+    )
+    csv_path = tmp_path / f"truncated_{sample_count}.csv"
+    _write_custom_times(csv_path, times)
+
+    with pytest.raises(ValueError, match="End Coverage Failure"):
+        load_chunk(str(csv_path), "custom_tabular", cfg, chunk_id=0)
+
+
+def test_custom_tabular_strict_grid_still_rejects_nonmonotonic_time(tmp_path):
+    cfg = _base_cfg()
+    times = np.arange(10, dtype=float) * 0.1
+    times[-2:] = times[-2:][::-1]
+    csv_path = tmp_path / "nonmonotonic.csv"
+    _write_custom_times(csv_path, times)
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        load_chunk(str(csv_path), "custom_tabular", cfg, chunk_id=0)
 
 
 def test_custom_tabular_rejects_unpaired_roi_columns(tmp_path):
