@@ -403,6 +403,11 @@ class GuidedProductionAcquisition:
     dataset_source_setup_signature: str
     diagnostic_cache_contract_identity: str
     execution_mode: str = "phasic"
+    source_format: str = "rwd"
+    custom_tabular_time_unit: str = ""
+    custom_tabular_roi_mapping_json: str = ""
+    custom_tabular_ordered_source_files_json: str = ""
+    custom_tabular_chronology_authority: str = ""
 
 
 @dataclass(frozen=True)
@@ -417,6 +422,7 @@ class GuidedProductionParser:
     roi_name_rule: str
     ambiguity_policy: str
     parser_contract_digest: str
+    custom_tabular_interpretation_json: str = ""
 
 
 @dataclass(frozen=True)
@@ -1085,6 +1091,15 @@ ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
         "rwd_time_col", "uv_suffix", "sig_suffix", "target_fs_hz", "sessions_per_hour", "session_duration_sec",
         "acquisition_mode", "allow_partial_final_window", "exclude_incomplete_final_rwd_chunk",
         "input_format", "resolved_input_format", "continuous_window_sec", "continuous_step_sec",
+        "chunk_duration_sec", "allow_partial_final_chunk",
+        "adapter_value_nan_policy",
+        "custom_tabular_time_col", "custom_tabular_time_unit",
+        "custom_tabular_time_scale_to_seconds",
+        "custom_tabular_roi_mapping_json",
+        "custom_tabular_ordered_source_files_json",
+        "custom_tabular_order_confirmed",
+        "custom_tabular_chronology_authority",
+        "custom_tabular_header_rule", "custom_tabular_delimiter",
     }
 )
 NPM_ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
@@ -1266,8 +1281,13 @@ def map_guided_validation_request_to_execution_intent(
         return _failure("unsupported_validation_scope", "request", "Validation scope is unsupported.", "validation_scope_mismatch")
     if request.subset_rule_version != mapping_contract.supported_subset_rule_version or request.compiler_version != mapping_contract.supported_compiler_version or request.canonicalization_algorithm_version != mapping_contract.supported_canonicalization_algorithm_version:
         return _failure("unsupported_subset_rule", "request", "Request subset or compiler contract is unsupported.", "request_contract_mismatch")
-    if request.source.source_format != "rwd":
-        return _failure("unsupported_source_format", "source", "Only RWD source is supported.", "source_not_rwd")
+    if request.source.source_format not in {"rwd", "custom_tabular"}:
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            "Only the established non-NPM source path is supported.",
+            "source_not_non_npm",
+        )
     if not request.source.candidate_files or request.source.unresolved_source_identity_inputs:
         return _failure("unresolved_request_field", "source", "Source candidate snapshot is incomplete.", "source_snapshot_unresolved")
     if not _sha256(request.normalized_recording_description_identity):
@@ -1347,6 +1367,41 @@ def map_guided_validation_request_to_execution_intent(
         return _failure("production_config_field_unmapped", "typed_values", "A per-ROI typed feature/event field is unmapped.", "per_roi_typed_field_unmapped")
 
     try:
+        dataset_semantics = {
+            item.field_name: item.value
+            for item in request.acquisition_dataset.semantic_values
+        }
+        custom_interpretation_json = ""
+        if request.source.source_format == "custom_tabular":
+            custom_interpretation_json = json.dumps(
+                {
+                    "time_column": dataset_semantics[
+                        "custom_tabular_time_col"
+                    ],
+                    "time_unit": dataset_semantics[
+                        "custom_tabular_time_unit"
+                    ],
+                    "time_scale_to_seconds": dataset_semantics[
+                        "custom_tabular_time_scale_to_seconds"
+                    ],
+                    "header_rule": dataset_semantics[
+                        "custom_tabular_header_rule"
+                    ],
+                    "delimiter": dataset_semantics[
+                        "custom_tabular_delimiter"
+                    ],
+                    "roi_mappings": json.loads(
+                        dataset_semantics[
+                            "custom_tabular_roi_mapping_json"
+                        ]
+                    ),
+                    "chronology_authority": dataset_semantics[
+                        "custom_tabular_chronology_authority"
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         intent = GuidedProductionExecutionIntent(
             intent_schema_name=GUIDED_PRODUCTION_INTENT_SCHEMA_NAME,
             intent_schema_version=GUIDED_PRODUCTION_INTENT_SCHEMA_VERSION,
@@ -1396,6 +1451,23 @@ def map_guided_validation_request_to_execution_intent(
                 request.acquisition_dataset.dataset_source_setup_signature,
                 request.acquisition_dataset.diagnostic_cache_contract_identity,
                 request.acquisition_dataset.execution_mode,
+                request.source.source_format,
+                str(dataset_semantics.get("custom_tabular_time_unit", "")),
+                str(
+                    dataset_semantics.get(
+                        "custom_tabular_roi_mapping_json", ""
+                    )
+                ),
+                str(
+                    dataset_semantics.get(
+                        "custom_tabular_ordered_source_files_json", ""
+                    )
+                ),
+                str(
+                    dataset_semantics.get(
+                        "custom_tabular_chronology_authority", ""
+                    )
+                ),
             ),
             parser=GuidedProductionParser(
                 request.parser.schema_name, request.parser.schema_version,
@@ -1403,6 +1475,7 @@ def map_guided_validation_request_to_execution_intent(
                 request.parser.uv_suffix_candidates, request.parser.signal_suffix_candidates,
                 request.parser.column_normalization_rule, request.parser.roi_name_rule,
                 request.parser.ambiguity_policy, request.parser.parser_contract_digest,
+                custom_interpretation_json,
             ),
             roi_scope=GuidedProductionRoiScope(
                 request.roi_scope.discovered_roi_ids, request.roi_scope.included_roi_ids,

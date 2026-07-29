@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import os
 from pathlib import Path
 from typing import Sequence
@@ -38,10 +39,21 @@ from photometry_pipeline.io.rwd_contract import (
 from photometry_pipeline.io.rwd_source_snapshot import (
     build_rwd_source_candidate_snapshot,
 )
+from photometry_pipeline.io.custom_tabular_source_snapshot import (
+    build_custom_tabular_source_candidate_snapshot,
+)
+from photometry_pipeline.io.adapters import inspect_custom_tabular_header
+from photometry_pipeline.guided_normalized_recording import (
+    compute_custom_tabular_parser_contract_digest,
+)
 
 
 GUIDED_FIRST_SUBSET_SELECTION_MODE = "include"
-GUIDED_MANIFEST_CURRENT_FACTS_SUPPORTED_FORMATS = ("rwd", "npm")
+GUIDED_MANIFEST_CURRENT_FACTS_SUPPORTED_FORMATS = (
+    "rwd",
+    "npm",
+    "custom_tabular",
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +89,10 @@ def build_guided_manifest_current_facts(
         return _build_rwd_guided_manifest_current_facts(root, config, included)
     if source_format == "npm":
         return _build_npm_guided_manifest_current_facts(root, config, included)
+    if source_format == "custom_tabular":
+        return _build_custom_tabular_guided_manifest_current_facts(
+            root, config, included
+        )
     raise ValueError(
         f"Unsupported Guided manifest source format: {source_format!r}."
     )
@@ -256,5 +272,79 @@ def _build_npm_guided_manifest_current_facts(
             excluded_roi_ids=excluded,
             parser_contract_digest=parser_digest,
             strict_roi_inventory_digest=roi_authority.canonical_roi_authority_identity,
+        ),
+    )
+
+
+def _build_custom_tabular_guided_manifest_current_facts(
+    root: str,
+    config: Config,
+    included: tuple[str, ...],
+) -> GuidedManifestCurrentFacts:
+    snapshot = build_custom_tabular_source_candidate_snapshot(root)
+    mappings = json.loads(config.custom_tabular_roi_mapping_json)
+    interpretation = {
+        "time_column": config.custom_tabular_time_col,
+        "time_unit": config.custom_tabular_time_unit,
+        "time_scale_to_seconds": (
+            1.0 if config.custom_tabular_time_unit == "seconds" else 0.001
+        ),
+        "header_rule": "ordinary_first_row",
+        "delimiter": "comma",
+        "roi_mappings": mappings,
+        "chronology_authority": "confirmed_filename_order",
+    }
+    parser_digest = compute_custom_tabular_parser_contract_digest(interpretation)
+    discovered = tuple(str(item["roi_id"]) for item in mappings)
+    required = [
+        config.custom_tabular_time_col,
+        *[
+            item[key]
+            for item in mappings
+            for key in ("signal_column", "reference_column")
+        ],
+    ]
+    candidates = tuple(
+        GuidedManifestCurrentCandidate(
+            canonical_relative_path=item.canonical_relative_path,
+            absolute_path=os.path.abspath(
+                os.path.join(
+                    snapshot.source_root_canonical,
+                    *item.canonical_relative_path.split("/"),
+                )
+            ),
+        )
+        for item in snapshot.candidates
+    )
+    for candidate in candidates:
+        headers = inspect_custom_tabular_header(candidate.absolute_path)
+        missing = [column for column in required if column not in headers]
+        if missing:
+            raise ValueError(
+                f"The selected column {missing[0]!r} is missing from "
+                f"{candidate.canonical_relative_path}."
+            )
+    missing_rois = tuple(item for item in included if item not in discovered)
+    if missing_rois:
+        raise ValueError(
+            f"Included ROIs are absent from the live source: {list(missing_rois)}"
+        )
+    excluded = tuple(item for item in discovered if item not in included)
+    strict_digest = compute_guided_strict_roi_inventory_digest(
+        source_candidate_content_digest=snapshot.source_candidate_content_digest,
+        parser_contract_digest=parser_digest,
+        discovered_roi_ids=discovered,
+        included_roi_ids=included,
+        excluded_roi_ids=excluded,
+        selection_mode=GUIDED_FIRST_SUBSET_SELECTION_MODE,
+    )
+    return GuidedManifestCurrentFacts(
+        current_candidates=candidates,
+        current_roi_inventory=GuidedManifestCurrentRoiInventory(
+            discovered_roi_ids=discovered,
+            included_roi_ids=included,
+            excluded_roi_ids=excluded,
+            parser_contract_digest=parser_digest,
+            strict_roi_inventory_digest=strict_digest,
         ),
     )

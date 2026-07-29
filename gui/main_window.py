@@ -70,6 +70,8 @@ from gui.validate_run_policy import (
     is_validation_current
 )
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.utils import natural_sort_key
+from photometry_pipeline.io.adapters import inspect_custom_tabular_header
 from photometry_pipeline.core.tonic_output import (
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
     TONIC_OUTPUT_MODE_PRESERVE_RAW,
@@ -176,6 +178,38 @@ from photometry_pipeline.tuning.cache_correction_retune import run_cache_correct
 from tools.run_applied_dff_batch import AppliedDffBatchError, run_applied_dff_batch
 import dataclasses
 from typing import Callable, get_args
+
+
+FORMAT_DISPLAY_LABELS = {
+    "auto": "Auto",
+    "rwd": "RWD",
+    "npm": "NPM",
+    "custom_tabular": "CSV files (one file per session)",
+}
+
+
+class _FormatComboBox(QComboBox):
+    """Show scientist-facing labels while preserving internal format values."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        for value in FORMAT_CHOICES:
+            self.addItem(FORMAT_DISPLAY_LABELS.get(value, value), value)
+
+    def currentText(self) -> str:
+        value = self.currentData()
+        return str(value) if value is not None else super().currentText()
+
+    def setCurrentText(self, text: str) -> None:
+        index = self.findData(text)
+        if index < 0:
+            index = super().findText(text)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+    def findText(self, text: str, flags=Qt.MatchExactly | Qt.MatchCaseSensitive) -> int:
+        index = self.findData(text)
+        return index if index >= 0 else super().findText(text, flags)
 
 
 class _GuidedFeaturePreviewPlot(QWidget):
@@ -3372,6 +3406,10 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_dataset_contract_snapshot = None
         self._guided_new_analysis_dataset_contract_candidate_snapshot = None
         self._guided_dataset_contract_confirmation_active = False
+        self._guided_csv_files: tuple[str, ...] = ()
+        self._guided_csv_headers: tuple[str, ...] = ()
+        self._guided_csv_mapping_rows: list[dict[str, QWidget]] = []
+        self._guided_csv_order_confirmed = False
         # Current-plan-only approvals. They are intentionally never persisted in
         # QSettings and are cleared when the recording source changes.
         self._guided_approved_missing_sessions = []
@@ -3657,9 +3695,8 @@ class MainWindow(QMainWindow):
         # CR1-F1-A: format and recording structure come first. Reading the
         # source correctly depends on both, so the scientist states them
         # before choosing the folder and before ROI discovery interprets it.
-        self._guided_format_combo = QComboBox()
+        self._guided_format_combo = _FormatComboBox()
         self._guided_format_combo.setObjectName("guidedFormatCombo")
-        self._guided_format_combo.addItems(list(FORMAT_CHOICES))
         self._guided_format_combo.setToolTip(self._format_combo.toolTip())
         self._guided_format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_format_combo.setMinimumContentsLength(8)
@@ -3763,6 +3800,67 @@ class MainWindow(QMainWindow):
         output_help_label.setProperty("guidedMutedText", True)
         output_help_label.setWordWrap(True)
         form.addRow("", output_help_label)
+
+        csv_group = QGroupBox("Interpret CSV columns")
+        csv_group.setObjectName("guidedCsvInterpretationGroup")
+        csv_layout = QVBoxLayout(csv_group)
+        csv_layout.setContentsMargins(10, 10, 10, 10)
+        csv_layout.setSpacing(8)
+
+        self._guided_csv_status_label = QLabel(
+            "Select a folder containing one CSV file per recording session."
+        )
+        self._guided_csv_status_label.setObjectName("guidedCsvInterpretationStatus")
+        self._guided_csv_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_csv_status_label.setWordWrap(True)
+        csv_layout.addWidget(self._guided_csv_status_label)
+
+        csv_time_form = QFormLayout()
+        self._guided_csv_time_column_combo = QComboBox()
+        self._guided_csv_time_column_combo.setObjectName("guidedCsvTimeColumn")
+        self._guided_csv_time_column_combo.addItem("Select elapsed-time column", "")
+        csv_time_form.addRow("Time column:", self._guided_csv_time_column_combo)
+        self._guided_csv_time_units_combo = QComboBox()
+        self._guided_csv_time_units_combo.setObjectName("guidedCsvTimeUnits")
+        self._guided_csv_time_units_combo.addItem("seconds", "seconds")
+        self._guided_csv_time_units_combo.addItem("milliseconds", "milliseconds")
+        csv_time_form.addRow("Time units:", self._guided_csv_time_units_combo)
+        csv_layout.addLayout(csv_time_form)
+
+        mapping_labels = QHBoxLayout()
+        for label, stretch in (
+            ("ROI name", 2),
+            ("Signal column", 3),
+            ("Reference column", 3),
+            ("", 1),
+        ):
+            widget = QLabel(label)
+            mapping_labels.addWidget(widget, stretch)
+        csv_layout.addLayout(mapping_labels)
+        self._guided_csv_mapping_layout = QVBoxLayout()
+        csv_layout.addLayout(self._guided_csv_mapping_layout)
+        self._guided_csv_add_roi_btn = QPushButton("Add ROI")
+        self._guided_csv_add_roi_btn.setObjectName("guidedCsvAddRoiButton")
+        self._guided_csv_add_roi_btn.clicked.connect(self._add_guided_csv_mapping_row)
+        csv_layout.addWidget(self._guided_csv_add_roi_btn, alignment=Qt.AlignLeft)
+
+        self._guided_csv_session_count_label = QLabel("CSV session order: 0 sessions")
+        self._guided_csv_session_count_label.setObjectName("guidedCsvSessionCount")
+        csv_layout.addWidget(self._guided_csv_session_count_label)
+        self._guided_csv_session_order_list = QListWidget()
+        self._guided_csv_session_order_list.setObjectName("guidedCsvSessionOrder")
+        self._guided_csv_session_order_list.setMaximumHeight(120)
+        csv_layout.addWidget(self._guided_csv_session_order_list)
+        self._guided_csv_order_confirm_cb = QCheckBox(
+            "I confirm this is the intended recording order."
+        )
+        self._guided_csv_order_confirm_cb.setObjectName(
+            "guidedCsvSessionOrderConfirmation"
+        )
+        csv_layout.addWidget(self._guided_csv_order_confirm_cb)
+        csv_group.setVisible(False)
+        self._guided_csv_interpretation_group = csv_group
+        form.addRow("", csv_group)
 
         roi_group = QGroupBox("ROI discovery and selection")
         roi_group.setObjectName("guidedRoiDiscoveryGroup")
@@ -4183,6 +4281,217 @@ class MainWindow(QMainWindow):
             wrapper,
         )
 
+    def _guided_csv_selected(self) -> bool:
+        return (
+            hasattr(self, "_guided_format_combo")
+            and self._guided_format_combo.currentText() == "custom_tabular"
+        )
+
+    def _clear_guided_csv_mapping_rows(self) -> None:
+        for row in self._guided_csv_mapping_rows:
+            widget = row.get("widget")
+            if widget is not None:
+                self._guided_csv_mapping_layout.removeWidget(widget)
+                widget.deleteLater()
+        self._guided_csv_mapping_rows = []
+
+    def _add_guided_csv_mapping_row(self) -> None:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        name = QLineEdit()
+        name.setPlaceholderText("ROI name")
+        signal = QComboBox()
+        reference = QComboBox()
+        for combo in (signal, reference):
+            combo.addItem("Select column", "")
+            for header in self._guided_csv_headers:
+                combo.addItem(header, header)
+        remove = QPushButton("Remove")
+        row_layout.addWidget(name, 2)
+        row_layout.addWidget(signal, 3)
+        row_layout.addWidget(reference, 3)
+        row_layout.addWidget(remove, 1)
+        row = {
+            "widget": row_widget,
+            "name": name,
+            "signal": signal,
+            "reference": reference,
+            "remove": remove,
+        }
+        self._guided_csv_mapping_rows.append(row)
+        self._guided_csv_mapping_layout.addWidget(row_widget)
+        name.textChanged.connect(self._on_guided_csv_mapping_changed)
+        signal.currentIndexChanged.connect(self._on_guided_csv_mapping_changed)
+        reference.currentIndexChanged.connect(self._on_guided_csv_mapping_changed)
+        remove.clicked.connect(
+            lambda _checked=False, target=row: self._remove_guided_csv_mapping_row(target)
+        )
+        self._on_guided_csv_mapping_changed()
+
+    def _remove_guided_csv_mapping_row(self, row: dict[str, QWidget]) -> None:
+        if row not in self._guided_csv_mapping_rows:
+            return
+        self._guided_csv_mapping_rows.remove(row)
+        widget = row["widget"]
+        self._guided_csv_mapping_layout.removeWidget(widget)
+        widget.deleteLater()
+        self._on_guided_csv_mapping_changed()
+
+    def _invalidate_guided_csv_interpretation(self, reason: str) -> None:
+        self._invalidate_guided_backend_validation(reason)
+        self._guided_new_analysis_dataset_contract_snapshot = None
+        self._guided_new_analysis_dataset_contract_candidate_snapshot = None
+        self._refresh_guided_navigation_state()
+
+    def _on_guided_csv_mapping_changed(self, *_args) -> None:
+        if not hasattr(self, "_guided_csv_time_column_combo"):
+            return
+        self._invalidate_guided_csv_interpretation("CSV interpretation changed")
+
+    def _on_guided_csv_order_confirmation_changed(self, state: int) -> None:
+        self._guided_csv_order_confirmed = bool(state == Qt.Checked)
+        self._invalidate_guided_csv_interpretation("CSV session order changed")
+
+    def _on_guided_csv_format_changed(self, _index: int) -> None:
+        if not hasattr(self, "_guided_csv_interpretation_group"):
+            return
+        selected = self._guided_csv_selected()
+        self._guided_csv_interpretation_group.setVisible(selected)
+        if selected:
+            self._refresh_guided_csv_source_interpretation()
+        else:
+            self._guided_csv_order_confirmed = False
+            self._guided_csv_order_confirm_cb.setChecked(False)
+
+    def _on_guided_csv_source_changed(self, _text: str) -> None:
+        if self._guided_csv_selected():
+            self._refresh_guided_csv_source_interpretation()
+
+    def _refresh_guided_csv_source_interpretation(self) -> None:
+        folder = self._guided_input_dir_edit.text().strip()
+        previous_files = self._guided_csv_files
+        self._guided_csv_files = ()
+        self._guided_csv_headers = ()
+        self._guided_csv_session_order_list.clear()
+        self._guided_csv_session_count_label.setText("CSV session order: 0 sessions")
+        with QSignalBlocker(self._guided_csv_order_confirm_cb):
+            self._guided_csv_order_confirm_cb.setChecked(False)
+        self._guided_csv_order_confirmed = False
+        self._guided_csv_time_column_combo.clear()
+        self._guided_csv_time_column_combo.addItem("Select elapsed-time column", "")
+        self._clear_guided_csv_mapping_rows()
+
+        if not folder or not os.path.isdir(folder):
+            self._guided_csv_status_label.setText(
+                "Select a folder containing one CSV file per recording session."
+            )
+            self._invalidate_guided_csv_interpretation("CSV source changed")
+            return
+        try:
+            entries = [
+                item
+                for item in os.scandir(folder)
+                if item.is_file(follow_symlinks=False)
+                and item.name.lower().endswith(".csv")
+            ]
+            entries.sort(key=lambda item: natural_sort_key(item.name))
+            if not entries:
+                raise ValueError("No top-level CSV files were found in this folder.")
+            names = [item.name for item in entries]
+            if len(set(names)) != len(names):
+                raise ValueError("The CSV source entries are not unique.")
+            headers_by_file = [
+                (item.name, inspect_custom_tabular_header(item.path))
+                for item in entries
+            ]
+        except (OSError, ValueError) as exc:
+            self._guided_csv_status_label.setText(str(exc))
+            self._invalidate_guided_csv_interpretation("CSV source inspection failed")
+            return
+
+        self._guided_csv_files = tuple(names)
+        self._guided_csv_headers = tuple(headers_by_file[0][1])
+        self._guided_csv_session_count_label.setText(
+            f"CSV session order: {len(names)} sessions"
+        )
+        self._guided_csv_session_order_list.addItems(names)
+        for header in self._guided_csv_headers:
+            self._guided_csv_time_column_combo.addItem(header, header)
+        self._guided_csv_status_label.setText(
+            "Choose one shared time interpretation and ROI mapping for all sessions. "
+            "If this order is wrong, rename the files and select the folder again."
+        )
+        self._add_guided_csv_mapping_row()
+        if tuple(names) != previous_files:
+            self._invalidate_guided_csv_interpretation("CSV file set or order changed")
+
+    def _guided_csv_interpretation(self) -> dict[str, object]:
+        if not self._guided_csv_files:
+            raise ValueError("No top-level CSV files were found in this folder.")
+        if not self._guided_csv_order_confirm_cb.isChecked():
+            raise ValueError(
+                "Confirm that the displayed filename order is the intended session order."
+            )
+        time_column = str(self._guided_csv_time_column_combo.currentData() or "").strip()
+        if not time_column:
+            raise ValueError("Select the column containing elapsed time.")
+        time_unit = str(self._guided_csv_time_units_combo.currentData() or "").strip()
+        if time_unit not in {"seconds", "milliseconds"}:
+            raise ValueError(
+                "Choose whether the time values are seconds or milliseconds."
+            )
+        mappings: list[dict[str, str]] = []
+        for row in self._guided_csv_mapping_rows:
+            roi_id = row["name"].text().strip()
+            signal = str(row["signal"].currentData() or "").strip()
+            reference = str(row["reference"].currentData() or "").strip()
+            if not roi_id or not signal or not reference:
+                raise ValueError(
+                    "Add at least one ROI with a signal and reference column."
+                )
+            mappings.append(
+                {
+                    "roi_id": roi_id,
+                    "signal_column": signal,
+                    "reference_column": reference,
+                }
+            )
+        if not mappings:
+            raise ValueError("Add at least one ROI with a signal and reference column.")
+        roi_ids = [item["roi_id"] for item in mappings]
+        if len(set(roi_ids)) != len(roi_ids):
+            raise ValueError("ROI names must be unique.")
+        assigned = [
+            item[key]
+            for item in mappings
+            for key in ("signal_column", "reference_column")
+        ]
+        if len(set(assigned)) != len(assigned):
+            raise ValueError(
+                "Each signal or reference column may be assigned only once."
+            )
+        required = (time_column, *assigned)
+        folder = self._guided_input_dir_edit.text().strip()
+        for filename in self._guided_csv_files:
+            headers = inspect_custom_tabular_header(os.path.join(folder, filename))
+            for column in required:
+                if column not in headers:
+                    raise ValueError(
+                        f"The selected column {column!r} is missing from {filename}."
+                    )
+        return {
+            "ordered_source_files": list(self._guided_csv_files),
+            "order_confirmed": True,
+            "chronology_authority": "confirmed_filename_order",
+            "time_column": time_column,
+            "time_unit": time_unit,
+            "time_scale_to_seconds": 1.0 if time_unit == "seconds" else 0.001,
+            "header_rule": "ordinary_first_row",
+            "delimiter": "comma",
+            "roi_mappings": mappings,
+        }
+
     def _connect_guided_setup_sync(self) -> None:
         """Connect Guided setup controls to the existing Full Control setup widgets."""
         if getattr(self, "_guided_setup_sync_connected", False):
@@ -4209,6 +4518,18 @@ class MainWindow(QMainWindow):
         self._guided_input_dir_edit.textChanged.connect(
             lambda _text: self._refresh_guided_navigation_state()
         )
+        self._guided_input_dir_edit.textChanged.connect(
+            self._on_guided_csv_source_changed
+        )
+        self._guided_csv_time_column_combo.currentIndexChanged.connect(
+            self._on_guided_csv_mapping_changed
+        )
+        self._guided_csv_time_units_combo.currentIndexChanged.connect(
+            self._on_guided_csv_mapping_changed
+        )
+        self._guided_csv_order_confirm_cb.stateChanged.connect(
+            self._on_guided_csv_order_confirmation_changed
+        )
         self._guided_output_dir_edit.textChanged.connect(
             lambda _text: self._mark_guided_output_destination_explicit()
         )
@@ -4225,6 +4546,9 @@ class MainWindow(QMainWindow):
         )
         self._guided_format_combo.currentIndexChanged.connect(
             self._on_guided_format_changed
+        )
+        self._guided_format_combo.currentIndexChanged.connect(
+            self._on_guided_csv_format_changed
         )
         self._guided_format_combo.currentIndexChanged.connect(
             self._clear_guided_missing_session_approvals_for_source_change
@@ -5908,11 +6232,16 @@ class MainWindow(QMainWindow):
             requested_format = str(
                 getattr(self, "_guided_discovery_requested_format", "auto")
             ).strip().lower()
+            display_format = (
+                "CSV files"
+                if resolved_format == "custom_tabular"
+                else resolved_format.upper()
+            )
             self._guided_format_help_label.setText(
-                f"Detected format: {resolved_format.upper()}. The app detected "
+                f"Detected format: {display_format}. The app detected "
                 "this format automatically."
                 if requested_format == "auto"
-                else f"Confirmed format: {resolved_format.upper()}."
+                else f"Confirmed format: {display_format}."
             )
         populate_started = time.monotonic()
         self._guided_roi_discovery_diag("populate_discovery_ui_before")
@@ -6360,7 +6689,12 @@ class MainWindow(QMainWindow):
         A continuous recording is one recording, not a set of sessions, so it
         is never described with a session count (CR1-F1-A).
         """
-        fmt = str(disco.get("resolved_format", "") or "").strip().upper() or "the detected"
+        raw_fmt = str(disco.get("resolved_format", "") or "").strip().lower()
+        fmt = (
+            "CSV files"
+            if raw_fmt == "custom_tabular"
+            else raw_fmt.upper() or "the detected"
+        )
         if str(disco.get("acquisition_mode", "") or "").strip().lower() == "continuous":
             return (
                 f"Detected {fmt} data as one continuous recording. "
@@ -9921,6 +10255,17 @@ class MainWindow(QMainWindow):
                         ),
                         "uv_suffix": str(local_contract["uv_suffix"]),
                         "sig_suffix": str(local_contract["sig_suffix"]),
+                    }
+                elif segment["input_format"] == "custom_tabular":
+                    interpretation = self._guided_csv_interpretation()
+                    config_overrides = {
+                        "custom_tabular_time_col": interpretation["time_column"],
+                        "custom_tabular_time_unit": interpretation["time_unit"],
+                        "custom_tabular_roi_mapping_json": json.dumps(
+                            interpretation["roi_mappings"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     }
                 else:
                     # A local preview uses one selected session. Do not repeat
@@ -13484,9 +13829,14 @@ class MainWindow(QMainWindow):
         timeline_summary = "\n" + "\n".join(
             self._guided_timeline_review_lines(plan)
         )
+        display_format = (
+            "CSV files (one file per session)"
+            if plan.input_format == "custom_tabular"
+            else plan.input_format or "not set"
+        )
         self._guided_review_analysis_summary_label.setText(
             f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
-            f"Input format: {plan.input_format or 'not set'}\n"
+            f"Input format: {display_format}\n"
             f"Acquisition mode: {plan.acquisition_mode or 'not set'}\n"
             f"Recording structure: {timing}\n"
             f"Sessions discovered: {len(sessions) if sessions else 'not available'}\n"
@@ -13961,8 +14311,51 @@ class MainWindow(QMainWindow):
             if not validation_issues:
                 status = "inferred"
         elif fmt == "custom_tabular":
-            status = "invalid"
-            validation_issues.append("custom_tabular column mapping is not represented in Guided new_analysis state")
+            if acq != "intermittent":
+                status = "unsupported"
+                validation_issues.append(
+                    "CSV files (one file per session) requires intermittent recording structure"
+                )
+            else:
+                try:
+                    interpretation = self._guided_csv_interpretation()
+                except ValueError as exc:
+                    status = "invalid"
+                    validation_issues.append(str(exc))
+                else:
+                    dataset_semantics = {
+                        "custom_tabular_time_col": interpretation["time_column"],
+                        "custom_tabular_time_unit": interpretation["time_unit"],
+                        "custom_tabular_time_scale_to_seconds": interpretation[
+                            "time_scale_to_seconds"
+                        ],
+                        "custom_tabular_roi_mapping_json": json.dumps(
+                            interpretation["roi_mappings"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "custom_tabular_ordered_source_files_json": json.dumps(
+                            interpretation["ordered_source_files"],
+                            separators=(",", ":"),
+                        ),
+                        "custom_tabular_order_confirmed": True,
+                        "custom_tabular_chronology_authority": (
+                            "confirmed_filename_order"
+                        ),
+                        "custom_tabular_header_rule": "ordinary_first_row",
+                        "custom_tabular_delimiter": "comma",
+                    }
+                    target_fs_hz_value = float(
+                        getattr(self._active_baseline_config(), "target_fs_hz", 0.0)
+                    )
+                    if (
+                        not math.isfinite(target_fs_hz_value)
+                        or target_fs_hz_value <= 0
+                    ):
+                        validation_issues.append(
+                            "The target sampling rate is missing or invalid."
+                        )
+                    status = "inferred" if not validation_issues else "invalid"
         elif fmt == "auto":
             status = "invalid"
             validation_issues.append("auto format is not an applied dataset contract; choose or discover a concrete format")
@@ -13997,7 +14390,13 @@ class MainWindow(QMainWindow):
                 "structural_only": False,
                 "dataset_semantics_inferred_from_selected_input": fmt == "rwd",
                 "dataset_semantics_source": (
-                    "configured" if fmt == "npm" else "source_validated_candidate"
+                    "configured"
+                    if fmt == "npm"
+                    else (
+                        "scientist_confirmed_csv_interpretation"
+                        if fmt == "custom_tabular"
+                        else "source_validated_candidate"
+                    )
                 ),
                 "diagnostic_scope_signature": signatures["diagnostic_scope_signature"],
             },
@@ -14863,6 +15262,10 @@ class MainWindow(QMainWindow):
             "_guided_run_readiness_label"
             if analysis
             else "_guided_backend_validation_status_label"
+        )
+        is_custom_tabular = (
+            str(getattr(snapshot, "input_format", "") or "").lower()
+            == "custom_tabular"
         )
         label = getattr(self, label_name, None)
         if label is not None:
@@ -18014,6 +18417,82 @@ class MainWindow(QMainWindow):
                 parts.append(f"Custom for {', '.join(custom_rois)}")
             fe_lines.append(f"Feature detection: {'; '.join(parts)}.")
 
+        if plan.input_format == "custom_tabular":
+            snapshot = plan.dataset_contract_snapshot
+            values = dict(getattr(snapshot, "contract_values", {}) or {})
+            try:
+                mappings = json.loads(
+                    str(values.get("custom_tabular_roi_mapping_json", "[]"))
+                )
+                ordered = json.loads(
+                    str(
+                        values.get(
+                            "custom_tabular_ordered_source_files_json", "[]"
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                mappings, ordered = [], []
+            order_confirmed = bool(
+                values.get("custom_tabular_order_confirmed")
+            )
+            lines = [
+                "Review Plan:",
+                "Source type: CSV files",
+                f"Session count: {len(ordered)}",
+                (
+                    "CSV session order: confirmed filename order"
+                    if order_confirmed
+                    else "CSV session order: incomplete; confirm the displayed filename order"
+                ),
+                "Time: "
+                f"{values.get('custom_tabular_time_col', 'not selected')} "
+                f"({values.get('custom_tabular_time_unit', 'not selected')})",
+                f"Recording structure: {timing_summary}",
+                "Timeline placement:",
+                *(
+                    f"  {line}"
+                    for line in self._guided_timeline_review_lines(plan)
+                ),
+                "Included ROIs: "
+                + (
+                    ", ".join(plan.included_roi_ids)
+                    if plan.included_roi_ids
+                    else "none"
+                ),
+                f"Correction strategy coverage: {coverage_summary}",
+                *fe_lines,
+            ]
+            for item in mappings:
+                lines.append(
+                    "ROI "
+                    f"{item.get('roi_id', '')}: signal "
+                    f"{item.get('signal_column', '')}; reference "
+                    f"{item.get('reference_column', '')}"
+                )
+            for choice in plan.per_roi_correction_strategy_choices:
+                lines.append(
+                    f"Correction for {choice.roi_id}: "
+                    f"{choice.selected_strategy}"
+                )
+            if plan.output_policy_path:
+                lines.append(
+                    "Output destination: "
+                    f"{self._display_path(plan.output_policy_path)}"
+                )
+            if readiness.blocking_issues:
+                lines.append(
+                    "Setup is incomplete. Complete the items shown in the "
+                    "Guided steps, then check the setup again."
+                )
+            elif self._guided_new_analysis_execution_eligible_for_display(
+                subset_readiness, execution_spec_preview
+            ):
+                lines.append(
+                    "Setup is ready for Check my setup and Guided execution."
+                )
+            return "\n".join(lines)
+
         lines = [
             "Status: new_analysis draft plan",
             (
@@ -18145,8 +18624,7 @@ class MainWindow(QMainWindow):
                 "This draft plan is not executable yet for this "
                 "configuration. See blocking issues above."
             )
-        return "\n".join(lines)
-
+            return "\n".join(lines)
     def _guided_new_analysis_readiness_summary_text(
         self,
         plan,
@@ -29177,7 +29655,7 @@ class MainWindow(QMainWindow):
 
     def _snapshot_guided_discovery_inputs(self) -> dict[str, object]:
         """Capture cheap plain values needed for worker-side spec building."""
-        return {
+        snapshot = {
             "input_dir": self._input_dir.text().strip(),
             "format": self._format_combo.currentText(),
             "acquisition_mode": self._selected_acquisition_mode(),
@@ -29196,6 +29674,11 @@ class MainWindow(QMainWindow):
                 self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
             ),
         }
+        if snapshot["format"] == "custom_tabular":
+            snapshot["custom_tabular_interpretation"] = (
+                self._guided_csv_interpretation()
+            )
+        return snapshot
 
     def _guided_discovery_runner_for_snapshot(self, snapshot: dict[str, object]):
         """Pick the discovery implementation from the explicit choices.
@@ -29349,6 +29832,34 @@ class MainWindow(QMainWindow):
             baseline_config = Config.from_yaml(config_source_path)
         except Exception:
             baseline_config = Config()
+        if fmt == "custom_tabular":
+            interpretation = snapshot.get("custom_tabular_interpretation")
+            if not isinstance(interpretation, dict):
+                raise ValueError(
+                    "Confirm the CSV columns and displayed filename order first."
+                )
+            data_contract_overrides = {
+                "custom_tabular_time_col": interpretation["time_column"],
+                "custom_tabular_time_unit": interpretation["time_unit"],
+                "custom_tabular_roi_mapping_json": json.dumps(
+                    interpretation["roi_mappings"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+            return RunSpec(
+                input_dir=input_dir,
+                run_dir="",
+                format=fmt,
+                acquisition_mode=str(snapshot["acquisition_mode"]),
+                continuous_window_sec=float(snapshot["continuous_window_sec"]),
+                continuous_step_sec=float(snapshot["continuous_window_sec"]),
+                allow_partial_final_window=bool(
+                    snapshot["allow_partial_final_window"]
+                ),
+                config_source_path=config_source_path,
+                data_contract_overrides=data_contract_overrides,
+            )
         npm_overrides = self._infer_npm_dataset_contract_overrides(
             fmt,
             input_path=input_dir,
@@ -32535,12 +33046,11 @@ class MainWindow(QMainWindow):
         output_row.addWidget(output_browse)
         form.addRow("Output Directory:", output_row)
 
-        self._format_combo = QComboBox()
-        self._format_combo.addItems(list(FORMAT_CHOICES))
+        self._format_combo = _FormatComboBox()
         self._format_combo.setToolTip(
             "Input format hint. Use auto to detect RWD/NPM from the selected input directory. "
-            "Use custom_tabular only for strict one-CSV-per-session tabular imports with "
-            "explicit time/signal/isosbestic schema."
+            "Choose CSV files (one file per session) for strict tabular imports "
+            "with explicit time, signal, and reference columns."
         )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)

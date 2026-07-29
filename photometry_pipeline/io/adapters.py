@@ -17,6 +17,7 @@ from .npm_contract import NpmParserContract, resolve_npm_support_geometry
 from dataclasses import asdict
 import pathlib
 import logging
+import json
 
 
 _RWD_METADATA_LED_KEYS: Tuple[str, ...] = ("Led410Enable", "Led470Enable", "Led560Enable")
@@ -101,6 +102,109 @@ def _parse_csv_header_fields(line: str) -> List[str]:
     except Exception:
         fields = line.split(",")
     return [str(field).strip().lstrip("\ufeff") for field in fields]
+
+
+def inspect_custom_tabular_header(path: str) -> List[str]:
+    """Read and validate one ordinary first-row CSV header.
+
+    This intentionally runs before pandas so duplicate columns cannot be
+    concealed by pandas' automatic ``.1`` suffixing.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.reader(handle), None)
+    except (OSError, csv.Error) as exc:
+        raise ValueError(
+            f"CSV header could not be read from {os.path.basename(path)}: {exc}"
+        ) from exc
+    if row is None:
+        raise ValueError(f"{os.path.basename(path)} is empty.")
+    columns = [str(value).strip() for value in row]
+    if not columns or any(not value for value in columns):
+        raise ValueError(
+            f"{os.path.basename(path)} must use nonempty column names in its first row."
+        )
+    duplicates = sorted(
+        {value for value in columns if columns.count(value) > 1},
+        key=natural_sort_key,
+    )
+    if duplicates:
+        shown = ", ".join(repr(value) for value in duplicates)
+        raise ValueError(
+            f"{os.path.basename(path)} contains duplicate CSV header names: {shown}."
+        )
+    return columns
+
+
+def _custom_tabular_time_scale(config: Config) -> Tuple[str, float]:
+    unit = str(
+        getattr(config, "custom_tabular_time_unit", "seconds") or ""
+    ).strip().lower()
+    scales = {"seconds": 1.0, "milliseconds": 0.001}
+    if unit not in scales:
+        raise ValueError(
+            "Choose whether the CSV time values are seconds or milliseconds."
+        )
+    return unit, scales[unit]
+
+
+def _custom_tabular_exact_channel_pairs(
+    config: Config,
+    columns: List[str],
+) -> Optional[List[Tuple[str, str, str]]]:
+    raw = str(getattr(config, "custom_tabular_roi_mapping_json", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CSV ROI column mapping is malformed.") from exc
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(
+            "Add at least one ROI with a signal and reference column."
+        )
+    pairs: List[Tuple[str, str, str]] = []
+    roi_names: List[str] = []
+    assigned_columns: List[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("CSV ROI column mapping is malformed.")
+        roi = str(item.get("roi_id", "") or "").strip()
+        signal = str(item.get("signal_column", "") or "").strip()
+        reference = str(item.get("reference_column", "") or "").strip()
+        if not roi or not signal or not reference:
+            raise ValueError(
+                "Add at least one ROI with a signal and reference column."
+            )
+        if signal == reference:
+            raise ValueError(
+                f"ROI {roi!r} must use different signal and reference columns."
+            )
+        roi_names.append(roi)
+        assigned_columns.extend((signal, reference))
+        pairs.append((roi, reference, signal))
+    duplicate_rois = sorted(
+        {value for value in roi_names if roi_names.count(value) > 1},
+        key=natural_sort_key,
+    )
+    if duplicate_rois:
+        raise ValueError("ROI names must be unique.")
+    duplicate_columns = sorted(
+        {value for value in assigned_columns if assigned_columns.count(value) > 1},
+        key=natural_sort_key,
+    )
+    if duplicate_columns:
+        raise ValueError(
+            "Each CSV signal or reference column may be assigned only once: "
+            + ", ".join(repr(value) for value in duplicate_columns)
+            + "."
+        )
+    missing = [value for value in assigned_columns if value not in columns]
+    if missing:
+        raise ValueError(
+            f"The selected column {missing[0]!r} is missing from this CSV file."
+        )
+    return pairs
 
 
 def _extract_rwd_channel_pairs(
@@ -1074,10 +1178,8 @@ def _scan_rwd_source_metadata(path: str, config: Config) -> Dict[str, Any]:
 
 
 def _scan_custom_tabular_source_metadata(path: str, config: Config) -> Dict[str, Any]:
-    # Header/schema only: avoid loading full signal/control table in metadata scan.
-    header_df = pd.read_csv(path, nrows=0)
-    header_df.columns = [str(c).strip().lstrip("\ufeff") for c in header_df.columns]
-    cols = [str(c) for c in header_df.columns]
+    # Inspect the raw header before pandas can silently rename duplicates.
+    cols = inspect_custom_tabular_header(path)
 
     time_col = str(getattr(config, "custom_tabular_time_col", "time_sec")).strip()
     uv_suffix = str(getattr(config, "custom_tabular_uv_suffix", "_iso")).strip()
@@ -1106,13 +1208,18 @@ def _scan_custom_tabular_source_metadata(path: str, config: Config) -> Dict[str,
         context="custom_tabular",
     )
 
-    channel_data = _resolve_custom_tabular_channel_pairs(cols, uv_suffix, sig_suffix)
+    channel_data = _custom_tabular_exact_channel_pairs(config, cols)
+    mapping_mode = "exact_columns"
+    if channel_data is None:
+        channel_data = _resolve_custom_tabular_channel_pairs(cols, uv_suffix, sig_suffix)
+        mapping_mode = "suffix_pairs"
     names = [x[0] for x in channel_data]
     roi_map = {names[i]: {"raw_uv": x[1], "raw_sig": x[2]} for i, x in enumerate(channel_data)}
 
-    first_time_sec = float(time_scan["first_time_raw"])
-    last_time_sec = float(time_scan["last_time_raw"])
-    median_dt_sec = float(time_scan["median_dt_raw"])
+    time_unit, time_scale_to_seconds = _custom_tabular_time_scale(config)
+    first_time_sec = float(time_scan["first_time_raw"]) * time_scale_to_seconds
+    last_time_sec = float(time_scan["last_time_raw"]) * time_scale_to_seconds
+    median_dt_sec = float(time_scan["median_dt_raw"]) * time_scale_to_seconds
     duration_sec = float((last_time_sec - first_time_sec) + median_dt_sec)
     if not np.isfinite(duration_sec) or duration_sec <= 0.0:
         raise ValueError("custom_tabular: invalid computed duration")
@@ -1130,6 +1237,7 @@ def _scan_custom_tabular_source_metadata(path: str, config: Config) -> Dict[str,
         "median_dt_sec": median_dt_sec,
         "n_rows": int(time_scan["n_rows"]),
         "n_time_samples": int(time_scan["n_rows"]),
+        "timestamp_scale_to_seconds": time_scale_to_seconds,
         "time_scan": {
             "dt_sampling_mode": time_scan["dt_sampling_mode"],
             "dt_sample_capacity": int(time_scan["dt_sample_capacity"]),
@@ -1144,6 +1252,19 @@ def _scan_custom_tabular_source_metadata(path: str, config: Config) -> Dict[str,
         "custom_tabular_contract": {
             "session_model": "one_csv_per_session",
             "time_col": time_col,
+            "time_unit": time_unit,
+            "time_scale_to_seconds": time_scale_to_seconds,
+            "header_rule": "ordinary_first_row",
+            "delimiter": "comma",
+            "mapping_mode": mapping_mode,
+            "roi_mappings": [
+                {
+                    "roi_id": base,
+                    "reference_column": uv_col,
+                    "signal_column": sig_col,
+                }
+                for base, uv_col, sig_col in channel_data
+            ],
             "uv_suffix": uv_suffix,
             "sig_suffix": sig_suffix,
         },
@@ -1283,7 +1404,12 @@ def _time_values_to_relative_seconds(
     source_data: Dict[str, Any],
 ) -> np.ndarray:
     vals = np.asarray(values, dtype=float)
-    scale = float(source_data.get("rwd_timestamp_scale_to_seconds", 1.0))
+    scale = float(
+        source_data.get(
+            "timestamp_scale_to_seconds",
+            source_data.get("rwd_timestamp_scale_to_seconds", 1.0),
+        )
+    )
     first_time_sec = float(source_data["first_time_sec"])
     return (vals * scale) - first_time_sec
 
@@ -1542,7 +1668,14 @@ def _build_continuous_chunk_from_window_arrays(
     metadata: Dict[str, Any] = {"roi_map": roi_map}
     metadata["output_time_basis"] = "relative_seconds_since_session_start"
     if str(format_type).lower() == "custom_tabular":
-        metadata["custom_tabular_contract"] = dict(source_data.get("custom_tabular_contract", {}))
+        contract = dict(source_data.get("custom_tabular_contract", {}))
+        metadata["custom_tabular_contract"] = contract
+        metadata["resolved_time_column"] = source_data.get("time_col")
+        metadata["resolved_header_row"] = 0
+        metadata["resolved_timestamp_unit"] = contract.get("time_unit")
+        metadata["resolved_timestamp_scale_to_seconds"] = contract.get(
+            "time_scale_to_seconds"
+        )
 
     duration_sec = float(continuous_window["window_duration_sec"])
     data_window = np.hstack([uv_window, sig_window])
@@ -1911,7 +2044,14 @@ def _build_chunk_from_source(
             }
         )
     if str(format_type).lower() == "custom_tabular":
-        metadata["custom_tabular_contract"] = dict(source_data.get("custom_tabular_contract", {}))
+        contract = dict(source_data.get("custom_tabular_contract", {}))
+        metadata["custom_tabular_contract"] = contract
+        metadata["resolved_time_column"] = source_data.get("time_col")
+        metadata["resolved_header_row"] = 0
+        metadata["resolved_timestamp_unit"] = contract.get("time_unit")
+        metadata["resolved_timestamp_scale_to_seconds"] = contract.get(
+            "time_scale_to_seconds"
+        )
 
     if continuous_window is None:
         t_rel, uv_raw, sig_raw = _load_full_arrays_from_metadata(source_data)

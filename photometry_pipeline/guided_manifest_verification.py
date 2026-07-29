@@ -15,6 +15,9 @@ from photometry_pipeline.io.rwd_source_snapshot import (
     compute_rwd_source_candidate_content_digest,
     GuidedRwdSourceCandidateFile,
 )
+from photometry_pipeline.io.custom_tabular_source_snapshot import (
+    build_custom_tabular_source_candidate_snapshot,
+)
 
 
 # Deterministic statuses
@@ -360,7 +363,7 @@ def verify_guided_candidate_manifest_consumption(
         )
 
     # 1. Validate CLI context first (require first Guided subset)
-    if cli_context.input_format not in ("rwd", "npm"):
+    if cli_context.input_format not in ("rwd", "npm", "custom_tabular"):
         return _issue("guided_manifest_unsupported_mode", "Guided execution requires a supported input format.")
     if cli_context.mode not in {"phasic", "tonic", "both"}:
         return _issue("guided_manifest_unsupported_mode", "Guided execution requires a supported analysis mode.")
@@ -509,6 +512,14 @@ def verify_guided_candidate_manifest_consumption(
             npm_snapshot = build_npm_source_candidate_snapshot(source_root)
             recomputed_set_digest = npm_snapshot.source_candidate_set_digest
             recomputed_content_digest = npm_snapshot.source_candidate_content_digest
+        elif cli_context.input_format == "custom_tabular":
+            csv_snapshot = build_custom_tabular_source_candidate_snapshot(
+                source_root
+            )
+            recomputed_set_digest = csv_snapshot.source_candidate_set_digest
+            recomputed_content_digest = (
+                csv_snapshot.source_candidate_content_digest
+            )
         else:
             rwd_files = tuple(
                 GuidedRwdSourceCandidateFile(

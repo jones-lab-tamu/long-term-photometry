@@ -49,6 +49,7 @@ from photometry_pipeline.guided_normalized_recording_consumption import (
     NormalizedConsumedEvidenceError,
     build_npm_consumed_normalized_recording_evidence,
     build_rwd_consumed_normalized_recording_evidence,
+    build_custom_tabular_consumed_normalized_recording_evidence,
     compare_consumed_normalized_recording_branches,
     compare_requested_and_consumed_normalized_recording,
 )
@@ -1327,6 +1328,10 @@ def normalized_recording_completion_error(run_dir: str, run_mode: dict[str, Any]
         build_consumed_evidence = build_rwd_consumed_normalized_recording_evidence
     elif requested.adapter_format == "npm":
         build_consumed_evidence = build_npm_consumed_normalized_recording_evidence
+    elif requested.adapter_format == "custom_tabular":
+        build_consumed_evidence = (
+            build_custom_tabular_consumed_normalized_recording_evidence
+        )
     else:
         return (
             f"unsupported adapter format {requested.adapter_format!r} for "

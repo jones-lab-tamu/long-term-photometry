@@ -321,9 +321,11 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "npm_led_col": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
     "npm_region_prefix": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
     "npm_region_suffix": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
-    "custom_tabular_time_col": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
+    "custom_tabular_time_col": CONFIG_DISPOSITION_INTENT,
     "custom_tabular_uv_suffix": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
     "custom_tabular_sig_suffix": CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
+    "custom_tabular_time_unit": CONFIG_DISPOSITION_INTENT,
+    "custom_tabular_roi_mapping_json": CONFIG_DISPOSITION_INTENT,
     "acquisition_mode": CONFIG_DISPOSITION_INTENT,
     "continuous_window_sec": CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
     "continuous_step_sec": CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
@@ -441,7 +443,6 @@ GUIDED_CONFIG_DEFAULT_OVERRIDES = {
     "npm_led_col": "LED",
     "npm_region_prefix": "Region",
     "npm_region_suffix": "",
-    "custom_tabular_time_col": "Time(s)",
     "custom_tabular_uv_suffix": "-410",
     "custom_tabular_sig_suffix": "-470",
 }
@@ -911,7 +912,6 @@ def derive_guided_execution_payloads(
             "npm_led_col": "LED",
             "npm_region_prefix": "Region",
             "npm_region_suffix": "",
-            "custom_tabular_time_col": "Time(s)",
             "custom_tabular_uv_suffix": "-410",
             "custom_tabular_sig_suffix": "-470",
         }
@@ -954,9 +954,50 @@ def derive_guided_execution_payloads(
             )
         )
         payload_values.append(GuidedConfigFieldValue("target_fs_hz", target_fs_hz_value))
-        payload_values.append(GuidedConfigFieldValue("rwd_time_col", intent.acquisition.rwd_time_col))
-        payload_values.append(GuidedConfigFieldValue("uv_suffix", intent.acquisition.uv_suffix))
-        payload_values.append(GuidedConfigFieldValue("sig_suffix", intent.acquisition.sig_suffix))
+        is_custom_tabular = intent.input_source.source_format == "custom_tabular"
+        payload_values.append(
+            GuidedConfigFieldValue("rwd_time_col", intent.acquisition.rwd_time_col)
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "uv_suffix",
+                "_iso"
+                if is_custom_tabular
+                else intent.acquisition.uv_suffix,
+            )
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "sig_suffix",
+                "_sig"
+                if is_custom_tabular
+                else intent.acquisition.sig_suffix,
+            )
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "custom_tabular_time_col",
+                intent.acquisition.rwd_time_col
+                if is_custom_tabular
+                else "time_sec",
+            )
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "custom_tabular_time_unit",
+                intent.acquisition.custom_tabular_time_unit
+                if is_custom_tabular
+                else "seconds",
+            )
+        )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "custom_tabular_roi_mapping_json",
+                intent.acquisition.custom_tabular_roi_mapping_json
+                if is_custom_tabular
+                else "",
+            )
+        )
         payload_values.append(GuidedConfigFieldValue("dynamic_fit_mode", intent.correction.global_dynamic_fit_mode))
         payload_values.append(GuidedConfigFieldValue("acquisition_mode", intent.acquisition.acquisition_mode))
         payload_values.append(

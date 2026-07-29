@@ -349,23 +349,44 @@ class Hdf5TraceCacheWriter:
             # populate these chunk.metadata keys) is simply omitted, never
             # fabricated.
             if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
-                if "rwd_time_col_resolved" in chunk.metadata and chunk.metadata.get(
-                    "rwd_time_col_resolved"
-                ):
+                grp.attrs["adapter_format"] = str(getattr(chunk, "format", ""))
+                resolved_time_column = chunk.metadata.get(
+                    "resolved_time_column",
+                    chunk.metadata.get("rwd_time_col_resolved"),
+                )
+                if resolved_time_column:
                     grp.attrs["resolved_time_column"] = str(
-                        chunk.metadata["rwd_time_col_resolved"]
+                        resolved_time_column
                     )
-                if chunk.metadata.get("rwd_header_row_resolved") is not None:
+                resolved_header_row = chunk.metadata.get(
+                    "resolved_header_row",
+                    chunk.metadata.get("rwd_header_row_resolved"),
+                )
+                if resolved_header_row is not None:
                     try:
                         grp.attrs["resolved_header_row"] = int(
-                            chunk.metadata["rwd_header_row_resolved"]
+                            resolved_header_row
                         )
                     except (TypeError, ValueError):
                         pass
-                if chunk.metadata.get("rwd_timestamp_unit"):
+                resolved_timestamp_unit = chunk.metadata.get(
+                    "resolved_timestamp_unit",
+                    chunk.metadata.get("rwd_timestamp_unit"),
+                )
+                if resolved_timestamp_unit:
                     grp.attrs["resolved_timestamp_unit"] = str(
-                        chunk.metadata["rwd_timestamp_unit"]
+                        resolved_timestamp_unit
                     )
+                resolved_scale = chunk.metadata.get(
+                    "resolved_timestamp_scale_to_seconds"
+                )
+                if resolved_scale is not None:
+                    try:
+                        grp.attrs["resolved_timestamp_scale_to_seconds"] = float(
+                            resolved_scale
+                        )
+                    except (TypeError, ValueError):
+                        pass
                 rwd_fps = chunk.metadata.get("rwd_metadata_fps")
                 if rwd_fps is not None:
                     try:

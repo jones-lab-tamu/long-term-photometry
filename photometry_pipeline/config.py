@@ -191,6 +191,10 @@ class Config:
     custom_tabular_time_col: str = "time_sec"
     custom_tabular_uv_suffix: str = "_iso"
     custom_tabular_sig_suffix: str = "_sig"
+    # Guided CSV interpretation.  The legacy suffix-based Custom Tabular CLI
+    # path remains the default when no exact mapping JSON is supplied.
+    custom_tabular_time_unit: Literal['seconds', 'milliseconds'] = 'seconds'
+    custom_tabular_roi_mapping_json: str = ""
 
     # acquisition planning (phase 1 continuous-mode plumbing only)
     acquisition_mode: Literal['intermittent', 'continuous'] = 'intermittent'
@@ -458,6 +462,12 @@ class Config:
             raise ValueError(
                 "custom_tabular_uv_suffix and custom_tabular_sig_suffix must be different"
             )
+        if obj.custom_tabular_time_unit not in {"seconds", "milliseconds"}:
+            raise ValueError(
+                "custom_tabular_time_unit must be one of {'seconds', 'milliseconds'}"
+            )
+        if not isinstance(obj.custom_tabular_roi_mapping_json, str):
+            raise ValueError("custom_tabular_roi_mapping_json must be a string")
         if obj.acquisition_mode not in {'intermittent', 'continuous'}:
             raise ValueError(
                 "acquisition_mode must be one of {'intermittent', 'continuous'}"

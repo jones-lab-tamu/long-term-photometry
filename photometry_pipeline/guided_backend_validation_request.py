@@ -91,6 +91,15 @@ GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION = (
 GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY = (
     "ignore_non_csv_immediate_children.v1"
 )
+GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME = (
+    "guided_custom_tabular_source_candidate_snapshot"
+)
+GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION = (
+    "top_level_csv_natural_order.v1"
+)
+GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_IGNORED_FILES_POLICY = (
+    "ignore_non_csv_and_nested_entries.v1"
+)
 GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME = (
     "guided_rwd_incomplete_final_chunk_classification"
 )
@@ -325,9 +334,9 @@ class GuidedBackendSourceRequest:
             "source_identity_level",
         ):
             _require_non_empty(getattr(self, name), name)
-        if self.source_format not in {"rwd", "npm"}:
+        if self.source_format not in {"rwd", "npm", "custom_tabular"}:
             raise GuidedBackendValidationRequestContractError(
-                "source_format must be rwd or npm."
+                "source_format must be rwd, npm, or custom_tabular."
             )
         _require_sha256(
             self.source_candidate_set_digest,
@@ -496,17 +505,16 @@ class GuidedBackendAcquisitionDatasetRequest:
             raise GuidedBackendValidationRequestContractError(
                 "Dataset contract must be currently applied."
             )
-        for name in (
+        required_names = [
             "classification_schema_name",
             "classification_schema_version",
             "classifier_version",
             "dataset_snapshot_schema_version",
             "rwd_time_col",
-            "uv_suffix",
-            "sig_suffix",
             "dataset_source_setup_signature",
             "diagnostic_cache_contract_identity",
-        ):
+        ]
+        for name in required_names:
             _require_non_empty(getattr(self, name), name)
         _require_sha256(
             self.not_requested_classification_digest,
@@ -705,10 +713,11 @@ class GuidedBackendRwdParserRequest:
             "unresolved_inputs",
         ):
             _require_tuple(getattr(self, name), name)
+        custom = self.schema_name == "custom_tabular_parser_contract"
         if (
             not self.time_column_candidates
-            or not self.uv_suffix_candidates
-            or not self.signal_suffix_candidates
+            or (not custom and not self.uv_suffix_candidates)
+            or (not custom and not self.signal_suffix_candidates)
             or self.unresolved_inputs
         ):
             raise GuidedBackendValidationRequestContractError(
@@ -1393,6 +1402,7 @@ class GuidedBackendParserFacts:
     unresolved_inputs: tuple[str, ...] = ()
     npm_timestamp_column_candidates: tuple[str, ...] = ()
     npm_parser_contract_content: Mapping[str, Any] | None = None
+    custom_tabular_interpretation_json: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -1441,6 +1451,10 @@ class GuidedBackendAcquisitionDatasetFacts:
     npm_region_suffix: str = ""
     npm_target_fs_hz: float | None = None
     npm_adapter_value_nan_policy: str = ""
+    custom_tabular_time_unit: str = ""
+    custom_tabular_roi_mapping_json: str = ""
+    custom_tabular_ordered_source_files_json: str = ""
+    custom_tabular_chronology_authority: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -1867,14 +1881,15 @@ def compile_guided_backend_validation_request(
             detail_code="unresolved_required_inputs",
         )
 
-    if draft.input_format not in {"rwd", "npm"}:
+    if draft.input_format not in {"rwd", "npm", "custom_tabular"}:
         return _failure(
             "unsupported_source_format",
             "source",
-            "The authorized compiler subset requires RWD or intermittent NPM input.",
+            "The authorized compiler subset requires intermittent RWD, NPM, or CSV input.",
             detail_code="source_format_unsupported",
         )
     is_npm = draft.input_format == "npm"
+    is_custom_tabular = draft.input_format == "custom_tabular"
     if is_npm and (
         not facts.parser.available
         or not facts.parser.npm_timestamp_column_candidates
@@ -1975,8 +1990,14 @@ def compile_guided_backend_validation_request(
             else (
                 parser_facts.header_search_line_limit is not None
                 and bool(parser_facts.time_column_candidates)
-                and bool(parser_facts.uv_suffix_candidates)
-                and bool(parser_facts.signal_suffix_candidates)
+                and (
+                    bool(parser_facts.custom_tabular_interpretation_json)
+                    if is_custom_tabular
+                    else (
+                        bool(parser_facts.uv_suffix_candidates)
+                        and bool(parser_facts.signal_suffix_candidates)
+                    )
+                )
                 and bool(parser_facts.column_normalization_rule)
                 and bool(parser_facts.roi_name_rule)
                 and bool(parser_facts.ambiguity_policy)
@@ -2027,7 +2048,23 @@ def compile_guided_backend_validation_request(
         or dataset_facts.dataset_current_applied is not True
         or (
             not is_npm
-            and (not dataset_facts.rwd_time_col or not dataset_facts.uv_suffix or not dataset_facts.sig_suffix)
+            and (
+                not dataset_facts.rwd_time_col
+                or (
+                    is_custom_tabular
+                    and (
+                        not dataset_facts.custom_tabular_time_unit
+                        or not dataset_facts.custom_tabular_roi_mapping_json
+                        or not dataset_facts.custom_tabular_ordered_source_files_json
+                        or dataset_facts.custom_tabular_chronology_authority
+                        != "confirmed_filename_order"
+                    )
+                )
+                or (
+                    not is_custom_tabular
+                    and (not dataset_facts.uv_suffix or not dataset_facts.sig_suffix)
+                )
+            )
         )
         or (
             is_npm
@@ -2401,20 +2438,32 @@ def compile_guided_backend_validation_request(
             snapshot_schema_name=(
                 GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME
                 if is_npm
-                else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+                else (
+                    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME
+                    if is_custom_tabular
+                    else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+                )
             ),
             snapshot_schema_version=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION,
             discovery_rule_version=(
                 GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION
                 if is_npm
-                else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+                else (
+                    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION
+                    if is_custom_tabular
+                    else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+                )
             ),
             path_canonicalization_version=CANONICALIZATION_ALGORITHM_VERSION,
             relative_path_rule_version=GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION,
             ignored_files_policy=(
                 GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY
                 if is_npm
-                else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+                else (
+                    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_IGNORED_FILES_POLICY
+                    if is_custom_tabular
+                    else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+                )
             ),
             build_mode="read_only",
             source_candidate_set_digest=source_facts.source_candidate_set_digest,

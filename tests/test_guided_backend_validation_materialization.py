@@ -11,6 +11,11 @@ from pathlib import Path
 import pytest
 
 import photometry_pipeline.guided_backend_validation_materialization as materialization
+import photometry_pipeline.guided_execution_payloads as execution_payloads
+import photometry_pipeline.guided_production_mapping as production_mapping
+import photometry_pipeline.guided_run_authorization as run_authorization
+import photometry_pipeline.guided_startup_transaction as startup_transaction
+from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedApprovedMissingSession,
@@ -32,6 +37,15 @@ from photometry_pipeline.guided_backend_validation_materialization import (
     GuidedBackendValidationMaterializationSuccess,
     GuidedBackendValidationMaterializationFailure,
     STAGE_2B_VALID_ISSUES,
+)
+from photometry_pipeline.guided_backend_validation_workflow import (
+    GuidedBackendValidationGuiContext,
+    build_guided_backend_validation_parser_contract,
+    build_guided_backend_validator_contract,
+    validate_current_guided_draft_for_backend,
+)
+from photometry_pipeline.guided_new_analysis_plan import (
+    compute_guided_local_preview_source_setup_signature,
 )
 from photometry_pipeline.io.rwd_contract import RwdHeaderParsingContract
 from photometry_pipeline.io.npm_contract import NpmParserContract
@@ -330,6 +344,226 @@ def _valid_npm_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
         },
     )
     return draft
+
+
+def test_custom_tabular_natural_backend_validation_path_accepts_original_csvs(
+    tmp_path: Path,
+):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    source_root = tmp_path / "csv_sessions"
+    source_root.mkdir()
+    csv_content = (
+        "Elapsed,Green,Iso\n"
+        "0,2,1\n"
+        "0.5,2.1,1.1\n"
+        "1,2.2,1.2\n"
+        "1.5,2.3,1.3\n"
+    )
+    for name in ("session_2.csv", "session_10.csv"):
+        (source_root / name).write_text(csv_content, encoding="utf-8")
+
+    draft.input_source_path = str(source_root)
+    draft.input_format = "custom_tabular"
+    draft.discovered_roi_ids = ["Fiber A"]
+    draft.included_roi_ids = ["Fiber A"]
+    draft.execution_intent = replace(
+        draft.execution_intent,
+        timeline_anchor_mode="elapsed",
+        fixed_daily_anchor_clock=None,
+        recording_start_clock=None,
+        recording_start_clock_source="not_applicable",
+    )
+    draft.per_roi_correction_strategy_choices = [
+        replace(choice, roi_id="Fiber A")
+        for choice in draft.per_roi_correction_strategy_choices
+    ]
+    source_identity = replace(
+        draft.dataset_contract_snapshot.source_identity,
+        input_source_path=str(source_root),
+        resolved_input_source_path=str(source_root),
+        input_format="custom_tabular",
+        resolved_input_format="custom_tabular",
+        discovered_roi_ids=("Fiber A",),
+        included_roi_ids=("Fiber A",),
+    )
+    mappings = [
+        {
+            "roi_id": "Fiber A",
+            "signal_column": "Green",
+            "reference_column": "Iso",
+        }
+    ]
+    contract_values = {
+        "custom_tabular_time_col": "Elapsed",
+        "custom_tabular_time_unit": "seconds",
+        "custom_tabular_time_scale_to_seconds": 1.0,
+        "custom_tabular_roi_mapping_json": json.dumps(
+            mappings, separators=(",", ":")
+        ),
+        "custom_tabular_ordered_source_files_json": json.dumps(
+            ["session_2.csv", "session_10.csv"], separators=(",", ":")
+        ),
+        "custom_tabular_order_confirmed": True,
+        "custom_tabular_chronology_authority": "confirmed_filename_order",
+        "custom_tabular_header_rule": "ordinary_first_row",
+        "custom_tabular_delimiter": "comma",
+        "target_fs_hz": 2.0,
+        "chunk_duration_sec": 2.0,
+        "allow_partial_final_chunk": False,
+        "adapter_value_nan_policy": "strict",
+    }
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        input_format="custom_tabular",
+        resolved_input_format="custom_tabular",
+        contract_values=contract_values,
+        source_identity=source_identity,
+    )
+    source_signature = compute_guided_local_preview_source_setup_signature(draft)
+    draft.per_roi_correction_strategy_choices = [
+        replace(choice, source_setup_signature=source_signature)
+        for choice in draft.per_roi_correction_strategy_choices
+    ]
+
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=build_guided_backend_validation_parser_contract(),
+        validator_contract=build_guided_backend_validator_contract(),
+    )
+
+    assert outcome.status == "validator_accepted"
+    assert outcome.accepted_for_backend_validation is True
+    # Validation is deliberately non-authorizing; the existing run-
+    # authorization stage consumes this accepted request afterward.
+    assert outcome.run_authorization is False
+    assert outcome.compile_result.request.source.source_format == "custom_tabular"
+    assert [
+        item.canonical_relative_path
+        for item in outcome.compile_result.request.source.candidate_files
+    ] == ["session_2.csv", "session_10.csv"]
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="test",
+        source_revision_kind="git",
+        source_revision="test-revision",
+        source_tree_state="clean",
+    )
+    mapped = production_mapping.map_guided_validation_request_to_execution_intent(
+        outcome.compile_result.request,
+        canonical_request_identity=outcome.request_identity,
+        application_build_identity=build_identity,
+        mapping_contract=(
+            production_mapping.build_guided_production_mapping_contract()
+        ),
+    )
+    assert isinstance(
+        mapped, production_mapping.GuidedProductionMappingSuccess
+    )
+    assert mapped.intent.input_source.source_format == "custom_tabular"
+    assert json.loads(
+        mapped.intent.parser.custom_tabular_interpretation_json
+    )["roi_mappings"] == mappings
+
+    authorization_request = (
+        run_authorization.build_guided_run_authorization_request(
+            stored_validation_outcome=outcome,
+            stored_validation_outcome_revision=0,
+            current_gui_revision=0,
+            current_validation_context=GuidedBackendValidationGuiContext(
+                draft=draft,
+                parser_contract=build_guided_backend_validation_parser_contract(),
+                additional_protected_roots=(),
+                validator_contract=build_guided_backend_validator_contract(),
+                revision=0,
+            ),
+            application_build_identity=build_identity,
+            production_mapping_contract=(
+                production_mapping.build_guided_production_mapping_contract()
+            ),
+        )
+    )
+    authorized = run_authorization.authorize_guided_run(
+        authorization_request
+    )
+    assert authorized.status == "authorized"
+    assert authorized.authorized is True
+    assert authorized.run_authorization is True
+
+    payload_result = execution_payloads.derive_guided_execution_payloads(
+        authorized,
+        startup_mapping_contract=(
+            execution_payloads.build_guided_execution_startup_mapping_contract()
+        ),
+    )
+    assert payload_result.status == (
+        execution_payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE
+    )
+    assert payload_result.ok is True
+    assert payload_result.config_payload is not None
+    payload_fields = {
+        item.name: item.value
+        for item in payload_result.config_payload.values
+    }
+    assert payload_fields["custom_tabular_time_col"] == "Elapsed"
+    assert payload_fields["custom_tabular_time_unit"] == "seconds"
+    assert json.loads(
+        payload_fields["custom_tabular_roi_mapping_json"]
+    ) == mappings
+
+    output_base = authorized.production_intent.output_policy.output_base_canonical
+    startup_request = startup_transaction.GuidedStartupTransactionRequest(
+        startup_authority=GuidedStartupAuthority(rwd=authorized),
+        payload_result=payload_result,
+        startup_mapping_contract=(
+            execution_payloads.build_guided_execution_startup_mapping_contract()
+        ),
+        application_build_identity=build_identity,
+        current_guided_revision=0,
+        explicit_user_run_transition=True,
+        output_base_canonical=output_base,
+        source_root_canonical=(
+            authorized.production_intent.input_source.source_root_canonical
+        ),
+        planned_run_id="guided_run_20260101T000000Z_csv001",
+        planned_allocated_run_dir=os.path.join(
+            output_base, "guided_run_20260101T000000Z_csv001"
+        ),
+        wrapper_entrypoint=startup_transaction.GuidedWrapperEntrypointIdentity(
+            entrypoint_kind="script_path",
+            entrypoint_value="tools/run_full_pipeline_deliverables.py",
+            trusted_application_root=str(Path.cwd()),
+            wrapper_identity_digest="e" * 64,
+            supported_contract_version="run_full_pipeline_deliverables.v1",
+            supports_guided_preallocated_run_dir=True,
+            supports_guided_candidate_manifest=True,
+            trusted_entrypoint=True,
+        ),
+        one_shot_consumption_token="custom-csv-one-shot-0001",
+        one_shot_token_current=True,
+        one_shot_token_unused=True,
+        current_time_utc_iso="2026-01-01T00:00:00Z",
+        filesystem_policy=startup_transaction.GuidedStartupFilesystemPolicy(
+            output_base_exists_or_creatable=True,
+            output_base_is_directory_or_creatable=True,
+            output_base_overlaps_source=False,
+            output_base_is_completed_run_root=False,
+            output_base_is_guided_diagnostic_cache_root=False,
+            output_base_is_protected_ineligible_root=False,
+            planned_child_directly_under_base=True,
+            planned_child_already_exists=False,
+            overwrite_requested=False,
+            protected_root_context_complete=True,
+        ),
+    )
+    startup_plan = startup_transaction.plan_guided_startup_transaction(
+        startup_request
+    )
+    assert startup_plan.ok is True
+    argv = startup_plan.command_plan.argv
+    assert argv[argv.index("--format") + 1] == "custom_tabular"
+    assert os.path.normcase(argv[argv.index("--input") + 1]) == (
+        os.path.normcase(str(source_root))
+    )
 
 
 def _apply_valid_local_preview_correction_evidence(

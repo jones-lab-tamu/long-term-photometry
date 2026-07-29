@@ -2486,16 +2486,25 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
     elif fmt == "custom_tabular":
         custom_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
             plan.dataset_contract_snapshot,
-            ("signal_column", "control_column", "time_column", "roi_column"),
+            (
+                "custom_tabular_time_col",
+                "custom_tabular_time_unit",
+                "custom_tabular_roi_mapping_json",
+                "custom_tabular_ordered_source_files_json",
+                "custom_tabular_order_confirmed",
+                "custom_tabular_chronology_authority",
+                "custom_tabular_header_rule",
+                "custom_tabular_delimiter",
+            ),
         )
         fields.append(_execution_field(
             "custom_tabular_column_mapping",
             "present" if custom_has_mapping else "required_missing",
             value=_snapshot_field_value(plan.dataset_contract_snapshot) if custom_has_mapping else None,
             provenance=(
-                "applied GuidedNewAnalysisDraftPlan dataset contract snapshot provides signal/control/time/ROI column mapping"
+                "applied Guided dataset contract provides the confirmed CSV time, ROI/channel, and filename-order interpretation"
                 if custom_has_mapping
-                else "custom_tabular signal/control/time/ROI column mapping is not represented in current applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+                else "the confirmed CSV time, ROI/channel, and filename-order interpretation is incomplete"
             ),
             blocks_subset=not custom_has_mapping,
             issue_category=None if custom_has_mapping else "missing_custom_tabular_column_mapping",
@@ -2505,9 +2514,9 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
             "present" if custom_has_mapping else "required_missing",
             value=_snapshot_field_value(plan.dataset_contract_snapshot) if custom_has_mapping else None,
             provenance=(
-                "applied GuidedNewAnalysisDraftPlan dataset contract snapshot consumed for custom_tabular first-subset readiness classification"
+                "applied Guided dataset contract consumed for CSV first-subset readiness classification"
                 if custom_has_mapping
-                else "custom_tabular dataset contract snapshot does not contain required column mapping fields"
+                else "the CSV dataset contract does not contain all required interpretation fields"
             ),
             blocks_subset=not custom_has_mapping,
             issue_category=None if custom_has_mapping else "missing_custom_tabular_dataset_contract",

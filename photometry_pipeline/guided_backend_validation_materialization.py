@@ -92,12 +92,23 @@ from photometry_pipeline.io.npm_contract import (
     NpmParserContractError,
     inspect_npm_csv,
 )
+from photometry_pipeline.io.custom_tabular_source_snapshot import (
+    build_custom_tabular_source_candidate_snapshot,
+    CustomTabularSourceSnapshotError,
+)
+from photometry_pipeline.io.adapters import (
+    load_chunk,
+    resolve_continuous_source_metadata,
+)
+from photometry_pipeline.config import Config
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
     build_rwd_normalized_recording_description,
     compute_normalized_recording_description_identity,
     serialize_normalized_recording_description,
     build_npm_normalized_recording_description,
+    build_custom_tabular_normalized_recording_description,
+    compute_custom_tabular_parser_contract_digest,
 )
 from photometry_pipeline.guided_timeline import (
     GUIDED_TIMELINE_MODE_SET,
@@ -1395,6 +1406,7 @@ def _materialize_dataset_and_roi_facts(
             detail_code="dataset_snapshot_stale",
         )
     is_npm = draft.input_format == "npm"
+    is_custom_tabular = draft.input_format == "custom_tabular"
     if (
         not snapshot.current_applied
         or snapshot.input_format != draft.input_format
@@ -1444,7 +1456,17 @@ def _materialize_dataset_and_roi_facts(
             ),
         )
         if is_npm
-        else ("rwd_time_col", "uv_suffix", "sig_suffix")
+        else (
+            (
+                "custom_tabular_time_col",
+                "custom_tabular_time_unit",
+                "custom_tabular_roi_mapping_json",
+                "custom_tabular_ordered_source_files_json",
+                "custom_tabular_chronology_authority",
+            )
+            if is_custom_tabular
+            else ("rwd_time_col", "uv_suffix", "sig_suffix")
+        )
     )
     semantic_values: list[GuidedBackendTypedFieldValue] = []
     for field_name in sorted(snapshot.contract_values):
@@ -1564,7 +1586,7 @@ def _materialize_dataset_and_roi_facts(
         # filesystem timestamps or invents a clock.
         try:
             start_dt = validated_first_recording_start
-            if start_dt is None and not is_npm:
+            if start_dt is None and draft.input_format == "rwd":
                 first_candidate = source_facts.candidate_files[0]
                 first_candidate_path = os.path.join(
                     source_facts.source_root_canonical,
@@ -1594,7 +1616,12 @@ def _materialize_dataset_and_roi_facts(
         dataset_snapshot_schema_version=snapshot.schema_version,
         dataset_status=snapshot.status,
         dataset_current_applied=snapshot.current_applied,
-        rwd_time_col=str(snapshot.contract_values.get("rwd_time_col", "")),
+        rwd_time_col=str(
+            snapshot.contract_values.get(
+                "rwd_time_col",
+                snapshot.contract_values.get("custom_tabular_time_col", ""),
+            )
+        ),
         uv_suffix=str(snapshot.contract_values.get("uv_suffix", "")),
         sig_suffix=str(snapshot.contract_values.get("sig_suffix", "")),
         semantic_values=tuple(semantic_values),
@@ -1619,6 +1646,22 @@ def _materialize_dataset_and_roi_facts(
         ),
         npm_adapter_value_nan_policy=str(
             snapshot.contract_values.get("adapter_value_nan_policy", "")
+        ),
+        custom_tabular_time_unit=str(
+            snapshot.contract_values.get("custom_tabular_time_unit", "")
+        ),
+        custom_tabular_roi_mapping_json=str(
+            snapshot.contract_values.get("custom_tabular_roi_mapping_json", "")
+        ),
+        custom_tabular_ordered_source_files_json=str(
+            snapshot.contract_values.get(
+                "custom_tabular_ordered_source_files_json", ""
+            )
+        ),
+        custom_tabular_chronology_authority=str(
+            snapshot.contract_values.get(
+                "custom_tabular_chronology_authority", ""
+            )
         ),
     )
     roi_facts = GuidedBackendRoiScopeFacts(
@@ -2070,7 +2113,7 @@ def materialize_guided_backend_validation_facts(
         )
 
     # 2. Input Format and Acquisition Mode Audit
-    if draft.input_format not in ("rwd", "npm", "auto"):
+    if draft.input_format not in ("rwd", "npm", "custom_tabular", "auto"):
         return _failure(
             "unsupported_source_format",
             "source",
@@ -2097,6 +2140,7 @@ def materialize_guided_backend_validation_facts(
         )
 
     is_npm = draft.input_format == "npm"
+    is_custom_tabular = draft.input_format == "custom_tabular"
     if is_npm and not isinstance(parser_contract, NpmParserContract):
         return _failure(
             "unsupported_source_format",
@@ -2148,6 +2192,43 @@ def materialize_guided_backend_validation_facts(
                 npm_timestamp_column_candidates=parser_contract.timestamp_column_candidates,
                 npm_parser_contract_content=parser_contract.content(),
             )
+        elif is_custom_tabular:
+            values = draft.dataset_contract_snapshot.contract_values
+            interpretation = {
+                "time_column": values.get("custom_tabular_time_col"),
+                "time_unit": values.get("custom_tabular_time_unit"),
+                "time_scale_to_seconds": values.get(
+                    "custom_tabular_time_scale_to_seconds"
+                ),
+                "header_rule": values.get("custom_tabular_header_rule"),
+                "delimiter": values.get("custom_tabular_delimiter"),
+                "roi_mappings": json.loads(
+                    str(values.get("custom_tabular_roi_mapping_json", ""))
+                ),
+                "chronology_authority": values.get(
+                    "custom_tabular_chronology_authority"
+                ),
+            }
+            parser_contract_digest = (
+                compute_custom_tabular_parser_contract_digest(interpretation)
+            )
+            parser_facts = GuidedBackendParserFacts(
+                available=True,
+                schema_name="custom_tabular_parser_contract",
+                schema_version="v1",
+                header_search_line_limit=1,
+                time_column_candidates=(str(interpretation["time_column"]),),
+                column_normalization_rule="exact_first_row_header_names",
+                roi_name_rule="scientist_supplied_unique_names",
+                ambiguity_policy="reject_duplicate_assignments",
+                parser_contract_digest=parser_contract_digest,
+                unresolved_inputs=(),
+                custom_tabular_interpretation_json=json.dumps(
+                    interpretation,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
         else:
             parser_contract_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
             parser_facts = GuidedBackendParserFacts(
@@ -2187,11 +2268,21 @@ def materialize_guided_backend_validation_facts(
                 source_path, cancellation_check=cancellation_check
             )
             if is_npm
-            else build_rwd_source_candidate_snapshot(
-                source_path, cancellation_check=cancellation_check
+            else (
+                build_custom_tabular_source_candidate_snapshot(
+                    source_path, cancellation_check=cancellation_check
+                )
+                if is_custom_tabular
+                else build_rwd_source_candidate_snapshot(
+                    source_path, cancellation_check=cancellation_check
+                )
             )
         )
-    except (RwdSourceSnapshotError, NpmSourceSnapshotError) as exc:
+    except (
+        RwdSourceSnapshotError,
+        NpmSourceSnapshotError,
+        CustomTabularSourceSnapshotError,
+    ) as exc:
         if is_npm and isinstance(exc, NpmSourceSnapshotError):
             _LOGGER.debug(
                 "NPM source snapshot check failed: %s",
@@ -2305,7 +2396,7 @@ def materialize_guided_backend_validation_facts(
     # check never masks that stage's own diagnostic.
     duration_candidate = draft.session_duration_sec
     if (
-        not is_npm
+        draft.input_format == "rwd"
         and
         isinstance(duration_candidate, (int, float))
         and not isinstance(duration_candidate, bool)
@@ -2321,12 +2412,20 @@ def materialize_guided_backend_validation_facts(
     approved_missing_candidates, approval_failure = _materialize_approved_missing_candidates(
         draft, snapshot
     )
-    if is_npm and draft.approved_missing_sessions:
+    if (is_npm or is_custom_tabular) and draft.approved_missing_sessions:
         return _failure(
             "approved_missing_session_invalid",
             "missing_session",
-            "Missing-session continuation is not available for NPM recordings.",
-            detail_code="npm_missing_session_unsupported",
+            (
+                "Missing-session continuation is not available for NPM recordings."
+                if is_npm
+                else "Missing-session continuation is not available for CSV recordings."
+            ),
+            detail_code=(
+                "npm_missing_session_unsupported"
+                if is_npm
+                else "custom_tabular_missing_session_unsupported"
+            ),
         )
     if approval_failure is not None:
         return approval_failure
@@ -2347,6 +2446,7 @@ def materialize_guided_backend_validation_facts(
     npm_roi_ids: tuple[str, ...] = ()
     npm_physical_to_canonical_roi_mapping: tuple[tuple[str, str], ...] = ()
     npm_cadence_evidence: list[GuidedBackendNpmCadenceIntervalEvidence] = []
+    custom_tabular_session_metadata: dict[str, dict[str, Any]] = {}
     if is_npm:
         assert isinstance(parser_contract, NpmParserContract)
         actual_starts: list[datetime] = []
@@ -2434,6 +2534,89 @@ def materialize_guided_backend_validation_facts(
                 detail_code="npm_roi_inventory_mismatch",
             )
 
+    if is_custom_tabular:
+        values = draft.dataset_contract_snapshot.contract_values
+        try:
+            confirmed_order = json.loads(
+                str(values["custom_tabular_ordered_source_files_json"])
+            )
+            actual_order = [
+                item.canonical_relative_path for item in snapshot.candidates
+            ]
+            if (
+                not isinstance(confirmed_order, list)
+                or len(confirmed_order) != len(actual_order)
+                or [
+                    os.path.normcase(str(item).replace("\\", "/"))
+                    for item in confirmed_order
+                ]
+                != [os.path.normcase(item) for item in actual_order]
+            ):
+                return _failure(
+                    "source_snapshot_digest_mismatch",
+                    "source",
+                    "The CSV file set or filename order changed after it was confirmed.",
+                    detail_code="custom_tabular_order_changed",
+                )
+            target_fs_hz = float(values["target_fs_hz"])
+            csv_config = Config(
+                target_fs_hz=target_fs_hz,
+                chunk_duration_sec=float(draft.session_duration_sec or 0.0),
+                custom_tabular_time_col=str(
+                    values["custom_tabular_time_col"]
+                ),
+                custom_tabular_time_unit=str(
+                    values["custom_tabular_time_unit"]
+                ),
+                custom_tabular_roi_mapping_json=str(
+                    values["custom_tabular_roi_mapping_json"]
+                ),
+                acquisition_mode="intermittent",
+            )
+            source_cache: dict[str, Any] = {}
+            expected_rois = tuple(
+                item["roi_id"] for item in interpretation["roi_mappings"]
+            )
+            for position, candidate in enumerate(snapshot.candidates):
+                candidate_path = os.path.join(
+                    snapshot.source_root_canonical,
+                    *candidate.canonical_relative_path.split("/"),
+                )
+                metadata = resolve_continuous_source_metadata(
+                    candidate_path,
+                    "custom_tabular",
+                    csv_config,
+                    source_cache=source_cache,
+                )
+                chunk = load_chunk(
+                    candidate_path,
+                    "custom_tabular",
+                    csv_config,
+                    position,
+                    source_cache=source_cache,
+                )
+                if tuple(chunk.channel_names) != expected_rois:
+                    raise ValueError(
+                        "The CSV ROI mapping differs across the selected sessions."
+                    )
+                custom_tabular_session_metadata[
+                    candidate.canonical_relative_path
+                ] = dict(metadata)
+            if tuple(draft.discovered_roi_ids) != expected_rois:
+                return _failure(
+                    "custom_tabular_inspection_failed",
+                    "roi_scope",
+                    "The ROI selection does not match the confirmed CSV mapping.",
+                    detail_code="custom_tabular_roi_inventory_mismatch",
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return _failure(
+                "custom_tabular_inspection_failed",
+                "parser",
+                str(exc),
+                detail_code="custom_tabular_source_invalid",
+            )
+
     validated_first_recording_start = None
     if is_npm and snapshot.candidates:
         # The NPM source snapshot has already validated filename chronology;
@@ -2448,10 +2631,26 @@ def materialize_guided_backend_validation_facts(
 
     # 8. Incomplete-Final not_requested Classification Materialization
 
-    if is_npm:
+    if is_npm or is_custom_tabular:
         # NPM has no RWD incomplete-final classifier. Its process-only
         # disposition policy is compiled below as a format-neutral contract.
-        classification_facts = GuidedBackendIncompleteFinalClassificationFacts()
+        if is_custom_tabular:
+            classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
+                available=True,
+                classification_status="not_requested",
+                classification_digest=hashlib.sha256(
+                    b"guided-custom-tabular-no-exclusion:v1\x00"
+                    + snapshot.source_candidate_content_digest.encode("ascii")
+                ).hexdigest(),
+                source_candidate_set_digest=snapshot.source_candidate_set_digest,
+                source_candidate_content_digest=(
+                    snapshot.source_candidate_content_digest
+                ),
+            )
+        else:
+            classification_facts = (
+                GuidedBackendIncompleteFinalClassificationFacts()
+            )
     else:
         try:
             classification = make_not_requested_incomplete_final_chunk_classification(snapshot)
@@ -2772,6 +2971,24 @@ def materialize_guided_backend_validation_facts(
                 included_roi_ids=roi_facts.included_roi_ids,
                 target_fs_hz=float(dataset_facts.npm_target_fs_hz or target_fs_hz or 0.0),
                 physical_to_canonical_roi_mapping=npm_physical_to_canonical_roi_mapping,
+            )
+        elif is_custom_tabular:
+            normalized_recording = (
+                build_custom_tabular_normalized_recording_description(
+                    source_root_canonical=snapshot.source_root_canonical,
+                    candidate_snapshot=snapshot,
+                    session_metadata=custom_tabular_session_metadata,
+                    session_duration_sec=dataset_facts.session_duration_sec,
+                    sessions_per_hour=dataset_facts.sessions_per_hour,
+                    timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+                    acquisition_mode=dataset_facts.acquisition_mode,
+                    discovered_roi_ids=roi_facts.discovered_roi_ids,
+                    included_roi_ids=roi_facts.included_roi_ids,
+                    interpretation=json.loads(
+                        parser_facts.custom_tabular_interpretation_json
+                    ),
+                    target_fs_hz=float(target_fs_hz or 0.0),
+                )
             )
         else:
             normalized_recording = build_rwd_normalized_recording_description(

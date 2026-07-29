@@ -61,6 +61,12 @@ NORMALIZED_RECORDING_SCHEMA_VERSION = "v1"
 NORMALIZED_RECORDING_IDENTITY_DOMAIN = "guided-normalized-recording-description:v1"
 RWD_ADAPTER_CONTRACT_VERSION = "rwd_normalized_recording_adapter.v1"
 NPM_ADAPTER_CONTRACT_VERSION = "npm_normalized_recording_adapter.v1"
+CUSTOM_TABULAR_ADAPTER_CONTRACT_VERSION = (
+    "custom_tabular_normalized_recording_adapter.v1"
+)
+CUSTOM_TABULAR_PARSER_CONTRACT_DIGEST_DOMAIN = (
+    "custom-tabular-parser-contract:v1"
+)
 NPM_PARSER_CONTRACT_SCHEMA_NAME = "npm_normalized_parser_contract"
 NPM_PARSER_CONTRACT_SCHEMA_VERSION = "v1"
 NPM_PARSER_CONTRACT_DIGEST_DOMAIN = "npm-normalized-parser-contract:v1"
@@ -88,7 +94,7 @@ _SESSION_DISPOSITIONS = frozenset(
 # custom-tabular adapter registers here and supplies its own
 # build_<format>_normalized_recording_description function; nothing else
 # in this module needs to change.
-SUPPORTED_ADAPTER_FORMATS = ("rwd", "npm")
+SUPPORTED_ADAPTER_FORMATS = ("rwd", "npm", "custom_tabular")
 
 
 def compute_npm_support_policy_identity(support_policy: str) -> str:
@@ -199,7 +205,7 @@ class NormalizedSourceSession:
     stable_source_identity: str
     canonical_source_reference: str
     chronological_position: int
-    authoritative_source_start_time: str
+    authoritative_source_start_time: str | None
     source_timing_evidence: str
     expected_timeline_start_time: str | None
     expected_duration_sec: float | None
@@ -223,7 +229,10 @@ class NormalizedSourceSession:
                 "invalid_chronological_position",
                 "chronological_position must be >= 0.",
             )
-        if not self.authoritative_source_start_time:
+        if (
+            not self.authoritative_source_start_time
+            and self.source_timing_evidence != "confirmed_filename_order"
+        ):
             # Every session -- process, missing, or excluded -- must carry
             # an established authoritative start time; a session whose
             # time cannot be established is refused earlier, by the
@@ -240,6 +249,37 @@ class NormalizedSourceSession:
                 "source_timing_evidence is required.",
                 stable_source_identity=self.stable_source_identity,
             )
+
+
+def compute_custom_tabular_parser_contract_digest(
+    interpretation: Mapping[str, Any],
+) -> str:
+    """Identity of the frozen, scientifically relevant CSV interpretation."""
+    if not isinstance(interpretation, Mapping):
+        raise NormalizedRecordingError(
+            "custom_tabular_interpretation_invalid",
+            "CSV interpretation must be an object.",
+        )
+    required = {
+        "time_column",
+        "time_unit",
+        "time_scale_to_seconds",
+        "header_rule",
+        "delimiter",
+        "roi_mappings",
+        "chronology_authority",
+    }
+    if set(interpretation) != required:
+        raise NormalizedRecordingError(
+            "custom_tabular_interpretation_invalid",
+            "CSV interpretation contains missing or unsupported fields.",
+        )
+    encoded = encode_canonical_value(dict(interpretation))
+    return hashlib.sha256(
+        CUSTOM_TABULAR_PARSER_CONTRACT_DIGEST_DOMAIN.encode("utf-8")
+        + b"\x00"
+        + encoded
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -527,6 +567,46 @@ class NormalizedRecordingDescription:
                     raise NormalizedRecordingError(
                         "invalid_channel_pairing",
                         "NPM channel identity does not match its frozen physical source mapping.",
+                        roi_id=channel.roi_id,
+                    )
+        if self.adapter_format == "custom_tabular":
+            interpretation = self.adapter_evidence.get("interpretation")
+            if not isinstance(interpretation, Mapping):
+                raise NormalizedRecordingError(
+                    "custom_tabular_interpretation_invalid",
+                    "CSV interpretation evidence is missing.",
+                )
+            expected_digest = compute_custom_tabular_parser_contract_digest(
+                interpretation
+            )
+            if self.sampling.parser_contract_identity != expected_digest:
+                raise NormalizedRecordingError(
+                    "custom_tabular_parser_digest_mismatch",
+                    "CSV interpretation does not match its parser identity.",
+                )
+            mappings = interpretation.get("roi_mappings")
+            if not isinstance(mappings, (list, tuple)):
+                raise NormalizedRecordingError(
+                    "custom_tabular_interpretation_invalid",
+                    "CSV ROI mappings are missing.",
+                )
+            mapping_by_roi = {
+                str(item.get("roi_id")): item
+                for item in mappings
+                if isinstance(item, Mapping)
+            }
+            for channel in self.roi_channels:
+                mapping = mapping_by_roi.get(channel.roi_id)
+                if (
+                    not isinstance(mapping, Mapping)
+                    or channel.signal_channel_identity
+                    != mapping.get("signal_column")
+                    or channel.reference_channel_identity
+                    != mapping.get("reference_column")
+                ):
+                    raise NormalizedRecordingError(
+                        "invalid_channel_pairing",
+                        "CSV channel identity does not match the frozen mapping.",
                         roi_id=channel.roi_id,
                     )
 
@@ -869,6 +949,15 @@ def build_normalized_recording_description_payload(
             if description.adapter_format == "npm"
             else {}
         ),
+        **(
+            {
+                "custom_tabular_interpretation": dict(
+                    description.adapter_evidence.get("interpretation", {})
+                )
+            }
+            if description.adapter_format == "custom_tabular"
+            else {}
+        ),
     }
 
 
@@ -986,7 +1075,7 @@ def deserialize_normalized_recording_description(
                     item, "canonical_source_reference"
                 ),
                 chronological_position=int(item["chronological_position"]),
-                authoritative_source_start_time=_required_str(
+                authoritative_source_start_time=_optional_str(
                     item, "authoritative_source_start_time"
                 ),
                 source_timing_evidence=_required_str(item, "source_timing_evidence"),
@@ -1079,6 +1168,14 @@ def deserialize_normalized_recording_description(
             raise NormalizedRecordingError(
                 "serialized_npm_mapping_mismatch",
                 "Persisted NPM physical ROI mapping does not match its adapter evidence.",
+            )
+    if description.adapter_format == "custom_tabular":
+        if payload.get("custom_tabular_interpretation") != description.adapter_evidence.get(
+            "interpretation"
+        ):
+            raise NormalizedRecordingError(
+                "serialized_custom_tabular_interpretation_mismatch",
+                "Persisted CSV interpretation does not match its adapter evidence.",
             )
     if recomputed_identity != stored_identity:
         raise NormalizedRecordingError(
@@ -1274,6 +1371,138 @@ def build_rwd_normalized_recording_description(
             "uv_suffix": uv_suffix,
             "sig_suffix": sig_suffix,
             "source_candidate_set_digest": candidate_snapshot.source_candidate_set_digest,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Guided CSV files (one file per session) adapter
+# ---------------------------------------------------------------------------
+
+
+def build_custom_tabular_normalized_recording_description(
+    *,
+    source_root_canonical: str,
+    candidate_snapshot: Any,
+    session_metadata: Mapping[str, Mapping[str, Any]],
+    session_duration_sec: float,
+    sessions_per_hour: int,
+    timeline_anchor_mode: str,
+    acquisition_mode: str,
+    discovered_roi_ids: tuple[str, ...],
+    included_roi_ids: tuple[str, ...],
+    interpretation: Mapping[str, Any],
+    target_fs_hz: float,
+) -> NormalizedRecordingDescription:
+    if acquisition_mode != "intermittent":
+        raise NormalizedRecordingError(
+            "unsupported_acquisition_mode",
+            "CSV files (one file per session) require intermittent acquisition.",
+        )
+    if session_duration_sec <= 0 or sessions_per_hour <= 0 or target_fs_hz <= 0:
+        raise NormalizedRecordingError(
+            "invalid_sampling_contract",
+            "CSV session duration, cadence, and target sampling rate must be positive.",
+        )
+    if not discovered_roi_ids or not included_roi_ids:
+        raise NormalizedRecordingError(
+            "invalid_roi_scope", "CSV discovered and included ROI ids are required."
+        )
+    frozen_interpretation = json.loads(
+        json.dumps(
+            dict(interpretation),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    )
+    parser_digest = compute_custom_tabular_parser_contract_digest(
+        frozen_interpretation
+    )
+    mappings = frozen_interpretation.get("roi_mappings")
+    if not isinstance(mappings, list):
+        raise NormalizedRecordingError(
+            "custom_tabular_interpretation_invalid", "CSV ROI mappings are missing."
+        )
+    mapping_by_roi = {
+        str(item.get("roi_id")): item
+        for item in mappings
+        if isinstance(item, Mapping)
+    }
+    if tuple(mapping_by_roi) != tuple(discovered_roi_ids):
+        raise NormalizedRecordingError(
+            "custom_tabular_roi_mapping_mismatch",
+            "The CSV mapping does not match the discovered ROI inventory.",
+        )
+
+    included_set = set(included_roi_ids)
+    sessions: list[NormalizedSourceSession] = []
+    for position, candidate in enumerate(candidate_snapshot.candidates):
+        source_path = os.path.join(
+            source_root_canonical, *candidate.canonical_relative_path.split("/")
+        )
+        metadata = session_metadata.get(candidate.canonical_relative_path)
+        if not isinstance(metadata, Mapping):
+            raise NormalizedRecordingError(
+                "missing_session_inspection",
+                "CSV inspection facts are missing for a source session.",
+                canonical_relative_path=candidate.canonical_relative_path,
+            )
+        sessions.append(
+            NormalizedSourceSession(
+                stable_source_identity=candidate.canonical_relative_path,
+                canonical_source_reference=source_path,
+                chronological_position=position,
+                authoritative_source_start_time=None,
+                source_timing_evidence="confirmed_filename_order",
+                expected_timeline_start_time=None,
+                expected_duration_sec=float(session_duration_sec),
+                observed_duration_sec=None,
+                disposition=SESSION_DISPOSITION_PROCESS,
+                size_bytes=candidate.size_bytes,
+                content_digest=candidate.sha256_content_digest,
+            )
+        )
+
+    roi_channels = tuple(
+        NormalizedRoiChannel(
+            roi_id=roi_id,
+            included=roi_id in included_set,
+            signal_channel_identity=str(mapping_by_roi[roi_id]["signal_column"]),
+            reference_channel_identity=str(
+                mapping_by_roi[roi_id]["reference_column"]
+            ),
+        )
+        for roi_id in discovered_roi_ids
+    )
+    return NormalizedRecordingDescription(
+        schema_name=NORMALIZED_RECORDING_SCHEMA_NAME,
+        schema_version=NORMALIZED_RECORDING_SCHEMA_VERSION,
+        adapter_format="custom_tabular",
+        adapter_contract_version=CUSTOM_TABULAR_ADAPTER_CONTRACT_VERSION,
+        acquisition_mode=acquisition_mode,
+        timeline_anchor_mode=timeline_anchor_mode,
+        recording_source_identity=source_root_canonical,
+        source_evidence_identity=candidate_snapshot.source_candidate_content_digest,
+        sessions=tuple(sessions),
+        roi_channels=roi_channels,
+        sampling=NormalizedSamplingContract(
+            time_basis="relative_seconds_since_session_start",
+            parser_contract_identity=parser_digest,
+            sessions_per_hour=sessions_per_hour,
+            session_duration_sec=float(session_duration_sec),
+            target_fs_hz=float(target_fs_hz),
+        ),
+        authorized_time_column_candidates=(
+            str(frozen_interpretation["time_column"]),
+        ),
+        adapter_evidence={
+            "interpretation": frozen_interpretation,
+            "source_candidate_set_digest": (
+                candidate_snapshot.source_candidate_set_digest
+            ),
+            "filename_order_confirmed": True,
         },
     )
 
@@ -1617,6 +1846,40 @@ def rebuild_normalized_recording_description_from_intent(
         ),
         None,
     )
+    if intent.input_source.source_format == "custom_tabular":
+        try:
+            interpretation = json.loads(
+                intent.parser.custom_tabular_interpretation_json
+            )
+        except (TypeError, ValueError) as exc:
+            raise NormalizedRecordingError(
+                "custom_tabular_interpretation_invalid",
+                "The authorized CSV interpretation is malformed.",
+            ) from exc
+        return build_custom_tabular_normalized_recording_description(
+            source_root_canonical=intent.input_source.source_root_canonical,
+            candidate_snapshot=SimpleNamespace(
+                candidates=intent.input_source.candidate_files,
+                source_candidate_set_digest=(
+                    intent.input_source.source_candidate_set_digest
+                ),
+                source_candidate_content_digest=(
+                    intent.input_source.source_candidate_content_digest
+                ),
+            ),
+            session_metadata={
+                item.canonical_relative_path: {}
+                for item in intent.input_source.candidate_files
+            },
+            session_duration_sec=intent.acquisition.session_duration_sec,
+            sessions_per_hour=intent.acquisition.sessions_per_hour,
+            timeline_anchor_mode=intent.acquisition.timeline_anchor_mode,
+            acquisition_mode=intent.acquisition.acquisition_mode,
+            discovered_roi_ids=intent.roi_scope.discovered_roi_ids,
+            included_roi_ids=intent.roi_scope.included_roi_ids,
+            interpretation=interpretation,
+            target_fs_hz=float(target_fs_hz or 0.0),
+        )
     return build_rwd_normalized_recording_description(
         source_root_canonical=intent.input_source.source_root_canonical,
         candidate_snapshot=SimpleNamespace(

@@ -464,6 +464,11 @@ def build_rwd_consumed_normalized_recording_evidence(
     sessions: list[NormalizedConsumedSession] = []
     parser_policy_satisfied = True
     parser_policy_failure_category: str | None = None
+    custom_requested_rois = {
+        item.roi_id: item
+        for item in requested.roi_channels
+        if item.included
+    }
 
     try:
         cache = opener(cache_path)
@@ -543,18 +548,37 @@ def build_rwd_consumed_normalized_recording_evidence(
                             resolved_reference_source=(str(ref) if ref else None),
                         )
                     )
-                    if sig is not None and not any(
-                        str(sig).endswith(suffix)
-                        for suffix in requested.authorized_signal_suffix_candidates
-                    ):
-                        parser_policy_satisfied = False
-                        parser_policy_failure_category = "unauthorized_signal_source"
-                    if ref is not None and not any(
-                        str(ref).endswith(suffix)
-                        for suffix in requested.authorized_uv_suffix_candidates
-                    ):
-                        parser_policy_satisfied = False
-                        parser_policy_failure_category = "unauthorized_reference_source"
+                    if requested.adapter_format == "custom_tabular":
+                        expected_roi = custom_requested_rois.get(roi)
+                        if (
+                            expected_roi is None
+                            or sig != expected_roi.signal_channel_identity
+                        ):
+                            parser_policy_satisfied = False
+                            parser_policy_failure_category = (
+                                "unauthorized_signal_source"
+                            )
+                        if (
+                            expected_roi is None
+                            or ref != expected_roi.reference_channel_identity
+                        ):
+                            parser_policy_satisfied = False
+                            parser_policy_failure_category = (
+                                "unauthorized_reference_source"
+                            )
+                    else:
+                        if sig is not None and not any(
+                            str(sig).endswith(suffix)
+                            for suffix in requested.authorized_signal_suffix_candidates
+                        ):
+                            parser_policy_satisfied = False
+                            parser_policy_failure_category = "unauthorized_signal_source"
+                        if ref is not None and not any(
+                            str(ref).endswith(suffix)
+                            for suffix in requested.authorized_uv_suffix_candidates
+                        ):
+                            parser_policy_satisfied = False
+                            parser_policy_failure_category = "unauthorized_reference_source"
 
                 if per_roi_attrs:
                     _, first_attrs = per_roi_attrs[0]
@@ -574,6 +598,7 @@ def build_rwd_consumed_normalized_recording_evidence(
                         if any(
                             other_attrs.get(key) != first_attrs.get(key)
                             for key in (
+                                "adapter_format",
                                 "fs_hz",
                                 "resolved_time_column",
                                 "resolved_header_row",
@@ -586,12 +611,30 @@ def build_rwd_consumed_normalized_recording_evidence(
                                 "intra_branch_parser_evidence_mismatch"
                             )
                     if (
+                        requested.adapter_format == "custom_tabular"
+                        and first_attrs.get("adapter_format")
+                        != "custom_tabular"
+                    ):
+                        parser_policy_satisfied = False
+                        parser_policy_failure_category = (
+                            "unauthorized_adapter_format"
+                        )
+                    if (
                         resolved_time_column is not None
                         and resolved_time_column
                         not in requested.authorized_time_column_candidates
                     ):
                         parser_policy_satisfied = False
                         parser_policy_failure_category = "unauthorized_time_column"
+                    if requested.adapter_format == "custom_tabular":
+                        expected_unit = requested.adapter_evidence[
+                            "interpretation"
+                        ]["time_unit"]
+                        if resolved_timestamp_unit != expected_unit:
+                            parser_policy_satisfied = False
+                            parser_policy_failure_category = (
+                                "unauthorized_timestamp_unit"
+                            )
                     try:
                         time_sec = cache[
                             f"roi/{per_roi_attrs[0][0]}/chunk_{cache_chunk_id}/time_sec"
@@ -631,12 +674,31 @@ def build_rwd_consumed_normalized_recording_evidence(
         cache.close()
 
     return NormalizedConsumedRecordingEvidence(
-        adapter_format="rwd",
+        adapter_format=requested.adapter_format,
         analysis_branch=analysis_kind,
         sessions=tuple(sessions),
         processed_roi_ids=processed_roi_ids,
         parser_policy_satisfied=parser_policy_satisfied,
         parser_policy_failure_category=parser_policy_failure_category,
+    )
+
+
+def build_custom_tabular_consumed_normalized_recording_evidence(
+    *,
+    run_dir: str,
+    analysis_kind: str,
+    requested: NormalizedRecordingDescription,
+) -> NormalizedConsumedRecordingEvidence:
+    """Build consumed evidence for exact-mapped Guided CSV sessions."""
+    if requested.adapter_format != "custom_tabular":
+        raise NormalizedConsumedEvidenceError(
+            "adapter_format_mismatch",
+            "CSV consumed-evidence builder requires custom_tabular authorization.",
+        )
+    return build_rwd_consumed_normalized_recording_evidence(
+        run_dir=run_dir,
+        analysis_kind=analysis_kind,
+        requested=requested,
     )
 
 

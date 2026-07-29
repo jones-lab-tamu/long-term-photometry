@@ -84,8 +84,7 @@ GUIDED_COMMAND_RECORD_FILENAME = "command_invoked.txt"
 GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME = "guided_per_roi_feature_config.json"
 # B1: the durable, mandatory Setup-check-authorized recording description.
 # Unlike GUIDED_PER_ROI_CORRECTION_FILENAME (native-correction runs only),
-# this is always applicable -- every accepted intent already requires
-# source_format == "rwd" (see _gate_issue below).
+# this is always applicable for the established non-NPM startup path.
 GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME = (
     "guided_normalized_recording_description.json"
 )
@@ -794,7 +793,7 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
         )
     else:
         first_subset_ok = (
-            intent.input_source.source_format == "rwd"
+            intent.input_source.source_format in {"rwd", "custom_tabular"}
             and intent.acquisition.acquisition_mode == "intermittent"
             and intent.execution_profile.execution_mode in {"phasic", "tonic", "both"}
             and intent.execution_profile.run_type == "full"

@@ -23,6 +23,9 @@ from photometry_pipeline.guided_backend_validation_request import (
     GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME,
     GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION,
     GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY,
+    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME,
+    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION,
+    GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_IGNORED_FILES_POLICY,
     GUIDED_BACKEND_VALIDATION_COMPILER_VERSION,
     GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION,
     GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME,
@@ -398,12 +401,12 @@ def _validate_semantics(
         )
 
     source = request.source
-    if source.source_format not in {"rwd", "npm"}:
+    if source.source_format not in {"rwd", "npm", "custom_tabular"}:
         return _issue(
             "unsupported_source_format",
             "source",
-            "The first validator subset requires RWD source data.",
-            "source_format_not_rwd",
+            "The validator requires a supported intermittent source format.",
+            "source_format_unsupported",
         )
     if source.source_format == "npm" and not isinstance(
         request.parser, GuidedBackendNpmParserRequest
@@ -416,6 +419,7 @@ def _validate_semantics(
             "npm_parser_request_missing",
         )
     is_npm = source.source_format == "npm"
+    is_custom_tabular = source.source_format == "custom_tabular"
     if (
         (is_npm and not isinstance(
             request.acquisition_dataset,
@@ -435,17 +439,29 @@ def _validate_semantics(
     expected_snapshot_schema = (
         GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME
         if is_npm
-        else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+        else (
+            GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME
+            if is_custom_tabular
+            else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+        )
     )
     expected_discovery_rule = (
         GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION
         if is_npm
-        else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+        else (
+            GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION
+            if is_custom_tabular
+            else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+        )
     )
     expected_ignored_policy = (
         GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY
         if is_npm
-        else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+        else (
+            GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_IGNORED_FILES_POLICY
+            if is_custom_tabular
+            else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+        )
     )
     if (
         not _is_non_empty_string(source.source_root_canonical)
@@ -504,6 +520,9 @@ def _validate_semantics(
             )
 
     dataset = request.acquisition_dataset
+    dataset_semantics = {
+        item.field_name: item.value for item in dataset.semantic_values
+    }
     if dataset.acquisition_mode != "intermittent":
         return _issue(
             "unsupported_acquisition_mode",
@@ -600,8 +619,34 @@ def _validate_semantics(
             not is_npm
             and (
                 not _is_non_empty_string(dataset.rwd_time_col)
-                or not _is_non_empty_string(dataset.uv_suffix)
-                or not _is_non_empty_string(dataset.sig_suffix)
+                or (
+                    is_custom_tabular
+                    and (
+                        dataset_semantics.get("custom_tabular_time_unit")
+                        not in {"seconds", "milliseconds"}
+                        or not _is_non_empty_string(
+                            dataset_semantics.get(
+                                "custom_tabular_roi_mapping_json"
+                            )
+                        )
+                        or not _is_non_empty_string(
+                            dataset_semantics.get(
+                                "custom_tabular_ordered_source_files_json"
+                            )
+                        )
+                        or dataset_semantics.get(
+                            "custom_tabular_chronology_authority"
+                        )
+                        != "confirmed_filename_order"
+                    )
+                )
+                or (
+                    not is_custom_tabular
+                    and (
+                        not _is_non_empty_string(dataset.uv_suffix)
+                        or not _is_non_empty_string(dataset.sig_suffix)
+                    )
+                )
             )
         )
         or (
@@ -655,9 +700,13 @@ def _validate_semantics(
             or not _is_tuple(parser.time_column_candidates)
             or not parser.time_column_candidates
             or not _is_tuple(parser.uv_suffix_candidates)
-            or not parser.uv_suffix_candidates
+            or (not is_custom_tabular and not parser.uv_suffix_candidates)
             or not _is_tuple(parser.signal_suffix_candidates)
-            or not parser.signal_suffix_candidates
+            or (not is_custom_tabular and not parser.signal_suffix_candidates)
+            or (
+                is_custom_tabular
+                and parser.schema_name != "custom_tabular_parser_contract"
+            )
             or not _is_non_empty_string(parser.column_normalization_rule)
             or not _is_non_empty_string(parser.roi_name_rule)
             or not _is_non_empty_string(parser.ambiguity_policy)

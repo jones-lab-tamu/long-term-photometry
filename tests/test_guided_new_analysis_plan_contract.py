@@ -2089,10 +2089,17 @@ def test_execution_subset_custom_tabular_with_explicit_mapping_satisfies_custom_
     plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
         plan,
         contract_values={
-            "signal_column": "signal",
-            "control_column": "control",
-            "time_column": "time_sec",
-            "roi_column": "roi",
+            "custom_tabular_time_col": "time_sec",
+            "custom_tabular_time_unit": "seconds",
+            "custom_tabular_roi_mapping_json": (
+                '[{"reference_column":"control","roi_id":"roi",'
+                '"signal_column":"signal"}]'
+            ),
+            "custom_tabular_ordered_source_files_json": '["session_1.csv"]',
+            "custom_tabular_order_confirmed": True,
+            "custom_tabular_chronology_authority": "confirmed_filename_order",
+            "custom_tabular_header_rule": "ordinary_first_row",
+            "custom_tabular_delimiter": "comma",
         },
     )
 

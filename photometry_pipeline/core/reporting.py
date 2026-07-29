@@ -209,6 +209,25 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
     contract["baseline_semantics"] = baseline_semantics
  
     # 5. Output
+    custom_mapping_json = str(
+        getattr(config, "custom_tabular_roi_mapping_json", "") or ""
+    )
+    if custom_mapping_json:
+        custom_tabular_contract = {
+            "session_model": "one_csv_per_session",
+            "time_col": getattr(config, "custom_tabular_time_col", "time_sec"),
+            "time_unit": getattr(
+                config, "custom_tabular_time_unit", "seconds"
+            ),
+            "roi_mappings": json.loads(custom_mapping_json),
+        }
+    else:
+        custom_tabular_contract = {
+            "session_model": "one_csv_per_session",
+            "time_col": getattr(config, "custom_tabular_time_col", "time_sec"),
+            "uv_suffix": getattr(config, "custom_tabular_uv_suffix", "_iso"),
+            "sig_suffix": getattr(config, "custom_tabular_sig_suffix", "_sig"),
+        }
     report = {
         "run_context": {
             "run_type": "preview" if preview_info is not None else "full",
@@ -218,12 +237,7 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "event_signal": getattr(config, 'event_signal', 'dff'),
             "signal_excursion_polarity": getattr(config, "signal_excursion_polarity", "positive"),
             "bleach_correction_mode": getattr(config, "bleach_correction_mode", "none"),
-            "custom_tabular_contract": {
-                "session_model": "one_csv_per_session",
-                "time_col": getattr(config, "custom_tabular_time_col", "time_sec"),
-                "uv_suffix": getattr(config, "custom_tabular_uv_suffix", "_iso"),
-                "sig_suffix": getattr(config, "custom_tabular_sig_suffix", "_sig"),
-            },
+            "custom_tabular_contract": custom_tabular_contract,
             "sessions_per_hour": resolved_sph,
             "sessions_per_hour_source": resolved_sph_source,
             "representative_session_index": representative_info.get("representative_session_index") if representative_info else None,

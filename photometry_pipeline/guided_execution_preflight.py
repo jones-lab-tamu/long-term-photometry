@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import hashlib
+import json
 import os
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from photometry_pipeline.guided_identity import encode_canonical_value
@@ -27,6 +29,19 @@ from photometry_pipeline.io.rwd_source_snapshot import (
     SOURCE_FORMAT,
     RwdSourceSnapshotError,
     build_rwd_source_candidate_snapshot,
+)
+from photometry_pipeline.io.custom_tabular_source_snapshot import (
+    CUSTOM_TABULAR_IGNORED_FILES_POLICY,
+    CUSTOM_TABULAR_RELATIVE_PATH_RULE_VERSION,
+    CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION,
+    CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME,
+    CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+    CustomTabularSourceSnapshotError,
+    build_custom_tabular_source_candidate_snapshot,
+)
+from photometry_pipeline.io.adapters import inspect_custom_tabular_header
+from photometry_pipeline.guided_normalized_recording import (
+    compute_custom_tabular_parser_contract_digest,
 )
 
 
@@ -368,14 +383,14 @@ def run_candidate_manifest_execution_preflight(
                 "contract_unsupported",
             ),
         )
-    if request.source_format != SOURCE_FORMAT:
+    if request.source_format not in {SOURCE_FORMAT, "custom_tabular"}:
         return _candidate_refused(
             request,
             _candidate_issue(
                 "source_format_unsupported",
                 "source",
-                "Candidate preflight requires RWD source.",
-                "source_format_not_rwd",
+                "Candidate preflight requires a supported non-NPM source.",
+                "source_format_unsupported",
             ),
         )
     if not _text(request.source_root_canonical):
@@ -388,13 +403,31 @@ def run_candidate_manifest_execution_preflight(
                 "source_root_missing",
             ),
         )
+    is_custom_tabular = request.source_format == "custom_tabular"
+    expected_policy = (
+        (
+            CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_NAME,
+            CUSTOM_TABULAR_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+            CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION,
+            CUSTOM_TABULAR_RELATIVE_PATH_RULE_VERSION,
+            CUSTOM_TABULAR_IGNORED_FILES_POLICY,
+        )
+        if is_custom_tabular
+        else (
+            RWD_SOURCE_SNAPSHOT_SCHEMA_NAME,
+            RWD_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+            RWD_SOURCE_DISCOVERY_RULE_VERSION,
+            RWD_RELATIVE_PATH_RULE_VERSION,
+            RWD_IGNORED_FILES_POLICY,
+        )
+    )
     if (
         request.source_identity_level != "content_bound_candidate_snapshot"
-        or request.snapshot_schema_name != RWD_SOURCE_SNAPSHOT_SCHEMA_NAME
-        or request.snapshot_schema_version != RWD_SOURCE_SNAPSHOT_SCHEMA_VERSION
-        or request.discovery_rule_version != RWD_SOURCE_DISCOVERY_RULE_VERSION
-        or request.relative_path_rule_version != RWD_RELATIVE_PATH_RULE_VERSION
-        or request.ignored_files_policy != RWD_IGNORED_FILES_POLICY
+        or request.snapshot_schema_name != expected_policy[0]
+        or request.snapshot_schema_version != expected_policy[1]
+        or request.discovery_rule_version != expected_policy[2]
+        or request.relative_path_rule_version != expected_policy[3]
+        or request.ignored_files_policy != expected_policy[4]
     ):
         return _candidate_refused(
             request,
@@ -431,11 +464,18 @@ def run_candidate_manifest_execution_preflight(
             ),
         )
     try:
-        snapshot = build_rwd_source_candidate_snapshot(
-            request.source_root_canonical,
-            cancellation_check=cancellation_check,
+        snapshot = (
+            build_custom_tabular_source_candidate_snapshot(
+                request.source_root_canonical,
+                cancellation_check=cancellation_check,
+            )
+            if is_custom_tabular
+            else build_rwd_source_candidate_snapshot(
+                request.source_root_canonical,
+                cancellation_check=cancellation_check,
+            )
         )
-    except RwdSourceSnapshotError as exc:
+    except (RwdSourceSnapshotError, CustomTabularSourceSnapshotError) as exc:
         if exc.category in {"source_root_not_directory", "source_root_missing"}:
             category = "source_root_missing"
         elif exc.category in {"source_root_unreadable", "candidate_unreadable"}:
@@ -628,6 +668,8 @@ class GuidedRoiExecutionPreflightRequest:
     expected_strict_roi_inventory_digest: str
     roi_execution_contract_version: str
     approved_missing_paths: tuple[str, ...] = ()
+    source_format: str = "rwd"
+    custom_tabular_interpretation_json: str = ""
 
 
 @dataclass(frozen=True)
@@ -794,6 +836,10 @@ def derive_roi_execution_preflight_request_from_intent(
             item.canonical_relative_path
             for item in source.approved_missing_candidates
         ),
+        source_format=source.source_format,
+        custom_tabular_interpretation_json=(
+            parser.custom_tabular_interpretation_json
+        ),
     )
 
 
@@ -923,9 +969,16 @@ def run_roi_execution_preflight(
             ),
         )
     try:
-        current_snapshot = build_rwd_source_candidate_snapshot(
-            request.source_root_canonical,
-            cancellation_check=cancellation_check,
+        current_snapshot = (
+            build_custom_tabular_source_candidate_snapshot(
+                request.source_root_canonical,
+                cancellation_check=cancellation_check,
+            )
+            if request.source_format == "custom_tabular"
+            else build_rwd_source_candidate_snapshot(
+                request.source_root_canonical,
+                cancellation_check=cancellation_check,
+            )
         )
     except Exception:
         return _roi_refused(
@@ -960,20 +1013,30 @@ def run_roi_execution_preflight(
             ),
         )
     parser_value = request.parser_contract
+    custom_interpretation = None
     try:
-        parser = RwdHeaderParsingContract(
-            schema_name=parser_value.schema_name,
-            schema_version=parser_value.schema_version,
-            header_search_line_limit=parser_value.header_search_line_limit,
-            time_column_candidates=parser_value.time_column_candidates,
-            uv_suffix_candidates=parser_value.uv_suffix_candidates,
-            signal_suffix_candidates=parser_value.signal_suffix_candidates,
-            column_normalization_rule=parser_value.column_normalization_rule,
-            roi_name_rule=parser_value.roi_name_rule,
-            ambiguity_policy=parser_value.ambiguity_policy,
-            unresolved_inputs=parser_value.unresolved_inputs,
-        )
-        actual_parser_digest = compute_rwd_header_parsing_contract_digest(parser)
+        if request.source_format == "custom_tabular":
+            custom_interpretation = json.loads(
+                request.custom_tabular_interpretation_json
+            )
+            actual_parser_digest = compute_custom_tabular_parser_contract_digest(
+                custom_interpretation
+            )
+            parser = None
+        else:
+            parser = RwdHeaderParsingContract(
+                schema_name=parser_value.schema_name,
+                schema_version=parser_value.schema_version,
+                header_search_line_limit=parser_value.header_search_line_limit,
+                time_column_candidates=parser_value.time_column_candidates,
+                uv_suffix_candidates=parser_value.uv_suffix_candidates,
+                signal_suffix_candidates=parser_value.signal_suffix_candidates,
+                column_normalization_rule=parser_value.column_normalization_rule,
+                roi_name_rule=parser_value.roi_name_rule,
+                ambiguity_policy=parser_value.ambiguity_policy,
+                unresolved_inputs=parser_value.unresolved_inputs,
+            )
+            actual_parser_digest = compute_rwd_header_parsing_contract_digest(parser)
     except Exception:
         return _roi_refused(
             request,
@@ -1023,9 +1086,37 @@ def run_roi_execution_preflight(
             *PurePosixPath(candidate.canonical_relative_path).parts,
         )
         try:
-            inspection = inspect_rwd_header_contract(
-                runtime_path, parsing_contract=parser
-            )
+            if custom_interpretation is not None:
+                headers = inspect_custom_tabular_header(runtime_path)
+                required_columns = [
+                    custom_interpretation["time_column"],
+                    *[
+                        item[key]
+                        for item in custom_interpretation["roi_mappings"]
+                        for key in ("signal_column", "reference_column")
+                    ],
+                ]
+                missing = [
+                    column for column in required_columns if column not in headers
+                ]
+                if missing:
+                    raise ValueError(
+                        f"The selected column {missing[0]!r} is missing from "
+                        f"{candidate.canonical_relative_path}."
+                    )
+                inspection = SimpleNamespace(
+                    acceptable_for_strict_identity=True,
+                    selected_time_column=custom_interpretation["time_column"],
+                    roi_channel_pairs=(),
+                    roi_ids=tuple(
+                        item["roi_id"]
+                        for item in custom_interpretation["roi_mappings"]
+                    ),
+                )
+            else:
+                inspection = inspect_rwd_header_contract(
+                    runtime_path, parsing_contract=parser
+                )
         except RwdHeaderInspectionError as exc:
             return _roi_refused(
                 request,
