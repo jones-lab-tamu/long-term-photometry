@@ -142,6 +142,10 @@ def test_native_continuous_load_report_routes_to_saved_artifact_viewer(
     assert viewer.available_view_tabs() == [
         "Verification",
         "Tonic",
+        "Phasic Sig/Iso",
+        "Correction Reference",
+        "Phasic dFF",
+        "Phasic Stacked",
         "Phasic Summary",
     ]
 

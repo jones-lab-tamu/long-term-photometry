@@ -7,6 +7,7 @@ and resolving quick-links safely within <run_dir>.
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
@@ -52,6 +53,21 @@ _CONTINUOUS_ARTIFACT_ORDER = {
     "continuous_phasic_window_summary.csv": 50,
     "continuous_tonic_window_summary.csv": 60,
     "continuous_phasic_events.csv": 70,
+}
+
+_CONTINUOUS_DAY_PLOT_FAMILY_LABELS = {
+    "sampled_signal_reference": "Phasic Sig/Iso",
+    "sampled_correction_reference": "Correction Reference",
+    "sampled_phasic_dff": "Phasic dFF",
+    "sampled_stacked": "Phasic Stacked",
+}
+_CONTINUOUS_DAY_PLOT_FILENAME_PATTERNS = {
+    "sampled_signal_reference": re.compile(r"phasic_sig_iso_day_\d{3}\.png"),
+    "sampled_correction_reference": re.compile(
+        r"phasic_correction_reference_day_\d{3}\.png"
+    ),
+    "sampled_phasic_dff": re.compile(r"phasic_dFF_day_\d{3}\.png"),
+    "sampled_stacked": re.compile(r"phasic_stacked_day_\d{3}\.png"),
 }
 
 
@@ -256,6 +272,61 @@ def build_guided_continuous_saved_artifact_index(
                     "order": _CONTINUOUS_ARTIFACT_ORDER[filename],
                 }
             )
+
+    # Continuous sampled Day Plots are optional image records in the existing
+    # manifest-backed saved-artifact index.  They are admitted only from that
+    # index; this parser never scans day_plots folders or opens analysis caches.
+    for relative_path, record in saved_by_path.items():
+        parts = relative_path.split("/")
+        if len(parts) != 3 or parts[1] != "day_plots":
+            continue
+        family = str(record.get("family") or "")
+        if family not in _CONTINUOUS_DAY_PLOT_FAMILY_LABELS:
+            continue
+        roi = parts[0]
+        filename = parts[2]
+        label = _CONTINUOUS_DAY_PLOT_FAMILY_LABELS[family]
+        if roi not in expected_rois:
+            raise SavedArtifactIndexError(
+                f"This completed analysis has a sampled Day Plot for an unknown ROI: {roi}."
+            )
+        if not _CONTINUOUS_DAY_PLOT_FILENAME_PATTERNS[family].fullmatch(filename):
+            raise SavedArtifactIndexError(
+                f"This completed analysis has an invalid sampled Day Plot filename for {roi}."
+            )
+        if (
+            str(record.get("roi", "")) != roi
+            or str(record.get("analysis_family", "")) != "phasic"
+            or str(record.get("artifact_type", "")) != "image"
+            or str(record.get("label", "")) != label
+        ):
+            raise SavedArtifactIndexError(
+                f"This completed analysis has invalid provenance for the sampled "
+                f"{label} image for {roi}."
+            )
+        day_index = record.get("day_index")
+        if isinstance(day_index, bool) or not isinstance(day_index, int) or day_index < 0:
+            raise SavedArtifactIndexError(
+                f"This completed analysis has an invalid sampled Day Plot day for {roi}."
+            )
+        path = _continuous_artifact_path(
+            resolved,
+            relative_path,
+            description=f"sampled {label} image for {roi}",
+        )
+        _validate_continuous_saved_image(path, label)
+        artifacts.append(
+            {
+                **dict(record),
+                "roi": roi,
+                "label": label,
+                "relative_path": relative_path,
+                "path": path,
+                "artifact_type": "image",
+                "analysis_applicability": "phasic",
+                "order": int(record.get("order", 0)),
+            }
+        )
 
     for family in expected_continuous_families(run_mode):
         families = index.get("families")

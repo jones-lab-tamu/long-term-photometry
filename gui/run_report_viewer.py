@@ -106,9 +106,19 @@ _NATIVE_CONTINUOUS_IMAGE_TABS = {
     "phasic_auc_timeseries.png": TAB_PHASIC_SUMMARY,
     "phasic_peak_rate_timeseries.png": TAB_PHASIC_SUMMARY,
 }
+_NATIVE_CONTINUOUS_DAY_PLOT_FAMILY_TABS = {
+    "sampled_signal_reference": TAB_PHASIC_RAW,
+    "sampled_correction_reference": TAB_PHASIC_CORRECTION_REFERENCE,
+    "sampled_phasic_dff": TAB_PHASIC_DFF,
+    "sampled_stacked": TAB_PHASIC_STACKED,
+}
 _NATIVE_CONTINUOUS_TAB_ORDER = (
     TAB_VERIFICATION,
     TAB_TONIC,
+    TAB_PHASIC_RAW,
+    TAB_PHASIC_CORRECTION_REFERENCE,
+    TAB_PHASIC_DFF,
+    TAB_PHASIC_STACKED,
     TAB_PHASIC_SUMMARY,
 )
 
@@ -1004,6 +1014,13 @@ class RunReportViewer(QWidget):
 
         for key, records in self._native_continuous_artifacts_by_tab.items():
             if key[1] != TAB_PHASIC_SUMMARY:
+                if key[1] in _NATIVE_CONTINUOUS_DAY_PLOT_FAMILY_TABS.values():
+                    records.sort(
+                        key=lambda record: (
+                            int(record.get("day_index", 0)),
+                            str(record.get("relative_path") or ""),
+                        )
+                    )
                 continue
             records.sort(
                 key=lambda record: (
@@ -1831,6 +1848,11 @@ class RunReportViewer(QWidget):
     @staticmethod
     def _native_continuous_tab_label(record: Dict[str, Any]) -> str:
         """Return the scientist-facing tab for one saved native image."""
+        family_tab = _NATIVE_CONTINUOUS_DAY_PLOT_FAMILY_TABS.get(
+            str(record.get("family") or "")
+        )
+        if family_tab:
+            return family_tab
         filename = os.path.basename(str(record.get("relative_path") or ""))
         tab_label = _NATIVE_CONTINUOUS_IMAGE_TABS.get(filename)
         if tab_label:
@@ -2061,6 +2083,13 @@ class RunReportViewer(QWidget):
                 lines.append(text)
         if record.get("auc_units"):
             lines.append(f"AUC units: {record['auc_units']}")
+        if record.get("day_index") is not None:
+            lines.append(f"Plotted day: {int(record['day_index'])}")
+        sampled_labels = record.get("sampled_column_labels")
+        if isinstance(sampled_labels, (list, tuple)) and sampled_labels:
+            lines.append("Columns: " + "; ".join(str(label) for label in sampled_labels))
+        if record.get("display_explanation"):
+            lines.append(str(record["display_explanation"]))
         window_timing = self._native_continuous_context.get("window_timing", {})
         if record.get("artifact_type") == "table" and window_timing:
             length = window_timing.get("window_length_sec")
@@ -2080,6 +2109,17 @@ class RunReportViewer(QWidget):
             )
             if selected_tab == TAB_PHASIC_SUMMARY:
                 allowed_prefixes += ("AUC units:",)
+        elif selected_tab in _NATIVE_CONTINUOUS_DAY_PLOT_FAMILY_TABS.values():
+            allowed_prefixes = (
+                "ROI:",
+                "Timeline:",
+                "Plotted-day start:",
+                "Recording start:",
+                "Plotted day:",
+                "Columns:",
+                "Correction:",
+                "Continuous Day Plots sample ",
+            )
         else:
             allowed_prefixes = (
                 "ROI:",
@@ -2181,9 +2221,24 @@ class RunReportViewer(QWidget):
         )
         self._set_open_button_state(
             self._open_region_day_plots_btn,
-            ""
-            if self._native_continuous_mode
-            else (os.path.join(region_path, "day_plots") if region_path else ""),
+            (
+                os.path.join(region_path, "day_plots")
+                if (
+                    region_path
+                    and (
+                        not self._native_continuous_mode
+                        or any(
+                            record.get("artifact_type") == "image"
+                            and str(record.get("family") or "")
+                            in _NATIVE_CONTINUOUS_DAY_PLOT_FAMILY_TABS
+                            for record in self._native_continuous_artifacts_by_roi.get(
+                                region, []
+                            )
+                        )
+                    )
+                )
+                else ""
+            ),
         )
         table_target = os.path.join(region_path, "tables") if region_path else ""
         self._open_region_tables_btn.setText("Tables")

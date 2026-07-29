@@ -506,6 +506,7 @@ def execute_guided_continuous_rwd_combined_run(
             window_timing=window_timing,
             phasic_analysis=True,
             tonic_analysis=True,
+            include_day_plots=True,
         )
 
         correction_provenance = _per_roi_provenance(cache_path, included_roi_ids, first_chunk_id=0)
@@ -588,6 +589,11 @@ def execute_guided_continuous_rwd_combined_run(
         events_relative_path = os.path.join(
             PHASIC_ANALYSIS_RELATIVE_DIR, PHASIC_FEATURES_RELATIVE_DIR, CONTINUOUS_PHASIC_EVENTS_FILENAME
         )
+        day_plot_relative_paths = [
+            str(record["relative_path"])
+            for record in saved_artifacts["artifacts"]
+            if "/day_plots/" in str(record.get("relative_path", "")).replace("\\", "/")
+        ]
         manifest = {
             "tool": _TOOL_NAME,
             "run_id": run_id,
@@ -599,7 +605,11 @@ def execute_guided_continuous_rwd_combined_run(
                 run_id=run_id,
                 run_mode=run_mode,
                 finalized_utc=finalized_utc,
-                optional_artifacts=[CORRECTED_CACHE_RELATIVE_PATH, events_relative_path],
+                optional_artifacts=[
+                    CORRECTED_CACHE_RELATIVE_PATH,
+                    events_relative_path,
+                    *day_plot_relative_paths,
+                ],
                 continuous_index=continuous_index,
             ),
         }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,7 @@ from photometry_pipeline.continuous_outputs import (
 )
 from photometry_pipeline.guided_timeline import (
     map_elapsed_coordinate,
+    parse_guided_clock,
     timeline_mode_label,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
@@ -65,6 +67,40 @@ _TONIC_SUMMARY_REQUIRED_COLUMNS = frozenset(
 )
 
 CONTINUOUS_ARTIFACT_MAX_POINTS = CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
+
+CONTINUOUS_DAY_PLOT_EXPLANATION = (
+    "Continuous Day Plots sample two 10-minute windows from each plotted hour: "
+    "minutes 00–10 and 30–40. Blank positions indicate that the complete "
+    "requested interval was unavailable. These display windows do not define "
+    "acquisition sessions or analysis windows."
+)
+_CONTINUOUS_DAY_PLOT_COLUMN_LABELS = ("00–10 min", "30–40 min")
+_CONTINUOUS_DAY_PLOT_SAMPLE_SEC = 600.0
+_CONTINUOUS_DAY_PLOT_SLOT_SEC = 1800.0
+_CONTINUOUS_DAY_PLOT_DPI = 120
+_CONTINUOUS_DAY_PLOT_SMOOTH_SEC = 1.0
+_CONTINUOUS_DAY_PLOT_FAMILIES = (
+    (
+        "sampled_signal_reference",
+        "Phasic Sig/Iso",
+        "phasic_sig_iso_day_{day:03d}.png",
+    ),
+    (
+        "sampled_correction_reference",
+        "Correction Reference",
+        "phasic_correction_reference_day_{day:03d}.png",
+    ),
+    (
+        "sampled_phasic_dff",
+        "Phasic dFF",
+        "phasic_dFF_day_{day:03d}.png",
+    ),
+    (
+        "sampled_stacked",
+        "Phasic Stacked",
+        "phasic_stacked_day_{day:03d}.png",
+    ),
+)
 
 
 class GuidedContinuousSavedArtifactError(RuntimeError):
@@ -352,6 +388,527 @@ def _artifact_record(
     }
 
 
+def _extract_continuous_day_plot_panels(
+    *,
+    run_dir: str,
+    roi: str,
+    timeline_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Extract fixed display windows from the saved continuous trace caches.
+
+    This is deliberately a display-only adapter.  It creates no analysis
+    windows, session records, feature rows, event records, or persisted
+    metadata.  Each trace family is read with its own saved timestamp array so
+    display alignment never depends on cache chunk indexes being shared.
+    """
+    from photometry_pipeline.completed_run_review import (
+        resolve_persisted_cache_strategy,
+    )
+    from photometry_pipeline.viz.phasic_data_prep import compute_day_layout
+
+    mode = str(timeline_contract.get("timeline_mode") or "").strip().lower()
+    if mode not in {"elapsed", "civil", "fixed_daily_anchor"}:
+        raise GuidedContinuousSavedArtifactError(
+            f"Continuous Day Plots received an unsupported timeline mode: {mode!r}."
+        )
+
+    def _load_series(cache: Any, fields: list[str], family: str) -> dict[str, np.ndarray]:
+        records: list[tuple[float, int, dict[str, np.ndarray]]] = []
+        for chunk_id in list_cache_chunk_ids(cache):
+            cid = int(chunk_id)
+            attrs = load_cache_chunk_attrs(cache, roi, cid)
+            try:
+                _require_continuous_attrs(attrs, roi=roi, chunk_id=cid)
+                arrays = load_cache_chunk_fields(cache, roi, cid, fields)
+            except Exception as exc:
+                raise GuidedContinuousSavedArtifactError(
+                    f"Cannot read saved continuous {family} trace for ROI {roi!r}, "
+                    f"window {cid}: {exc}"
+                ) from exc
+
+            local_time = np.asarray(arrays[0], dtype=float).reshape(-1)
+            if local_time.size == 0:
+                continue
+            if not np.all(np.isfinite(local_time)) or (
+                local_time.size > 1 and np.any(np.diff(local_time) <= 0.0)
+            ):
+                raise GuidedContinuousSavedArtifactError(
+                    f"Saved continuous {family} timestamps are not strictly "
+                    f"monotonic for ROI {roi!r}, window {cid}."
+                )
+            trace_arrays: dict[str, np.ndarray] = {}
+            for field, value in zip(fields[1:], arrays[1:]):
+                trace = np.asarray(value, dtype=float).reshape(-1)
+                if trace.shape != local_time.shape:
+                    raise GuidedContinuousSavedArtifactError(
+                        f"Saved continuous {family} trace shape does not match "
+                        f"timestamps for ROI {roi!r}, window {cid}, field {field!r}."
+                    )
+                trace_arrays[field] = trace
+            records.append(
+                (
+                    float(attrs["window_start_sec"]),
+                    cid,
+                    {
+                        "time_sec": float(attrs["window_start_sec"]) + local_time,
+                        **trace_arrays,
+                    },
+                )
+            )
+
+        records.sort(key=lambda item: (item[0], item[1]))
+        if not records:
+            return {
+                "time_sec": np.asarray([], dtype=float),
+                **{field: np.asarray([], dtype=float) for field in fields[1:]},
+            }
+        names = ["time_sec", *fields[1:]]
+        merged = {
+            name: np.concatenate([record[2][name] for record in records])
+            for name in names
+        }
+        merged_time = merged["time_sec"]
+        if merged_time.size > 1 and np.any(np.diff(merged_time) <= 0.0):
+            raise GuidedContinuousSavedArtifactError(
+                f"Saved continuous {family} timestamps are not globally monotonic "
+                f"for ROI {roi!r}."
+            )
+        return merged
+
+    corrected_cache_path = os.path.join(
+        run_dir, "continuous_corrected_trace_cache.h5"
+    )
+    phasic_cache_path = os.path.join(
+        run_dir, "_analysis", "phasic_out", "phasic_trace_cache.h5"
+    )
+    _require_file(corrected_cache_path, f"{roi} corrected trace cache")
+    _require_file(phasic_cache_path, f"{roi} phasic trace cache")
+
+    with open_phasic_cache(corrected_cache_path) as corrected_cache:
+        corrected_chunk_ids = list_cache_chunk_ids(corrected_cache)
+        if not corrected_chunk_ids:
+            raise GuidedContinuousSavedArtifactError(
+                f"The corrected cache contains no continuous windows for ROI {roi!r}."
+            )
+        try:
+            correction = resolve_persisted_cache_strategy(
+                corrected_cache,
+                roi,
+                corrected_chunk_ids,
+                strict_current=False,
+            )
+        except Exception as exc:
+            raise GuidedContinuousSavedArtifactError(
+                f"Cannot resolve the persisted correction reference for ROI {roi!r}: {exc}"
+            ) from exc
+        reference_field = str(correction.get("field") or "").strip()
+        if reference_field not in {"fit_ref", "signal_only_f0_baseline"}:
+            raise GuidedContinuousSavedArtifactError(
+                f"The persisted correction reference for ROI {roi!r} is unsupported."
+            )
+        corrected = _load_series(
+            corrected_cache,
+            ["time_sec", "sig_raw", "uv_raw", reference_field],
+            "corrected",
+        )
+
+    with open_phasic_cache(phasic_cache_path) as phasic_cache:
+        phasic = _load_series(phasic_cache, ["time_sec", "dff"], "phasic dF/F")
+
+    time_arrays = [
+        values["time_sec"]
+        for values in (corrected, phasic)
+        if values["time_sec"].size
+    ]
+    if not time_arrays:
+        raise GuidedContinuousSavedArtifactError(
+            f"Saved continuous caches contain no timestamps for ROI {roi!r}."
+        )
+    recording_end_sec = max(float(values[-1]) for values in time_arrays)
+
+    candidates: list[dict[str, Any]] = []
+    if mode == "elapsed":
+        candidate_start = 0.0
+        display_base = datetime(2000, 1, 1)
+        while candidate_start <= recording_end_sec + 1e-9:
+            candidates.append(
+                {
+                    "candidate_id": len(candidates),
+                    "start_sec": float(candidate_start),
+                    "end_sec": float(candidate_start + _CONTINUOUS_DAY_PLOT_SAMPLE_SEC),
+                    "display_dt": display_base + timedelta(seconds=candidate_start),
+                }
+            )
+            candidate_start += _CONTINUOUS_DAY_PLOT_SLOT_SEC
+    else:
+        recording_start_sec, _ = parse_guided_clock(
+            timeline_contract.get("recording_start_clock"),
+            field_name="Clock time at recording start",
+        )
+        recording_start_dt = datetime(2000, 1, 1) + timedelta(
+            seconds=recording_start_sec
+        )
+        candidate_dt = recording_start_dt.replace(
+            minute=0, second=0, microsecond=0
+        )
+        while (candidate_dt - recording_start_dt).total_seconds() <= recording_end_sec + 1e-9:
+            start_sec = float((candidate_dt - recording_start_dt).total_seconds())
+            candidates.append(
+                {
+                    "candidate_id": len(candidates),
+                    "start_sec": start_sec,
+                    "end_sec": start_sec + _CONTINUOUS_DAY_PLOT_SAMPLE_SEC,
+                    "display_dt": candidate_dt,
+                }
+            )
+            candidate_dt += timedelta(seconds=_CONTINUOUS_DAY_PLOT_SLOT_SEC)
+
+    if not candidates:
+        raise GuidedContinuousSavedArtifactError(
+            f"Saved continuous caches contain no plottable display hours for ROI {roi!r}."
+        )
+
+    layout = compute_day_layout(
+        [
+            (
+                int(candidate["candidate_id"]),
+                "display://"
+                + candidate["display_dt"].strftime("%Y_%m_%d-%H_%M_%S")
+                + f"/slot_{int(candidate['candidate_id'])}.csv",
+            )
+            for candidate in candidates
+        ],
+        None,
+        roi,
+        sessions_per_hour=2,
+        timeline_anchor_mode=mode,
+        fixed_daily_anchor_clock=(
+            timeline_contract.get("fixed_daily_anchor_clock")
+            if mode == "fixed_daily_anchor"
+            else None
+        ),
+    )
+    candidate_by_id = {
+        int(candidate["candidate_id"]): candidate for candidate in candidates
+    }
+
+    def _extract_family(
+        values: dict[str, np.ndarray], fields: tuple[str, ...]
+    ) -> dict[int, list[dict[str, Any]]]:
+        timestamps = values["time_sec"]
+        if timestamps.size > 1:
+            sample_period = float(np.median(np.diff(timestamps)))
+        else:
+            sample_period = float("nan")
+        if not np.isfinite(sample_period) or sample_period <= 0.0:
+            return {}
+        coverage_tolerance = max(sample_period * 1.5, 1e-6)
+        gap_limit = sample_period * 1.5
+        by_day: dict[int, list[dict[str, Any]]] = {}
+        for chunk in layout.chunks:
+            candidate = candidate_by_id[int(chunk.chunk_id)]
+            start = float(candidate["start_sec"])
+            end = float(candidate["end_sec"])
+            left = int(np.searchsorted(timestamps, start, side="left"))
+            right = int(np.searchsorted(timestamps, end, side="left"))
+            selected_time = timestamps[left:right]
+            if (
+                selected_time.size < 2
+                or selected_time[0] > start + coverage_tolerance
+                or selected_time[-1] < end - coverage_tolerance
+                or (
+                    selected_time.size > 1
+                    and np.any(np.diff(selected_time) > gap_limit)
+                )
+            ):
+                continue
+            panel = {
+                "day": int(chunk.day_idx),
+                "hour": int(chunk.hour_idx),
+                "col": int(chunk.hour_rank),
+                "chunk_id": int(candidate["candidate_id"]),
+                "is_missing": False,
+                "display_label": _CONTINUOUS_DAY_PLOT_COLUMN_LABELS[
+                    int(chunk.hour_rank)
+                ],
+                "t": selected_time - start,
+                "xlim_600": bool(float(selected_time[-1] - start) > 550.0),
+            }
+            for field in fields:
+                panel[field] = values[field][left:right]
+            by_day.setdefault(int(chunk.day_idx), []).append(panel)
+        return by_day
+
+    corrected_signal = _extract_family(corrected, ("sig_raw", "uv_raw"))
+    corrected_reference = _extract_family(corrected, ("sig_raw", reference_field))
+    phasic_dff = _extract_family(phasic, ("dff",))
+
+    return {
+        "layout": layout,
+        "signal_reference": corrected_signal,
+        "correction_reference": corrected_reference,
+        "phasic_dff": phasic_dff,
+        "correction_strategy_family": str(correction.get("strategy_family") or ""),
+        "correction_strategy_label": str(correction.get("label") or ""),
+        "reference_field": reference_field,
+        "correction_reference_label": (
+            "Correction Reference (signal-only F0 baseline)"
+            if str(correction.get("strategy_family") or "") == "signal_only_f0"
+            else "Correction Reference (fitted)"
+        ),
+        "timeline_anchor_label": _timeline_anchor_label_for_day_plot(
+            mode, timeline_contract.get("fixed_daily_anchor_clock")
+        ),
+    }
+
+
+def _timeline_anchor_label_for_day_plot(mode: str, fixed_clock: Any) -> str:
+    mode = str(mode or "").strip().lower()
+    if mode == "elapsed":
+        return "elapsed-from-recording-start"
+    if mode == "fixed_daily_anchor":
+        clock = str(fixed_clock or "unset")
+        if clock.count(":") == 1:
+            clock += ":00"
+        return f"fixed-daily-anchor@{clock}"
+    return "civil-clock"
+
+
+def _day_plot_artifact_record(
+    *,
+    run_dir: str,
+    roi: str,
+    family: str,
+    label: str,
+    filename: str,
+    day: int,
+    timeline_contract: dict[str, Any],
+    **metadata: Any,
+) -> dict[str, Any]:
+    relative_path = _relative_path(roi, "day_plots", filename)
+    path = os.path.join(run_dir, roi, "day_plots", filename)
+    dimensions = _validate_image(path, f"{roi} {filename}")
+    return {
+        "relative_path": relative_path,
+        "roi": str(roi),
+        "family": str(family),
+        "analysis_family": "phasic",
+        "artifact_type": "image",
+        "label": str(label),
+        "day_index": int(day),
+        "timeline_mode": str(timeline_contract.get("timeline_mode") or ""),
+        "image_dimensions": list(dimensions),
+        **metadata,
+    }
+
+
+def _publish_continuous_day_plots(
+    *,
+    run_dir: str,
+    roi: str,
+    timeline_contract: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Render one manifest-backed sampled Day Plot package for one ROI."""
+    from tools.plot_phasic_dayplot_bundle import (
+        _build_stacked_slot_traces,
+        _compose_dff_day_tile_canvas_lightweight,
+        _compose_dynamic_fit_day_tile_canvas,
+        _compose_sig_iso_day_tile_canvas,
+        _dynamic_fit_panel_ranges_with_day_min_span,
+        _dynamic_fit_tile_layout,
+        _prepare_sig_iso_centered_panel,
+        _render_stacked_day_canvas_lightweight,
+        _sig_iso_panel_ranges_with_day_min_span,
+        _sig_iso_tile_layout,
+        _dff_tile_layout,
+        build_day_slot_maps,
+        uniform_filter1d,
+    )
+
+    extracted = _extract_continuous_day_plot_panels(
+        run_dir=run_dir,
+        roi=roi,
+        timeline_contract=timeline_contract,
+    )
+    layout = extracted["layout"]
+    sph = 2
+    days = sorted(layout.chunks_by_day)
+    anchor_label = extracted["timeline_anchor_label"]
+    column_labels = _CONTINUOUS_DAY_PLOT_COLUMN_LABELS
+    output_dir = os.path.join(run_dir, roi, "day_plots")
+    os.makedirs(output_dir, exist_ok=True)
+
+    signal_panels: dict[int, list[dict[str, Any]]] = {}
+    for day, panels in extracted["signal_reference"].items():
+        signal_panels[day] = []
+        for panel in panels:
+            sig, uv = _prepare_sig_iso_centered_panel(
+                panel["sig_raw"], panel["uv_raw"]
+            )
+            signal_panels[day].append({**panel, "sig": sig, "uv": uv})
+
+    reference_panels: dict[int, list[dict[str, Any]]] = {}
+    correction_label = extracted["correction_reference_label"]
+    for day, panels in extracted["correction_reference"].items():
+        reference_panels[day] = [
+            {
+                **panel,
+                "sig_fit": panel["sig_raw"],
+                "fit_ref": panel[extracted["reference_field"]],
+                "reference_label": extracted["correction_strategy_label"],
+            }
+            for panel in panels
+        ]
+
+    dff_panels = extracted["phasic_dff"]
+    finite_dff = [
+        panel["dff"][np.isfinite(panel["dff"])]
+        for panels in dff_panels.values()
+        for panel in panels
+        if np.any(np.isfinite(panel["dff"]))
+    ]
+    if finite_dff:
+        values = np.concatenate(finite_dff)
+        global_ymin, global_ymax = np.percentile(values, [0.5, 99.9])
+        pad = 0.10 * (global_ymax - global_ymin)
+        if not np.isfinite(pad) or pad == 0.0:
+            pad = 0.1
+        global_ymin -= pad
+        global_ymax += pad
+    else:
+        global_ymin, global_ymax = -1.0, 1.0
+
+    smoothed_data: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for panels in dff_panels.values():
+        for panel in panels:
+            mask = np.isfinite(panel["dff"])
+            y = panel["dff"][mask]
+            t = panel["t"][mask]
+            if y.size < 2:
+                continue
+            dt = float(np.median(np.diff(t)))
+            fs = 1.0 / dt if np.isfinite(dt) and dt > 0.0 else 1.0
+            width = max(1, int(round(fs * _CONTINUOUS_DAY_PLOT_SMOOTH_SEC)))
+            smoothed_data[panel["chunk_id"]] = (
+                t,
+                uniform_filter1d(y, size=width),
+            )
+
+    families = {
+        "sampled_signal_reference": signal_panels,
+        "sampled_correction_reference": reference_panels,
+        "sampled_phasic_dff": dff_panels,
+    }
+    artifacts: list[dict[str, Any]] = []
+    for family, label, filename_template in _CONTINUOUS_DAY_PLOT_FAMILIES:
+        if family == "sampled_stacked":
+            family_panels = dff_panels
+        else:
+            family_panels = families[family]
+        for day in days:
+            slot_map = build_day_slot_maps(family_panels, sph).get(day, {})
+            filename = filename_template.format(day=int(day))
+            path = os.path.join(output_dir, filename)
+            if family == "sampled_signal_reference":
+                image = _compose_sig_iso_day_tile_canvas(
+                    day=day,
+                    plot_roi=roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=_sig_iso_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI),
+                    panel_y_ranges=_sig_iso_panel_ranges_with_day_min_span(slot_map),
+                    timeline_anchor_label=anchor_label,
+                    title_override=f"Day {day} Sampled Signal + Reference - {roi}",
+                    column_labels=column_labels,
+                )
+            elif family == "sampled_correction_reference":
+                image = _compose_dynamic_fit_day_tile_canvas(
+                    day=day,
+                    plot_roi=roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=_dynamic_fit_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI),
+                    panel_y_ranges=_dynamic_fit_panel_ranges_with_day_min_span(slot_map),
+                    timeline_anchor_label=anchor_label,
+                    title_override=f"Day {day} {correction_label} - {roi}",
+                    column_labels=column_labels,
+                )
+            elif family == "sampled_phasic_dff":
+                image, _stats = _compose_dff_day_tile_canvas_lightweight(
+                    day=day,
+                    plot_roi=roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=_dff_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI),
+                    global_ymin=global_ymin,
+                    global_ymax=global_ymax,
+                    show_peak_markers=False,
+                    timeline_anchor_label=anchor_label,
+                    title_override=f"Sampled Phasic dF/F - Day {day} - ROI {roi}",
+                    column_labels=column_labels,
+                )
+            else:
+                dff_slot_map = build_day_slot_maps(dff_panels, sph).get(day, {})
+                slot_traces = _build_stacked_slot_traces(
+                    dff_slot_map, smoothed_data, sph
+                )
+                image = _render_stacked_day_canvas_lightweight(
+                    day=day,
+                    plot_roi=roi,
+                    slot_traces=slot_traces,
+                    smooth_window_s=_CONTINUOUS_DAY_PLOT_SMOOTH_SEC,
+                    dpi=_CONTINUOUS_DAY_PLOT_DPI,
+                    timeline_anchor_label=anchor_label,
+                    slot_map=dff_slot_map,
+                    sph=sph,
+                    title_override=(
+                        f"Sampled Stacked Phasic dF/F - Day {day} - ROI {roi}"
+                    ),
+                    column_labels=column_labels,
+                )
+            image.save(path, compress_level=1)
+            artifacts.append(
+                _day_plot_artifact_record(
+                    run_dir=run_dir,
+                    roi=roi,
+                    family=family,
+                    label=label,
+                    filename=filename,
+                    day=day,
+                    timeline_contract=timeline_contract,
+                    display_explanation=CONTINUOUS_DAY_PLOT_EXPLANATION,
+                    sampled_column_labels=list(column_labels),
+                    sampled_interval_sec=_CONTINUOUS_DAY_PLOT_SAMPLE_SEC,
+                    correction_strategy_family=(
+                        extracted["correction_strategy_family"]
+                        if family == "sampled_correction_reference"
+                        else None
+                    ),
+                    correction_strategy_label=(
+                        extracted["correction_strategy_label"]
+                        if family == "sampled_correction_reference"
+                        else None
+                    ),
+                    correction_reference_label=(
+                        correction_label
+                        if family == "sampled_correction_reference"
+                        else None
+                    ),
+                    stacked_smoothing_sec=(
+                        _CONTINUOUS_DAY_PLOT_SMOOTH_SEC
+                        if family == "sampled_stacked"
+                        else None
+                    ),
+                    order=80
+                    + (next(
+                        index
+                        for index, family_spec in enumerate(_CONTINUOUS_DAY_PLOT_FAMILIES)
+                        if family_spec[0] == family
+                    ) * 1000)
+                    + int(day),
+                )
+            )
+    return artifacts
 def _select_correction_window(cache: Any, roi: str) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     for chunk_id in list_cache_chunk_ids(cache):
@@ -865,8 +1422,9 @@ def publish_guided_continuous_saved_artifacts(
     phasic_analysis: bool,
     tonic_analysis: bool,
     max_plot_points: int = CONTINUOUS_ARTIFACT_MAX_POINTS,
+    include_day_plots: bool = False,
 ) -> dict[str, Any]:
-    """Publish and validate the required native Guided continuous images."""
+    """Publish and validate native Guided continuous saved artifacts."""
     started = time.perf_counter()
     run_dir = os.path.abspath(run_dir)
     rois = tuple(str(roi) for roi in included_roi_ids)
@@ -1018,9 +1576,26 @@ def publish_guided_continuous_saved_artifacts(
                 int(details.get("n_points_plotted", 0)),
             )
 
+    day_plot_artifacts: list[dict[str, Any]] = []
+    if include_day_plots:
+        if not (phasic_analysis and tonic_analysis):
+            raise GuidedContinuousSavedArtifactError(
+                "Sampled continuous Day Plots are supported only for the combined "
+                "Guided continuous workflow."
+            )
+        for roi in rois:
+            day_plot_artifacts.extend(
+                _publish_continuous_day_plots(
+                    run_dir=run_dir,
+                    roi=roi,
+                    timeline_contract=timeline_contract,
+                )
+            )
+        artifacts.extend(day_plot_artifacts)
+
     expected_artifact_count = len(rois) * (
         (3 if phasic_analysis else 0) + (1 if tonic_analysis else 0)
-    )
+    ) + len(day_plot_artifacts)
     if len(artifacts) != expected_artifact_count:
         raise GuidedContinuousSavedArtifactError(
             "Saved continuous Results publication produced an incomplete artifact set: "

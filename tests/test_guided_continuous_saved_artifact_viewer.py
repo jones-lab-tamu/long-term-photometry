@@ -272,13 +272,17 @@ def test_combined_native_results_index_and_switching_use_saved_files(
         assert _tab_labels(viewer) == [
             "Verification",
             "Tonic",
+            "Phasic Sig/Iso",
+            "Correction Reference",
+            "Phasic dFF",
+            "Phasic Stacked",
             "Phasic Summary",
         ]
         indexed = viewer._native_continuous_artifact_index["artifacts"]
-        assert len(indexed) == 13
+        assert len(indexed) == 21
         assert sum(record.get("scope") == "run" for record in indexed) == 1
         assert all(
-            sum(record.get("roi") == roi for record in indexed) == 6
+            sum(record.get("roi") == roi for record in indexed) == 10
             for roi in viewer.available_regions()
         )
         records = viewer.available_artifacts()
@@ -438,6 +442,12 @@ def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
         assert "Timeline:" in peak_metadata
         assert "AUC units:" not in peak_metadata
         assert "Artifact" not in peak_metadata
+
+        _select_native_tab(viewer, "Phasic Sig/Iso")
+        day_plot_metadata = viewer._artifact_metadata_label.text()
+        assert "Continuous Day Plots sample two 10-minute windows" in day_plot_metadata
+        assert "Columns: 00–10 min; 30–40 min" in day_plot_metadata
+        assert "Plotted day: 0" in day_plot_metadata
     finally:
         viewer.close()
 
@@ -458,13 +468,15 @@ def test_native_continuous_navigation_uses_selected_roi_folders(
             viewer._open_region_tables_btn.text(),
         ] == ["Run Report", "Summary", "Day Plots", "Tables"]
         assert not viewer._open_region_day_plots_btn.isHidden()
-        assert viewer._open_region_day_plots_btn.isEnabled() is False
+        assert viewer._open_region_day_plots_btn.isEnabled() is True
         assert viewer._open_region_tables_btn.isEnabled() is True
 
         first_roi = viewer.selected_region()
+        viewer._open_region_day_plots_btn.click()
         viewer._open_region_summary_btn.click()
         viewer._open_region_tables_btn.click()
         assert opened == [
+            os.path.join(combined_run.run_dir, first_roi, "day_plots"),
             os.path.join(combined_run.run_dir, first_roi, "summary"),
             os.path.join(combined_run.run_dir, first_roi, "tables"),
         ]
@@ -472,12 +484,14 @@ def test_native_continuous_navigation_uses_selected_roi_folders(
         viewer._region_combo.setCurrentIndex(1)
         second_roi = viewer.selected_region()
         assert second_roi != first_roi
+        viewer._open_region_day_plots_btn.click()
         viewer._open_region_summary_btn.click()
         viewer._open_region_tables_btn.click()
         assert opened[-2:] == [
             os.path.join(combined_run.run_dir, second_roi, "summary"),
             os.path.join(combined_run.run_dir, second_roi, "tables"),
         ]
+        assert opened[-3] == os.path.join(combined_run.run_dir, second_roi, "day_plots")
         assert "Open CSV" not in viewer._open_region_tables_btn.text()
     finally:
         viewer.close()

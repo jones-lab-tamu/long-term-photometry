@@ -878,7 +878,13 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
 
     tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
-    draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    panel_label = panel.get("display_label")
+    draw.text(
+        (plot_x0, max(1, int(0.03 * tile_h))),
+        str(panel_label) if panel_label else f"Chunk {panel['chunk_id']}",
+        fill='black',
+        font=title_font,
+    )
     return tile
 
 
@@ -950,7 +956,13 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
 
     tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
-    draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    panel_label = panel.get("display_label")
+    draw.text(
+        (plot_x0, max(1, int(0.03 * tile_h))),
+        str(panel_label) if panel_label else f"Chunk {panel['chunk_id']}",
+        fill='black',
+        font=title_font,
+    )
     return tile
 
 
@@ -966,6 +978,8 @@ def _compose_dynamic_fit_day_tile_canvas(
     layout,
     panel_y_ranges=None,
     timeline_anchor_label: str = "",
+    title_override: str | None = None,
+    column_labels: tuple[str, ...] | None = None,
 ):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
@@ -989,10 +1003,20 @@ def _compose_dynamic_fit_day_tile_canvas(
         (panel.get("reference_label") for panel in slot_map.values() if panel and not panel.get("is_missing")),
         "Fitted reference",
     )
-    title_txt = f"Day {day} Correction reference (Raw Signal + {reference_label}) - {plot_roi}"
+    title_txt = title_override or f"Day {day} Correction reference (Raw Signal + {reference_label}) - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+    if column_labels:
+        for c, label in enumerate(column_labels[:sph]):
+            x = left_label_w + c * (tile_w + col_gap) + (tile_w // 2)
+            draw.text(
+                (x, max(1, top_title_h - 7)),
+                str(label),
+                fill='black',
+                anchor='ms',
+                font=chunk_font,
+            )
 
     for h in range(24):
         y = top_title_h + h * (tile_h + row_gap)
@@ -1039,6 +1063,8 @@ def _compose_sig_iso_day_tile_canvas(
     layout,
     panel_y_ranges=None,
     timeline_anchor_label: str = "",
+    title_override: str | None = None,
+    column_labels: tuple[str, ...] | None = None,
 ):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
@@ -1058,10 +1084,20 @@ def _compose_sig_iso_day_tile_canvas(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = f"Day {day} Sig/Iso (Centered, Common Gain) - {plot_roi}"
+    title_txt = title_override or f"Day {day} Sig/Iso (Centered, Common Gain) - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+    if column_labels:
+        for c, label in enumerate(column_labels[:sph]):
+            x = left_label_w + c * (tile_w + col_gap) + (tile_w // 2)
+            draw.text(
+                (x, max(1, top_title_h - 7)),
+                str(label),
+                fill='black',
+                anchor='ms',
+                font=chunk_font,
+            )
 
     for h in range(24):
         y = top_title_h + h * (tile_h + row_gap)
@@ -1220,7 +1256,13 @@ def _render_dff_panel_tile_lightweight(
     tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
     title_t0 = time.perf_counter()
-    draw.text((plot_x0, max(1, int(0.02 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    panel_label = panel.get("display_label")
+    draw.text(
+        (plot_x0, max(1, int(0.02 * tile_h))),
+        str(panel_label) if panel_label else f"Chunk {panel['chunk_id']}",
+        fill='black',
+        font=title_font,
+    )
     title_text_sec = time.perf_counter() - title_t0
 
     y_eps = 0.01 * y_span if y_span > 0 else 1e-6
@@ -1270,6 +1312,8 @@ def _compose_dff_day_tile_canvas_lightweight(
     global_ymax,
     show_peak_markers: bool,
     timeline_anchor_label: str = "",
+    title_override: str | None = None,
+    column_labels: tuple[str, ...] | None = None,
 ):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
@@ -1289,10 +1333,20 @@ def _compose_dff_day_tile_canvas_lightweight(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = f"Phasic QC - Day {day} - ROI {plot_roi} - Mode: DFF"
+    title_txt = title_override or f"Phasic QC - Day {day} - ROI {plot_roi} - Mode: DFF"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+    if column_labels:
+        for c, label in enumerate(column_labels[:sph]):
+            x = left_label_w + c * (tile_w + col_gap) + (tile_w // 2)
+            draw.text(
+                (x, max(1, top_title_h - 7)),
+                str(label),
+                fill='black',
+                anchor='ms',
+                font=chunk_font,
+            )
     stats = {
         "trace_sec": 0.0,
         "marker_sec": 0.0,
@@ -1343,6 +1397,8 @@ def _render_stacked_day_canvas_lightweight(
     timeline_anchor_label: str = "",
     slot_map: dict | None = None,
     sph: int | None = None,
+    title_override: str | None = None,
+    column_labels: tuple[str, ...] | None = None,
 ):
     n_slots = len(slot_traces)
     occupied_traces = [tr for tr in slot_traces if tr is not None]
@@ -1429,7 +1485,9 @@ def _render_stacked_day_canvas_lightweight(
     title_font = _get_font(max(12, int(round(0.11 * dpi))))
     label_font = _get_font(max(10, int(round(0.09 * dpi))))
     tick_font = _get_font(max(9, int(round(0.08 * dpi))))
-    title_txt = f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}"
+    title_txt = title_override or f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}"
+    if column_labels:
+        title_txt += " [" + " | ".join(str(label) for label in column_labels) + "]"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text(
