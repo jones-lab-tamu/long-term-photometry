@@ -3427,6 +3427,7 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_prepare_closing = False
         self._guided_continuous_rwd_prepare_failed_identity = None
         self._guided_continuous_rwd_status_message = ""
+        self._guided_continuous_rwd_status_is_analysis = False
         self._guided_continuous_rwd_execution_active = False
         self._guided_continuous_rwd_execution_cancel_event = None
         self._guided_continuous_rwd_live_run_dir = ""
@@ -4800,16 +4801,10 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.setCurrentRow(
             self._guided_step_index("Run")
         )
-        # The whole continuous plan is accepted at this point (recording,
-        # ROIs, correction choices, confirmed Feature Detection settings, and
-        # output destination), so this is the earliest safe moment to build
-        # its execution authorities. If the recording still needs checking --
-        # for example because the ROI selection changed after the earlier
-        # check -- start that instead; preparation follows once the review
-        # binding is current again.
+        # Run-page entry is passive for both Guided modes. Continuous setup
+        # preparation begins only when the scientist presses Check my setup.
         if self._guided_continuous_rwd_live_draft() is not None:
-            if not self._maybe_start_guided_continuous_rwd_recording_check():
-                self._maybe_start_guided_continuous_rwd_preparation()
+            self._refresh_guided_backend_validation_display()
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
         text = str(path or "").strip()
@@ -4983,11 +4978,9 @@ class MainWindow(QMainWindow):
             and getattr(self, "_guided_workflow_mode", "start") == "new_analysis"
             and self._guided_continuous_rwd_live_draft() is not None
         ):
-            # Reaching Run by any route (Continue, or the stepper directly)
-            # prepares the accepted continuous plan. Idempotent: it does not
-            # restart preparation for a plan already prepared, preparing, or
-            # already failed to prepare.
-            self._maybe_start_guided_continuous_rwd_preparation()
+            # Run-page entry is passive. Refresh the existing readiness
+            # display, but leave setup preparation to Check my setup.
+            self._refresh_guided_backend_validation_display()
         if (
             GUIDED_WORKFLOW_STEPS[idx] == "Correction approach"
             and getattr(
@@ -14690,6 +14683,21 @@ class MainWindow(QMainWindow):
             self._set_guided_continuous_rwd_check_status(
                 "The recording could not be checked.", active=False
             )
+        if (
+            getattr(self, "_guided_continuous_rwd_status_message", "")
+            == "Checking the continuous recording..."
+            and getattr(self, "_guided_continuous_rwd_check_outcome", "")
+            != "succeeded"
+        ):
+            self._set_guided_continuous_rwd_status(
+                getattr(
+                    self,
+                    "_guided_continuous_rwd_check_outcome_message",
+                    "",
+                )
+                or "The recording could not be checked."
+            )
+        self._refresh_guided_backend_validation_display()
 
     def _set_guided_continuous_rwd_review_binding(self, binding) -> None:
         from photometry_pipeline.guided_continuous_rwd_review_binding import (
@@ -14840,10 +14848,23 @@ class MainWindow(QMainWindow):
             return False
         return bool(self._start_guided_continuous_rwd_recording_check())
 
-    def _set_guided_continuous_rwd_status(self, message: str) -> None:
-        """Record and display the one scientist-facing continuous status."""
+    def _set_guided_continuous_rwd_status(
+        self, message: str, *, analysis: bool = False
+    ) -> None:
+        """Record and display one scientist-facing continuous status.
+
+        Setup preparation belongs to the Check setup section. Once the
+        scientist explicitly starts the analysis, its status belongs to the
+        Guided analysis section instead.
+        """
         self._guided_continuous_rwd_status_message = str(message or "")
-        label = getattr(self, "_guided_run_readiness_label", None)
+        self._guided_continuous_rwd_status_is_analysis = bool(analysis)
+        label_name = (
+            "_guided_run_readiness_label"
+            if analysis
+            else "_guided_backend_validation_status_label"
+        )
+        label = getattr(self, label_name, None)
         if label is not None:
             label.setText(self._guided_continuous_rwd_status_message)
 
@@ -15247,22 +15268,90 @@ class MainWindow(QMainWindow):
             )
             cancel_btn.setVisible(stoppable)
             cancel_btn.setEnabled(stoppable)
-        # The setup check and the Run control must describe the same thing.
-        # Preparation finishes on its own, long after any click, so the check
-        # is restated here rather than left holding whatever it said when the
-        # scientist last pressed the button (CR1-F1-G).
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            recording_check_active = bool(
+                getattr(self, "_guided_continuous_rwd_check_worker", None)
+                is not None
+                and getattr(
+                    self, "_guided_continuous_rwd_check_active_token", None
+                )
+                is not None
+            )
+            validate_btn.setEnabled(
+                not bool(
+                    getattr(self, "_guided_continuous_rwd_execution_active", False)
+                    or self._guided_continuous_rwd_preparation_active()
+                    or recording_check_active
+                    or getattr(self, "_guided_continuous_rwd_prepare_worker", None)
+                    is not None
+                )
+            )
+
+        # Keep setup preparation in the Check setup section. The separate
+        # Guided analysis label remains an idle instruction until Run is
+        # explicitly pressed; actual analysis status is written there by the
+        # analysis path itself.
         status_label = getattr(
             self, "_guided_backend_validation_status_label", None
         )
-        if status_label is not None:
-            status_label.setText(
-                "Setup check passed. Ready to run." if ready else summary
-            )
         details_label = getattr(
             self, "_guided_backend_validation_details_label", None
         )
+        analysis_label = getattr(self, "_guided_run_readiness_label", None)
+        status_is_analysis = bool(
+            getattr(self, "_guided_continuous_rwd_status_is_analysis", False)
+        )
+        if status_is_analysis:
+            # Do not copy an actual-analysis message into the setup section.
+            # Once that run has ended, the consumed preparation is no longer
+            # a current setup authorization, so the setup section returns to
+            # its ordinary unchecked wording while the analysis section keeps
+            # its terminal message.
+            if (
+                status_label is not None
+                and not getattr(
+                    self, "_guided_continuous_rwd_execution_active", False
+                )
+            ):
+                status_label.setText(
+                    "Your Guided setup has not been checked yet."
+                )
+            if details_label is not None:
+                details_label.setText("")
+            return True
+
+        if status_label is not None:
+            status_label.setText(
+                "Setup check passed. Ready to run."
+                if ready
+                else (
+                    self._guided_continuous_rwd_status_message
+                    or "Your Guided setup has not been checked yet."
+                )
+            )
         if details_label is not None:
-            details_label.setText("")
+            details_label.setText(
+                ""
+                if ready or self._guided_continuous_rwd_status_message
+                else (
+                    "Check your Guided setup before running analysis. Run "
+                    "becomes available once the check passes for the current "
+                    "setup."
+                )
+            )
+        if analysis_label is not None:
+            analysis_label.setText(
+                summary
+                if getattr(
+                    self, "_guided_continuous_rwd_execution_active", False
+                )
+                else (
+                    "The setup is ready. Start Guided Analysis when you are ready."
+                    if ready
+                    else "Check your Guided setup before running."
+                )
+            )
         return True
 
     def _on_guided_continuous_rwd_cancel_clicked(self) -> None:
@@ -15289,7 +15378,7 @@ class MainWindow(QMainWindow):
             button = getattr(self, "_guided_run_btn", None)
             if button is not None:
                 button.setEnabled(False)
-            self._set_guided_continuous_rwd_status(summary)
+            self._set_guided_continuous_rwd_status(summary, analysis=True)
             return
         prepared = getattr(self, "_guided_continuous_rwd_prepared_run", None)
         if prepared is None:
@@ -15319,7 +15408,9 @@ class MainWindow(QMainWindow):
             details_label.setText(
                 "Do not close this window until the analysis finishes."
             )
-        self._set_guided_continuous_rwd_status("Running continuous analysis…")
+        self._set_guided_continuous_rwd_status(
+            "Running continuous analysis…", analysis=True
+        )
         self._start_guided_run_execution_worker(None, continuous_execution=request)
 
     def _on_guided_continuous_rwd_run_started(
@@ -15406,7 +15497,8 @@ class MainWindow(QMainWindow):
                 f"run_dir={run_dir!r}"
             )
             self._set_guided_continuous_rwd_status(
-                "Continuous analysis could not be completed."
+                "Continuous analysis could not be completed.",
+                analysis=True,
             )
             self._refresh_guided_run_readiness_display()
             return
@@ -15418,7 +15510,9 @@ class MainWindow(QMainWindow):
         # allocated and its results are written. Require a fresh preparation
         # before another run rather than reusing consumed authorities.
         self._guided_continuous_rwd_prepared_run = None
-        self._set_guided_continuous_rwd_status("Continuous analysis completed.")
+        self._set_guided_continuous_rwd_status(
+            "Continuous analysis completed.", analysis=True
+        )
         self._refresh_guided_review_handoff_display()
         self._refresh_guided_run_readiness_display()
 
@@ -15442,11 +15536,13 @@ class MainWindow(QMainWindow):
         self._guided_continuous_rwd_prepared_run = None
         if text.startswith("cancelled:"):
             self._set_guided_continuous_rwd_status(
-                "Continuous analysis was cancelled."
+                "Continuous analysis was cancelled.",
+                analysis=True,
             )
         else:
             self._set_guided_continuous_rwd_status(
-                "Continuous analysis could not be completed."
+                "Continuous analysis could not be completed.",
+                analysis=True,
             )
         self._refresh_guided_run_readiness_display()
 
@@ -15474,7 +15570,7 @@ class MainWindow(QMainWindow):
             if event is not None:
                 event.set()
                 self._set_guided_continuous_rwd_status(
-                    "Stopping continuous analysis…"
+                    "Stopping continuous analysis…", analysis=True
                 )
                 return True
             return False
@@ -15841,20 +15937,29 @@ class MainWindow(QMainWindow):
         preparation running beside it, so this reports the continuous
         authority instead -- the same readiness the Run control itself uses.
 
-        Preparation normally starts when the scientist arrives on this page;
-        this reuses that one launcher, which declines to start a second for a
-        plan already preparing, already prepared, or already failed.
+        Preparation starts only from this explicit Check my setup action; the
+        one launcher declines to start a second preparation for a plan already
+        preparing, already prepared, or already failed.
         """
         # Any outcome here came from the intermittent validator and cannot
         # describe this plan; leaving it would keep its refusal on screen.
         self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
         if not self._guided_continuous_rwd_preparation_active():
-            # One preparation at a time: while one is in flight this button
-            # reports it rather than starting a rival for the same plan.
-            self._maybe_start_guided_continuous_rwd_preparation()
-        # This renders both the Run control and the setup-check text from the
-        # one continuous readiness result.
+            # If the accepted recording binding is missing, the same explicit
+            # setup check may refresh it first. Run-page entry itself remains
+            # passive, and no preparation is started until this action.
+            if self._maybe_start_guided_continuous_rwd_recording_check():
+                self._set_guided_continuous_rwd_status(
+                    "Checking the continuous recording..."
+                )
+            else:
+                # One preparation at a time: while one is in flight this
+                # button reports it rather than starting a rival for the same
+                # plan.
+                self._maybe_start_guided_continuous_rwd_preparation()
+        # This renders the Run control and the setup-check text from the
+        # current continuous readiness result without starting work.
         self._refresh_guided_continuous_rwd_run_readiness_display()
 
     def _on_guided_backend_validate_clicked(self) -> None:

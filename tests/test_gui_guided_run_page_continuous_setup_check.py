@@ -10,11 +10,10 @@ while the panel beside it said "Preparing continuous analysis..." and offered a
 Stop button.
 
 Both statements came from different authorities. Continuous preparation -- the
-thing that actually makes a continuous plan runnable -- starts when the
-scientist arrives on the page and does enable Run when it finishes. The setup
-check ignored it and asked the backend-validation materializer instead, which
-begins by refusing anything that is not ``intermittent``, so for a continuous
-recording it could only ever fail.
+thing that actually makes a continuous plan runnable -- now starts only when
+the scientist explicitly clicks Check my setup. The setup check uses the same
+accepted preparation authority, rather than asking the backend-validation
+materializer that begins by refusing anything that is not ``intermittent``.
 
 Structure of this file:
 
@@ -173,6 +172,10 @@ def _drive_to_run_page(
     window._guided_acquisition_mode_combo.setCurrentIndex(index)
     window._guided_input_dir_edit.setText(str(folder))
     window._guided_output_dir_edit.setText(str(folder.parent / "output"))
+    if continuous:
+        # Civil-time continuous plans require the editable recording-start
+        # clock introduced by the current Guided workflow contract.
+        window._guided_recording_start_clock_edit.setText("07:00")
     window._on_guided_discover_rois()
     _pump(qapp, lambda: window._guided_roi_discovery_running)
     _pump(
@@ -382,6 +385,16 @@ def test_full_visible_continuous_path_enables_run(
     _drive_to_run_page(window, qapp, folder)
 
     assert window._guided_workflow_stepper.currentItem().data(Qt.UserRole) == "Run"
+    assert window._guided_continuous_rwd_prepare_worker is None
+    assert window._guided_continuous_rwd_prepare_thread is None
+    assert window._guided_run_btn.isEnabled() is False
+    assert _check_button(window).isEnabled() is True
+    assert window._guided_continuous_rwd_cancel_btn.isHidden() is True
+    assert _setup_status(window) == "Your Guided setup has not been checked yet."
+    assert window._guided_run_readiness_label.text() == (
+        "Check your Guided setup before running."
+    )
+
     before = _strategies_by_roi(window)
     assert before == {
         "CH1": "robust_global_event_reject",
@@ -463,6 +476,18 @@ def test_explicit_continuous_checks_the_same_way(window, qapp, tmp_path):
     )
 
     assert window._guided_selected_acquisition_mode() == "continuous"
+    assert window._guided_continuous_rwd_prepare_worker is None
+    assert window._guided_continuous_rwd_prepare_thread is None
+    assert window._guided_run_execution_worker is None
+    assert window._guided_run_status_follower is None
+    assert window._guided_run_elapsed_timer is None
+    assert window._guided_run_btn.isEnabled() is False
+    assert _check_button(window).isEnabled() is True
+    assert window._guided_continuous_rwd_cancel_btn.isHidden() is True
+    assert _setup_status(window) == "Your Guided setup has not been checked yet."
+    assert window._guided_run_readiness_label.text() == (
+        "Check your Guided setup before running."
+    )
     _check_button(window).click()
     qapp.processEvents()
     _settle_preparation(window, qapp)
@@ -572,7 +597,11 @@ def gated_preparation(monkeypatch):
         return real_init(self, *args, **kwargs)
 
     def gated_grid(*args, **kwargs):
-        release.wait(30)
+        # The same target-grid builder is also used by correction previews.
+        # Only hold it after the preparation worker has been constructed, so
+        # the real reviewed workflow can reach the explicit Check click.
+        if launches:
+            release.wait(30)
         return real_grid(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -632,6 +661,8 @@ def test_preparation_failure_retry_and_thread_boundary(
     )
 
     _focused_run_page(window, qapp, tmp_path, rois=("CH1", "CH2"))
+    _check_button(window).click()
+    qapp.processEvents()
     _settle_preparation(window, qapp)
 
     # The failure terminated cleanly: token cleared, worker and thread retired.
@@ -679,17 +710,17 @@ def test_preparation_failure_retry_and_thread_boundary(
 def test_second_click_while_preparing_starts_one_preparation(
     window, qapp, tmp_path, gated_preparation
 ):
-    """The page starts one preparation on arrival; clicking the button while
-    it runs must not start another."""
+    """The page is passive; one explicit Check click starts preparation and
+    the disabled button cannot start another."""
     launches, release = gated_preparation
     _focused_run_page(window, qapp, tmp_path)
-
-    assert window._guided_continuous_rwd_preparation_active() is True
-    assert len(launches) == 1
 
     button = _check_button(window)
     button.click()
     qapp.processEvents()
+    assert window._guided_continuous_rwd_preparation_active() is True
+    assert len(launches) == 1
+    assert button.isEnabled() is False
     button.click()
     qapp.processEvents()
 
@@ -700,6 +731,12 @@ def test_second_click_while_preparing_starts_one_preparation(
     assert window._guided_continuous_rwd_prepare_thread is not None
     assert window._guided_continuous_rwd_preparation_active() is True
     assert "Preparing continuous analysis" in _setup_status(window)
+    assert "Preparing continuous analysis" not in (
+        window._guided_run_readiness_label.text()
+    )
+    assert "Check your Guided setup before running" in (
+        window._guided_run_readiness_label.text()
+    )
     assert FIRST_SUBSET_REFUSAL not in _setup_status(window)
 
     release.set()
@@ -708,6 +745,9 @@ def test_second_click_while_preparing_starts_one_preparation(
     assert len(launches) == 1
     assert window._guided_run_btn.isEnabled() is True
     assert "Ready to run" in _setup_status(window)
+    assert "Preparing continuous analysis" not in (
+        window._guided_run_readiness_label.text()
+    )
 
 
 def test_stop_cancels_the_preparation_started_from_the_button(
@@ -715,6 +755,8 @@ def test_stop_cancels_the_preparation_started_from_the_button(
 ):
     _launches, release = gated_preparation
     _focused_run_page(window, qapp, tmp_path)
+    _check_button(window).click()
+    qapp.processEvents()
     assert window._guided_continuous_rwd_preparation_active() is True
 
     cancel_btn = window._guided_continuous_rwd_cancel_btn

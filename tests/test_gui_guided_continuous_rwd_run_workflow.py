@@ -467,7 +467,7 @@ def test_recording_check_is_not_repeated_for_an_already_checked_plan(
     assert fake_check_runtime.instances == []
 
 
-def test_reaching_the_run_step_starts_preparation(
+def test_reaching_the_run_step_is_passive(
     window, monkeypatch, tmp_path
 ):
     folder = tmp_path / "run_step_trigger"
@@ -486,7 +486,7 @@ def test_reaching_the_run_step_starts_preparation(
         window._guided_step_index("Run")
     )
 
-    assert started == [True]
+    assert started == []
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +512,10 @@ def test_run_readiness_transitions(window, qapp, monkeypatch, tmp_path):
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is False
     assert "Preparing continuous analysis" in (
-        window._guided_run_readiness_label.text()
+        window._guided_backend_validation_status_label.text()
+    )
+    assert window._guided_run_readiness_label.text() == (
+        "Check your Guided setup before running."
     )
     assert window._guided_continuous_rwd_cancel_btn.isHidden() is False
 
@@ -529,12 +532,18 @@ def test_run_readiness_transitions(window, qapp, monkeypatch, tmp_path):
     # Ready.
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_backend_validation_status_label.text() == (
+        "Setup check passed. Ready to run."
+    )
     assert window._guided_run_readiness_label.text() == (
-        "Continuous analysis is ready to run."
+        "The setup is ready. Start Guided Analysis when you are ready."
     )
 
     # During execution.
     window._guided_continuous_rwd_execution_active = True
+    window._set_guided_continuous_rwd_status(
+        "Running continuous analysis…", analysis=True
+    )
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_run_readiness_label.text() == (
