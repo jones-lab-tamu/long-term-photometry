@@ -843,6 +843,107 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
     assert "time_sec" not in kwargs["config_overrides"].values()
 
 
+@pytest.mark.parametrize("dataset_change", ["mapping", "source"])
+def test_csv_dataset_contract_survives_preview_selection_only(
+    window, tmp_path, dataset_change
+):
+    source_root = tmp_path / "csv_sessions"
+    source_root.mkdir()
+    content = (
+        "ElapsedSeconds,ROI1_Green,ROI1_Reference,"
+        "ROI2_Green,ROI2_Reference\n"
+        "0,2,1,3,1.5\n"
+        "0.5,2.1,1.1,3.1,1.6\n"
+    )
+    session_paths = []
+    for name in ("session_0001.csv", "session_0002.csv"):
+        path = source_root / name
+        path.write_text(content, encoding="utf-8")
+        session_paths.append(path)
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_input_dir_edit.setText(str(source_root))
+    window._guided_csv_time_column_combo.setCurrentIndex(
+        window._guided_csv_time_column_combo.findData("ElapsedSeconds")
+    )
+    first_mapping = window._guided_csv_mapping_rows[0]
+    first_mapping["name"].setText("ROI1")
+    first_mapping["signal"].setCurrentIndex(
+        first_mapping["signal"].findData("ROI1_Green")
+    )
+    first_mapping["reference"].setCurrentIndex(
+        first_mapping["reference"].findData("ROI1_Reference")
+    )
+    window._guided_csv_add_roi_btn.click()
+    second_mapping = window._guided_csv_mapping_rows[1]
+    second_mapping["name"].setText("ROI2")
+    second_mapping["signal"].setCurrentIndex(
+        second_mapping["signal"].findData("ROI2_Green")
+    )
+    second_mapping["reference"].setCurrentIndex(
+        second_mapping["reference"].findData("ROI2_Reference")
+    )
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("1")
+
+    window._guided_roi_discovery_diag_start = 0.0
+    window._on_guided_roi_discovery_succeeded(
+        {
+            "resolved_format": "custom_tabular",
+            "acquisition_mode": "intermittent",
+            "rois": [{"roi_id": "ROI1"}, {"roi_id": "ROI2"}],
+            "sessions": [
+                {
+                    "index": index,
+                    "session_id": path.stem,
+                    "path": str(path),
+                    "included_in_preview": True,
+                }
+                for index, path in enumerate(session_paths)
+            ],
+            "n_total_discovered": 2,
+            "n_preview": 2,
+        }
+    )
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot is not None
+    assert snapshot.current_applied is True
+    frozen_values = dict(snapshot.contract_values)
+    assert frozen_values["custom_tabular_time_col"] == "ElapsedSeconds"
+    assert frozen_values["custom_tabular_time_unit"] == "seconds"
+    assert json.loads(
+        frozen_values["custom_tabular_roi_mapping_json"]
+    ) == [
+        {
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Green",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Green",
+            "reference_column": "ROI2_Reference",
+        },
+    ]
+
+    window._refresh_guided_feature_detection_preview_panel()
+    window._guided_feature_preview_roi_combo.setCurrentText("ROI2")
+    assert window._guided_new_analysis_dataset_contract_snapshot is snapshot
+    window._guided_feature_preview_segment_combo.setCurrentIndex(1)
+    assert window._guided_new_analysis_dataset_contract_snapshot is snapshot
+    assert snapshot.contract_values == frozen_values
+
+    if dataset_change == "mapping":
+        first_mapping["name"].setText("ROI1 changed")
+    else:
+        changed_source = tmp_path / "changed_source"
+        changed_source.mkdir()
+        window._guided_input_dir_edit.setText(str(changed_source))
+    assert window._guided_new_analysis_dataset_contract_snapshot is None
+
+
 def test_on_demand_preview_refuses_stale_confirmed_choice(
     window, monkeypatch
 ):

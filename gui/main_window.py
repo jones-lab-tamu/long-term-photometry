@@ -6293,6 +6293,32 @@ class MainWindow(QMainWindow):
             "populate_discovery_ui_after",
             duration_sec=time.monotonic() - populate_started,
         )
+        if resolved_format == "custom_tabular":
+            candidate = self._guided_new_analysis_dataset_contract_candidate()
+            if (
+                candidate.status == "inferred"
+                and not candidate.validation_issues
+            ):
+                now = self._guided_dataset_contract_now_utc()
+                self._guided_new_analysis_dataset_contract_snapshot = (
+                    dataclasses.replace(
+                        candidate,
+                        status="applied",
+                        explicitly_applied=True,
+                        stale_reasons=(),
+                        validation_issues=(),
+                        updated_at_utc=now,
+                        created_at_utc=candidate.created_at_utc or now,
+                        provenance={
+                            **dict(candidate.provenance or {}),
+                            "explicit_guided_apply": True,
+                            "no_runspec": True,
+                            "no_argv": True,
+                            "no_config_written": True,
+                            "no_files_written": True,
+                        },
+                    )
+                )
         self._append_log(
             "ROI selection ready: "
             f"{len(discovery.get('rois', []))} ROIs found "

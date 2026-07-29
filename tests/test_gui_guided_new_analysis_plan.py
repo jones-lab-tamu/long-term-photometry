@@ -1595,7 +1595,7 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     assert window._guided_run_btn.isEnabled() is True
 
 
-def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
+def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
     window, tmp_path, monkeypatch, qapp, no_real_modals
 ):
     import gui.main_window as main_window_module
@@ -1611,13 +1611,18 @@ def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
     output_base = tmp_path / "output"
     source_root.mkdir()
     output_base.mkdir()
-    rows = ["ElapsedSeconds,Green,Reference"]
+    rows = [
+        "ElapsedSeconds,ROI1_Green,ROI1_Reference,"
+        "ROI2_Green,ROI2_Reference"
+    ]
     rows.extend(
         f"{index / 20.0:.2f},{2.0 + index * 0.0001:.6f},"
-        f"{1.0 + index * 0.0001:.6f}"
+        f"{1.0 + index * 0.0001:.6f},"
+        f"{3.0 + index * 0.0002:.6f},"
+        f"{1.5 + index * 0.0001:.6f}"
         for index in range(12_001)
     )
-    for name in ("session_2.csv", "session_10.csv"):
+    for name in ("session_0001.csv", "session_0002.csv"):
         (source_root / name).write_text(
             "\n".join(rows) + "\n", encoding="utf-8"
         )
@@ -1634,10 +1639,21 @@ def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
     assert time_index >= 0
     window._guided_csv_time_column_combo.setCurrentIndex(time_index)
     mapping = window._guided_csv_mapping_rows[0]
-    mapping["name"].setText("CH1")
-    mapping["signal"].setCurrentIndex(mapping["signal"].findData("Green"))
+    mapping["name"].setText("ROI1")
+    mapping["signal"].setCurrentIndex(
+        mapping["signal"].findData("ROI1_Green")
+    )
     mapping["reference"].setCurrentIndex(
-        mapping["reference"].findData("Reference")
+        mapping["reference"].findData("ROI1_Reference")
+    )
+    window._guided_csv_add_roi_btn.click()
+    second_mapping = window._guided_csv_mapping_rows[1]
+    second_mapping["name"].setText("ROI2")
+    second_mapping["signal"].setCurrentIndex(
+        second_mapping["signal"].findData("ROI2_Green")
+    )
+    second_mapping["reference"].setCurrentIndex(
+        second_mapping["reference"].findData("ROI2_Reference")
     )
     window._guided_csv_order_confirm_cb.setChecked(True)
     acquisition_index = window._guided_acquisition_mode_combo.findData(
@@ -1661,8 +1677,11 @@ def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
         window._discovery_cache["resolved_format"].lower()
         == "custom_tabular"
     )
-    assert window._guided_roi_list.count() == 1
-    assert window._guided_roi_list.item(0).text() == "CH1"
+    assert window._guided_roi_list.count() == 2
+    assert [
+        window._guided_roi_list.item(index).text()
+        for index in range(window._guided_roi_list.count())
+    ] == ["ROI1", "ROI2"]
 
     correction_calls = []
     original_correction = (
@@ -1683,7 +1702,7 @@ def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
     )
     window._guided_preview_generate_btn.click()
     result = window._guided_preview_last_result
-    assert result["status"] in {"success", "partial"}
+    assert result["status"] == "success", result
     assert correction_calls
     correction_overrides = correction_calls[0][1]["config_overrides"]
     assert correction_overrides["custom_tabular_time_col"] == (
@@ -1694,28 +1713,136 @@ def test_guided_csv_natural_gui_path_reaches_shared_run_dispatch(
         correction_overrides["custom_tabular_roi_mapping_json"]
     ) == [
         {
-            "roi_id": "CH1",
-            "signal_column": "Green",
-            "reference_column": "Reference",
-        }
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Green",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Green",
+            "reference_column": "ROI2_Reference",
+        },
     ]
 
-    row = window._guided_local_preview_confirmation_rows["CH1"]
+    row = window._guided_local_preview_confirmation_rows["ROI1"]
     strategy_index = row["strategy_combo"].findData(
         "global_linear_regression"
     )
     row["strategy_combo"].setCurrentIndex(strategy_index)
     row["action_button"].click()
 
+    window._guided_preview_roi_combo.setCurrentIndex(
+        window._guided_preview_roi_combo.findData("ROI2")
+    )
+    window._guided_preview_generate_btn.click()
+    assert window._guided_preview_last_result["status"] == "success"
+    assert len(correction_calls) == 2
+    for _args, kwargs in correction_calls:
+        overrides = kwargs["config_overrides"]
+        assert overrides["custom_tabular_time_col"] == "ElapsedSeconds"
+        assert overrides["custom_tabular_time_unit"] == "seconds"
+        assert json.loads(
+            overrides["custom_tabular_roi_mapping_json"]
+        ) == [
+            {
+                "roi_id": "ROI1",
+                "signal_column": "ROI1_Green",
+                "reference_column": "ROI1_Reference",
+            },
+            {
+                "roi_id": "ROI2",
+                "signal_column": "ROI2_Green",
+                "reference_column": "ROI2_Reference",
+            },
+        ]
+    row = window._guided_local_preview_confirmation_rows["ROI2"]
+    strategy_index = row["strategy_combo"].findData(
+        "global_linear_regression"
+    )
+    row["strategy_combo"].setCurrentIndex(strategy_index)
+    row["action_button"].click()
+    assert set(window._guided_local_preview_evidence_by_roi) == {
+        "ROI1",
+        "ROI2",
+    }
+
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
     )
     window._guided_feature_event_apply_btn.click()
     window._refresh_guided_feature_detection_preview_panel()
-    window._guided_feature_preview_generate_btn.click()
-    assert "Preview generated successfully" in (
-        window._guided_feature_preview_status_label.text()
+    feature_calls = []
+    original_feature_compute = (
+        main_window_module.compute_guided_local_preview_dff_trace_in_memory
     )
+
+    def capture_feature_compute(source_path, **kwargs):
+        feature_calls.append((source_path, kwargs))
+        return original_feature_compute(source_path, **kwargs)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        capture_feature_compute,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda *_args, **_kwargs: pytest.fail(
+            "CSV preview must not use suffix/default inference"
+        ),
+    )
+    preview_matrix = (
+        ("ROI1", "session_0001"),
+        ("ROI1", "session_0002"),
+        ("ROI2", "session_0001"),
+        ("ROI2", "session_0002"),
+    )
+    preview_statuses = {}
+    for roi_id, session_id in preview_matrix:
+        window._guided_feature_preview_roi_combo.setCurrentText(roi_id)
+        segment_index = window._guided_feature_preview_segment_combo.findText(
+            session_id
+        )
+        assert segment_index >= 0
+        window._guided_feature_preview_segment_combo.setCurrentIndex(
+            segment_index
+        )
+        window._guided_feature_preview_generate_btn.click()
+        preview_statuses[(roi_id, session_id)] = (
+            window._guided_feature_preview_status_label.text()
+        )
+    assert all(
+        "Preview generated successfully" in preview_statuses[combination]
+        for combination in preview_matrix
+    ), preview_statuses
+    assert [
+        (kwargs["roi"], Path(source_path).name)
+        for source_path, kwargs in feature_calls
+    ] == [
+        ("ROI1", "session_0002.csv"),
+        ("ROI2", "session_0002.csv"),
+    ]
+    expected_mapping = [
+        {
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Green",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Green",
+            "reference_column": "ROI2_Reference",
+        },
+    ]
+    for _source_path, kwargs in feature_calls:
+        overrides = kwargs["config_overrides"]
+        assert overrides["custom_tabular_time_col"] == "ElapsedSeconds"
+        assert overrides["custom_tabular_time_unit"] == "seconds"
+        assert json.loads(
+            overrides["custom_tabular_roi_mapping_json"]
+        ) == expected_mapping
+        assert "time_sec" not in overrides.values()
 
     output_target = output_base / "guided_csv_run"
     window._guided_workflow_stepper.setCurrentRow(
