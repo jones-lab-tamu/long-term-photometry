@@ -1,10 +1,12 @@
-# GUI Quickstart with Bundled Synthetic Data
+# Guided Quickstart with Synthetic CSV Data
 
-New user? Start with this page and the bundled dataset in `examples/data/synthetic_photometry_basic/`.
+New user? Start with the app's generated Guided CSV demo.
 
-This tutorial is for a first-time user who wants to open the GUI, run a small example dataset, inspect outputs, and understand the major workflow choices.
+This tutorial is for a first-time user who wants to generate an example recording,
+complete Guided setup, run it, and inspect Results.
 
-The bundled dataset is synthetic RWD-style data. It is for workflow demonstration and software testing, not biological validation.
+The generated files are synthetic workflow-demonstration data, not real
+biological data and not biological validation.
 
 ## 1. Install and launch
 
@@ -22,65 +24,38 @@ If that entry point is unavailable in your environment, use:
 python gui/main.py
 ```
 
-## 2. Load the bundled dataset
+## 2. Generate and select the demo
 
-Use these paths in the GUI:
+1. Choose `Tools -> Generate Guided Demo Dataset`.
+2. Select a destination folder.
+3. Wait for `long_term_photometry_guided_demo` to be created.
+4. Open Guided Workflow and start a new analysis.
+5. On Select data, choose the generated recording folder.
+6. Follow its short `README.md` and the ordinary Guided prompts.
 
-1. Input Directory: `examples/data/synthetic_photometry_basic`
-2. Output Directory: `tutorial_outputs/synthetic_photometry_basic_run`
-3. Config: `examples/data/synthetic_photometry_basic/tutorial_config.yaml`
-4. Format: `rwd`
-5. Mode: `both`, if the GUI exposes tonic/phasic mode selection
-6. Sessions per hour: `2`, if that control is visible
+The demo contains 48 CSV files, one per session, at 20 Hz with two mapped ROIs.
+It does not require a custom config or any Full Control setup.
 
-The input folder already contains data. You do not need to run the synthetic generator for this quickstart.
+## 3. Complete ordinary Guided choices
 
-Fresh GUI launches use the repository lab default config, `config/qc_universal_config.yaml`,
-unless `Use custom config YAML` is enabled. The bundled `tutorial_config.yaml` is
-specific to this tutorial dataset and should be selected explicitly for this quickstart.
+Confirm filename order, select `ElapsedSeconds` in seconds, and map:
 
-If you want to make a fresh copy without using the command line, use
-`Tools -> Generate Synthetic Demo Dataset` and choose `Fast quickstart demo`.
-That curated GUI preset copies the same bundled dataset to a folder you select.
-The `Long-duration intermittent demo` preset generates a 48 h RWD-style
-intermittent dataset with 10 min sessions, 2 sessions/hour, 10 Hz sampling,
-and 2 ROIs.
+- ROI1: `ROI1_Signal` with `ROI1_Reference`
+- ROI2: `ROI2_Signal` with `ROI2_Reference`
 
-## 3. Keep default correction settings
-
-For the first run, use the config provided with the dataset.
-
-Key defaults in this tutorial config:
-- dynamic fit mode: `robust_global_event_reject`
-- nonnegative reference-coupling diagnostic: default package behavior is unconstrained unless changed in the GUI/config
-- bleach correction: not enabled in this tutorial config
-- event detection: conservative tutorial defaults using `mean_std`, `peak_threshold_k=2.5`, `peak_min_distance_sec=1.0`, `peak_min_prominence_k=2.0`, and `peak_min_width_sec=0.3`
-
-These event settings are intended to avoid obvious noise-floor over-detection in the bundled synthetic demo. They are not universally optimal for every sensor or dataset. Users can lower threshold or prominence settings for weaker events, but should apply the chosen settings consistently across comparable datasets and rely on saved configs/provenance.
-
-The nonnegative slope constraint is an advanced diagnostic option. It tests whether dynamic correction remains supported when UV/reference-to-signal coupling is required to be nonnegative. It is not a general correction improvement. If enabling it causes the fitted reference to collapse, flatten, or fall back, interpret that as evidence that positive reference coupling is unsupported for that chunk or dataset. Inspect correction-quality plots and diagnostics before using constrained results.
+Use intermittent acquisition, 2 sessions/hour, and 600-second sessions. The
+README also provides one fixed-daily-anchor example for illustrative Day Plots.
+Inspect correction and Feature Detection previews for both ROIs before running.
 
 ## 4. Validate before running
 
-Click the GUI validation control, usually labeled `Validate` or `Validate Only`.
-
-Expected result for the bundled tutorial dataset:
-
-```text
-VALIDATE-ONLY: OK
-```
+Use Guided `Check my setup`.
 
 Validation checks that the input files, selected format, timing structure, ROI/channel pairing, and configuration are internally consistent. A validation failure means the run should not be interpreted until the path, format, config, or acquisition settings are corrected.
 
 ## 5. Run the analysis
 
-Click `Run Pipeline`.
-
-On a typical laptop this small dataset should finish in under one minute. Outputs are written under:
-
-```text
-tutorial_outputs/synthetic_photometry_basic_run
-```
+Use the Guided Run step and select an output destination when prompted.
 
 The run should produce:
 - `status.json`
@@ -89,7 +64,7 @@ The run should produce:
 - `events.ndjson`
 - `_analysis/phasic_out/`
 - `_analysis/tonic_out/`
-- one output folder per detected ROI/channel; this bundled dataset produces `CH1/` and `CH2/`
+- one output folder for each generated ROI: `ROI1/` and `ROI2/`
 
 ## 6. Open Results
 
@@ -136,9 +111,10 @@ See `docs/batch_processing.md`.
 
 ## 10. Troubleshooting
 
-- App cannot find input files: confirm Input Directory is `examples/data/synthetic_photometry_basic`, not one of the individual session subfolders.
-- Wrong format selected: use `rwd` for this bundled quickstart dataset.
-- Column mapping wrong: for RWD, the tutorial config expects `TimeStamp`, `-410`, and `-470` channel naming.
+- App cannot find input files: select the generated
+  `long_term_photometry_guided_demo` folder, not its parent.
+- Wrong format selected: choose CSV files (one file per session), or use automatic detection.
+- Column mapping wrong: use the signal/reference names listed above and in the generated README.
 - Validation fails: re-check Input Directory, Config, Format, and Sessions per hour.
 - Only part of a continuous trace is visible: this is expected for long recordings; use continuous summary and overview outputs.
 - Correction fit looks wrong: inspect signal/reference and dynamic-fit plots before changing event thresholds.

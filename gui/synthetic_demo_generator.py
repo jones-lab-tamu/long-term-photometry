@@ -6,9 +6,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+
+import numpy as np
 
 
 DEMO_FORMAT = "rwd"
@@ -20,6 +24,23 @@ LONG_DEMO_TYPE = "Long-duration intermittent demo"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAST_SOURCE_DIR = REPO_ROOT / "examples" / "data" / "synthetic_photometry_basic"
 SYNTH_SCRIPT = REPO_ROOT / "tools" / "synth_photometry_dataset.py"
+
+GUIDED_DEMO_FOLDER_NAME = "long_term_photometry_guided_demo"
+GUIDED_DEMO_TYPE = "Synthetic Guided CSV demo"
+GUIDED_DEMO_FORMAT = "custom_tabular"
+GUIDED_DEMO_SESSION_COUNT = 48
+GUIDED_DEMO_SESSIONS_PER_HOUR = 2
+GUIDED_DEMO_SESSION_DURATION_SEC = 600.0
+GUIDED_DEMO_FS_HZ = 20
+GUIDED_DEMO_ROWS_PER_SESSION = 12000
+GUIDED_DEMO_SEED = 2026
+GUIDED_DEMO_HEADERS = (
+    "ElapsedSeconds",
+    "ROI1_Signal",
+    "ROI1_Reference",
+    "ROI2_Signal",
+    "ROI2_Reference",
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +55,237 @@ class DemoGenerationResult:
     message: str
     stdout_path: Path | None = None
     stderr_path: Path | None = None
+
+
+def guided_demo_readme_text() -> str:
+    return """# Synthetic Guided CSV Demo
+
+These CSV files are synthetic demonstration data, not real biological data.
+Select this containing folder in Guided Mode.
+
+- Source type: CSV files, one file per session
+- Acquisition mode: intermittent
+- Sessions per hour: 2
+- Session duration: 600 seconds
+- Time column: `ElapsedSeconds`
+- Time unit: seconds
+- Confirm the displayed natural filename order
+- ROI1 mapping: `ROI1_Signal` with `ROI1_Reference`
+- ROI2 mapping: `ROI2_Signal` with `ROI2_Reference`
+
+Recommended timeline display:
+- Fixed daily anchor
+- Start of plotted day: `07:00`
+- Clock time at recording start: `12:00:00`
+
+The signals contain deterministic baseline variation, mild bleaching, noise,
+and synthetic transient events for demonstrating the workflow.
+Do not draw biological conclusions from this dataset.
+"""
+
+
+def _guided_demo_session_arrays(
+    session_index: int,
+    *,
+    rows_per_session: int,
+    fs_hz: int,
+    session_count: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    time_sec = np.arange(rows_per_session, dtype=np.float64) / float(fs_hz)
+    recording_phase = 2.0 * np.pi * float(session_index) / float(session_count)
+    shared_noise = rng.normal(0.0, 0.075, rows_per_session)
+    shared_wave = 0.28 * np.sin(2.0 * np.pi * time_sec / 47.0 + recording_phase)
+    bleach = -0.85 * (1.0 - np.exp(-time_sec / 260.0))
+    slow_recording = 1.2 * np.sin(recording_phase)
+
+    columns = [time_sec]
+    for roi_index in range(2):
+        roi_phase = recording_phase + roi_index * 0.55
+        reference_noise = rng.normal(0.0, 0.055 + roi_index * 0.005, rows_per_session)
+        reference = (
+            100.0
+            + roi_index * 7.0
+            + slow_recording * (0.65 + roi_index * 0.1)
+            + bleach * (0.75 + roi_index * 0.08)
+            + shared_wave
+            + shared_noise
+            + reference_noise
+        )
+        signal = (
+            118.0
+            + roi_index * 8.5
+            + 1.08 * (reference - (100.0 + roi_index * 7.0))
+            + 0.45 * np.sin(2.0 * np.pi * time_sec / 91.0 + roi_phase)
+            + rng.normal(0.0, 0.08, rows_per_session)
+        )
+        event_centers = np.array([62.0, 174.0, 286.0, 407.0, 526.0])
+        event_centers += ((session_index * 7 + roi_index * 11) % 17) - 8
+        for event_number, center in enumerate(event_centers):
+            amplitude = (
+                3.2
+                + 0.35 * roi_index
+                + 0.25 * np.sin(recording_phase + event_number)
+            )
+            width_sec = 0.85 + 0.08 * ((event_number + roi_index) % 3)
+            signal += amplitude * np.exp(
+                -0.5 * ((time_sec - center) / width_sec) ** 2
+            )
+        columns.extend([signal, reference])
+    return np.column_stack(columns)
+
+
+def _validate_guided_demo_folder(
+    folder: Path,
+    *,
+    session_count: int,
+    rows_per_session: int,
+    fs_hz: int,
+) -> None:
+    csv_files = sorted(folder.glob("session_*.csv"))
+    expected_names = [
+        f"session_{index:04d}.csv" for index in range(1, session_count + 1)
+    ]
+    if [path.name for path in csv_files] != expected_names:
+        raise RuntimeError("Generated session file set is incomplete.")
+    expected_header = ",".join(GUIDED_DEMO_HEADERS)
+    expected_last = (rows_per_session - 1) / float(fs_hz)
+    for path in csv_files:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            header = handle.readline().rstrip("\r\n")
+            first = handle.readline().rstrip("\r\n")
+            row_count = 1
+            last = first
+            first_values = np.fromstring(first, sep=",")
+            previous_timestamp = (
+                float(first_values[0]) if first_values.size else float("nan")
+            )
+            values_are_finite = (
+                first_values.size == len(GUIDED_DEMO_HEADERS)
+                and np.isfinite(first_values).all()
+            )
+            timestamps_increase = True
+            for line in handle:
+                last = line.rstrip("\r\n")
+                row_count += 1
+                current_values = np.fromstring(last, sep=",")
+                if (
+                    current_values.size != len(GUIDED_DEMO_HEADERS)
+                    or not np.isfinite(current_values).all()
+                ):
+                    values_are_finite = False
+                    continue
+                current_timestamp = float(current_values[0])
+                if current_timestamp <= previous_timestamp:
+                    timestamps_increase = False
+                previous_timestamp = current_timestamp
+        if header != expected_header or row_count != rows_per_session:
+            raise RuntimeError(f"Generated file failed validation: {path.name}")
+        last_values = np.fromstring(last, sep=",")
+        if (
+            not values_are_finite
+            or not timestamps_increase
+            or first_values.size != len(GUIDED_DEMO_HEADERS)
+            or last_values.size != len(GUIDED_DEMO_HEADERS)
+            or not np.isfinite(last_values).all()
+            or first_values[0] != 0.0
+            or not np.isclose(last_values[0], expected_last)
+        ):
+            raise RuntimeError(f"Generated timestamps are invalid: {path.name}")
+    if not (folder / "README.md").is_file():
+        raise RuntimeError("Generated README is missing.")
+
+
+def generate_guided_csv_demo(
+    destination_parent: Path,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+    _session_count: int = GUIDED_DEMO_SESSION_COUNT,
+    _rows_per_session: int = GUIDED_DEMO_ROWS_PER_SESSION,
+) -> DemoGenerationResult:
+    """Generate the one fixed end-user Guided CSV demo transactionally."""
+    parent = Path(destination_parent).expanduser()
+    final_folder = parent / GUIDED_DEMO_FOLDER_NAME
+    temporary_folder: Path | None = None
+    started = time.perf_counter()
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        if final_folder.exists():
+            raise FileExistsError(
+                f"The demo folder already exists: {final_folder}. "
+                "Choose another destination or remove the existing folder."
+            )
+        temporary_folder = Path(
+            tempfile.mkdtemp(
+                prefix=f".{GUIDED_DEMO_FOLDER_NAME}.tmp-",
+                dir=str(parent),
+            )
+        )
+        rng = np.random.default_rng(GUIDED_DEMO_SEED)
+        for session_index in range(int(_session_count)):
+            values = _guided_demo_session_arrays(
+                session_index,
+                rows_per_session=int(_rows_per_session),
+                fs_hz=GUIDED_DEMO_FS_HZ,
+                session_count=int(_session_count),
+                rng=rng,
+            )
+            if not np.isfinite(values).all():
+                raise RuntimeError(
+                    f"Generated values are not finite for session {session_index + 1}."
+                )
+            np.savetxt(
+                temporary_folder / f"session_{session_index + 1:04d}.csv",
+                values,
+                delimiter=",",
+                header=",".join(GUIDED_DEMO_HEADERS),
+                comments="",
+                fmt="%.6f",
+            )
+            if progress is not None:
+                progress(session_index + 1, int(_session_count))
+        (temporary_folder / "README.md").write_text(
+            guided_demo_readme_text(), encoding="utf-8"
+        )
+        _validate_guided_demo_folder(
+            temporary_folder,
+            session_count=int(_session_count),
+            rows_per_session=int(_rows_per_session),
+            fs_hz=GUIDED_DEMO_FS_HZ,
+        )
+        os.replace(temporary_folder, final_folder)
+        temporary_folder = None
+        elapsed = time.perf_counter() - started
+        return DemoGenerationResult(
+            success=True,
+            demo_type=GUIDED_DEMO_TYPE,
+            input_dir=final_folder,
+            config_path=final_folder / "README.md",
+            format=GUIDED_DEMO_FORMAT,
+            sessions_per_hour=GUIDED_DEMO_SESSIONS_PER_HOUR,
+            mode=DEMO_MODE,
+            message=(
+                "Synthetic Guided CSV demo created successfully.\n"
+                f"Recording folder: {final_folder}\n"
+                'Use this folder in the Guided "Select data" step.\n'
+                f"Generation time: {elapsed:.1f} seconds."
+            ),
+        )
+    except BaseException as exc:
+        if temporary_folder is not None and temporary_folder.exists():
+            shutil.rmtree(temporary_folder, ignore_errors=True)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return DemoGenerationResult(
+            success=False,
+            demo_type=GUIDED_DEMO_TYPE,
+            input_dir=final_folder,
+            config_path=final_folder / "README.md",
+            format=GUIDED_DEMO_FORMAT,
+            sessions_per_hour=GUIDED_DEMO_SESSIONS_PER_HOUR,
+            mode=DEMO_MODE,
+            message=str(exc),
+        )
 
 
 def _destination_non_empty(destination: Path) -> bool:

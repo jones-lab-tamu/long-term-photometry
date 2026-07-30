@@ -88,9 +88,9 @@ Notes:
 
 Start here if you are new to the app:
 
-- GUI quickstart with bundled synthetic data: `docs/quickstart_gui_synthetic.md`
-- Bundled synthetic dataset: `examples/data/synthetic_photometry_basic/`
-- GUI demo generator: Tools -> Generate Synthetic Demo Dataset
+- Guided quickstart with generated synthetic CSV data: `docs/quickstart_gui_synthetic.md`
+- Developer/regression bundled RWD fixture: `examples/data/synthetic_photometry_basic/`
+- GUI demo generator: Tools -> Generate Guided Demo Dataset
 - Full synthetic generator CLI guide: `docs/synthetic_dataset_generator_cli.md`
 - Synthetic generator/demo dataset guide: `docs/synthetic_demo_datasets.md`
 - Supported input formats: `docs/input_formats.md`

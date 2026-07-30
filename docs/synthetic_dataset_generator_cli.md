@@ -6,13 +6,12 @@ Synthetic datasets in this repository are for workflow demonstration, software t
 
 `tools/synth_photometry_dataset.py` creates deterministic synthetic photometry-like datasets for tutorials, GUI smoke checks, and regression tests. It can emit RWD-style, NPM-style, and supported `custom_tabular` synthetic outputs depending on acquisition mode and format.
 
-## 2. GUI presets versus full CLI control
+## 2. Guided demo versus full CLI control
 
-Normal GUI users should start with `Tools -> Generate Synthetic Demo Dataset`. The GUI exposes only two curated presets:
-- Fast quickstart demo: copies the committed bundled dataset.
-- Long-duration intermittent demo: generates a fixed 48 h RWD-style dataset with 10 min sessions, 2 sessions/hour, 10 Hz sampling, and 2 ROIs.
-
-Developers and power users can use the CLI generator directly when they need parameter control.
+Normal GUI users should choose `Tools -> Generate Guided Demo Dataset` and use
+the generated CSV recording in Guided Mode. Developers and regression tests can
+use this CLI generator directly when they need RWD, NPM, continuous, or
+parameterized synthetic data.
 
 ## 3. Minimal small RWD demo command
 

@@ -1141,39 +1141,31 @@ def test_real_backend_reaches_initial_status_boundary_only(
 def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     window, tmp_path, monkeypatch, qapp
 ):
-    import numpy as np
     import yaml
 
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
     import photometry_pipeline.guided_startup_orchestration as orchestration
     import photometry_pipeline.guided_startup_transaction as startup_transaction
-    import photometry_pipeline.preview.correction_preview as correction_preview
     import tools.run_full_pipeline_deliverables as wrapper
     from gui.main_window import GUIDED_WORKFLOW_STEPS
-    from photometry_pipeline.core.types import Chunk
+    from gui.synthetic_demo_generator import generate_guided_csv_demo
 
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
 
-    source_root = tmp_path / "csv_sessions"
-    source_root.mkdir()
+    generated = generate_guided_csv_demo(
+        tmp_path / "generated_source",
+        _session_count=2,
+    )
+    assert generated.success, generated.message
+    source_root = generated.input_dir
     preview_output = tmp_path / "preview_output"
     preview_output.mkdir()
     output_parent = tmp_path / "output_parent"
     output_parent.mkdir()
     output_policy_target = output_parent / "guided_csv_output"
-    source_files = []
-    for index, name in enumerate(("session_2.csv", "session_10.csv")):
-        source = source_root / name
-        rows = ["Elapsed,Green,Iso"]
-        rows.extend(
-            f"{sample / 20.0:.2f},{2.0 + sample * 0.001:.6f},"
-            f"{1.0 + sample * 0.001:.6f}"
-            for sample in range(12000)
-        )
-        source.write_text("\n".join(rows) + "\n", encoding="utf-8")
-        source_files.append(source)
+    source_files = sorted(source_root.glob("session_*.csv"))
 
     window._guided_format_combo.setCurrentText("custom_tabular")
     window._guided_input_dir_edit.setText(str(source_root))
@@ -1187,12 +1179,18 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     )
     window._guided_fixed_daily_anchor_clock_edit.setText("07:00")
     window._guided_recording_start_clock_edit.setText("12:00:00")
-    window._guided_csv_time_column_combo.setCurrentText("Elapsed")
+    window._refresh_guided_csv_source_interpretation()
+    window._guided_csv_time_column_combo.setCurrentText("ElapsedSeconds")
     window._guided_csv_time_units_combo.setCurrentText("seconds")
     mapping_row = window._guided_csv_mapping_rows[0]
-    mapping_row["name"].setText("Fiber A")
-    mapping_row["signal"].setCurrentText("Green")
-    mapping_row["reference"].setCurrentText("Iso")
+    mapping_row["name"].setText("ROI1")
+    mapping_row["signal"].setCurrentText("ROI1_Signal")
+    mapping_row["reference"].setCurrentText("ROI1_Reference")
+    window._add_guided_csv_mapping_row()
+    mapping_row = window._guided_csv_mapping_rows[1]
+    mapping_row["name"].setText("ROI2")
+    mapping_row["signal"].setCurrentText("ROI2_Signal")
+    mapping_row["reference"].setCurrentText("ROI2_Reference")
     window._guided_csv_order_confirm_cb.setChecked(True)
     discovery = {
         "resolved_format": "custom_tabular",
@@ -1207,59 +1205,49 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
             }
             for index, source in enumerate(source_files)
         ],
-        "rois": [{"roi_id": "Fiber A"}],
+        "rois": [{"roi_id": "ROI1"}, {"roi_id": "ROI2"}],
     }
     window._discovery_cache = discovery
     window._populate_discovery_ui(discovery)
-    window._guided_sessions_per_hour_edit.setText("1")
+    window._guided_sessions_per_hour_edit.setText("2")
     window._guided_session_duration_edit.setText("600")
 
-    time_sec = np.arange(60, dtype=float) / 20.0
-    signal = 2.0 + np.arange(60, dtype=float) * 0.001
-    reference = 1.0 + np.arange(60, dtype=float) * 0.001
-
-    def load_preview(path, input_format, config, chunk_id):
-        assert input_format == "custom_tabular"
-        assert config.target_fs_hz == 20.0
-        return Chunk(
-            chunk_id=chunk_id,
-            source_file=path,
-            format=input_format,
-            time_sec=time_sec,
-            uv_raw=reference[:, None],
-            sig_raw=signal[:, None],
-            fs_hz=20.0,
-            channel_names=["Fiber A"],
-            metadata={},
-        )
-
-    monkeypatch.setattr(correction_preview, "load_chunk", load_preview)
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     )
-    window._guided_preview_roi_combo.setCurrentIndex(
-        window._guided_preview_roi_combo.findData("Fiber A")
-    )
-    window._guided_preview_generate_btn.click()
-    assert window._guided_preview_last_result["status"] in {
-        "success",
-        "partial",
-    }
-    window._guided_confirm_roi_combo.setCurrentIndex(
-        window._guided_confirm_roi_combo.findData("Fiber A")
-    )
-    window._guided_confirm_chunk_combo.setCurrentIndex(0)
-    strategy_index = window._guided_confirm_strategy_combo.findText(
-        "Global Linear Regression"
-    )
-    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
-    window._guided_confirm_ack_cb.setChecked(True)
-    window._guided_confirm_mark_btn.click()
+    for roi_id in ("ROI1", "ROI2"):
+        window._guided_preview_roi_combo.setCurrentIndex(
+            window._guided_preview_roi_combo.findData(roi_id)
+        )
+        window._guided_preview_generate_btn.click()
+        assert window._guided_preview_last_result["status"] in {
+            "success",
+            "partial",
+        }
+        window._guided_confirm_roi_combo.setCurrentIndex(
+            window._guided_confirm_roi_combo.findData(roi_id)
+        )
+        window._guided_confirm_chunk_combo.setCurrentIndex(0)
+        strategy_index = window._guided_confirm_strategy_combo.findText(
+            "Global Linear Regression"
+        )
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+        window._guided_confirm_ack_cb.setChecked(True)
+        window._guided_confirm_mark_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
     )
     window._guided_feature_event_apply_btn.click()
+    for roi_id in ("ROI1", "ROI2"):
+        window._guided_feature_preview_roi_combo.setCurrentText(roi_id)
+        window._guided_feature_preview_generate_btn.click()
+        preview = window._guided_feature_preview_last_result
+        assert preview is not None
+        assert (
+            len(preview.positive_peak_indices)
+            + len(preview.negative_peak_indices)
+        ) > 0
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
     )
@@ -1281,7 +1269,7 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     assert plan.dataset_contract_snapshot.contract_values[
         "custom_tabular_ordered_source_files_json"
     ] == json.dumps(
-        ["session_2.csv", "session_10.csv"], separators=(",", ":")
+        ["session_0001.csv", "session_0002.csv"], separators=(",", ":")
     )
     window._guided_review_go_to_run_btn.click()
     assert window._guided_new_analysis_output_policy_status == "applied", (
@@ -1318,16 +1306,21 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     }
     assert config_values["target_fs_hz"] == 20.0
     assert config_values["chunk_duration_sec"] == 600.0
-    assert config_values["custom_tabular_time_col"] == "Elapsed"
+    assert config_values["custom_tabular_time_col"] == "ElapsedSeconds"
     assert config_values["custom_tabular_time_unit"] == "seconds"
     assert json.loads(
         config_values["custom_tabular_roi_mapping_json"]
     ) == [
         {
-            "roi_id": "Fiber A",
-            "signal_column": "Green",
-            "reference_column": "Iso",
-        }
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Signal",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Signal",
+            "reference_column": "ROI2_Reference",
+        },
     ]
     pure_plan = startup_transaction.plan_guided_startup_transaction(request)
     wrapper_format = pure_plan.command_plan.argv[
@@ -1416,16 +1409,21 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     )
     assert effective_config["target_fs_hz"] == 20.0
     assert effective_config["chunk_duration_sec"] == 600.0
-    assert effective_config["custom_tabular_time_col"] == "Elapsed"
+    assert effective_config["custom_tabular_time_col"] == "ElapsedSeconds"
     assert effective_config["custom_tabular_time_unit"] == "seconds"
     assert json.loads(
         effective_config["custom_tabular_roi_mapping_json"]
     ) == [
         {
-            "roi_id": "Fiber A",
-            "signal_column": "Green",
-            "reference_column": "Iso",
-        }
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Signal",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Signal",
+            "reference_column": "ROI2_Reference",
+        },
     ]
     normalized = json.loads(
         (
@@ -1436,7 +1434,7 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     assert [
         Path(session["canonical_source_reference"]).name
         for session in normalized["sessions"]
-    ] == ["session_2.csv", "session_10.csv"]
+    ] == ["session_0001.csv", "session_0002.csv"]
     assert normalized["sampling"]["target_fs_hz"] == 20.0
     assert normalized["timeline_anchor_mode"] == "fixed_daily_anchor"
 
