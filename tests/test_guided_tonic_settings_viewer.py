@@ -73,6 +73,7 @@ def _build_run(
     include_tonic: bool,
     tonic_output_mode: str = "preserve_raw_session_shape",
     tonic_timeline_mode: str = "real_elapsed_time",
+    timeline_anchor_mode: str | None = None,
 ) -> Path:
     run_id = "guided-run-tonic-viewer"
     run_mode = {"phasic_analysis": include_phasic, "tonic_analysis": include_tonic}
@@ -109,15 +110,17 @@ def _build_run(
             },
         },
     )
-    _write_json(
-        root / "run_report.json",
-        {
-            "completion_contract": {
-                "contract_version": "run_completion.v1",
-                "run_id": run_id,
-            }
-        },
-    )
+    top_report = {
+        "completion_contract": {
+            "contract_version": "run_completion.v1",
+            "run_id": run_id,
+        }
+    }
+    if timeline_anchor_mode is not None:
+        top_report["run_context"] = {
+            "timeline": {"timeline_mode": timeline_anchor_mode}
+        }
+    _write_json(root / "run_report.json", top_report)
     summary = root / "CH1" / "summary"
     summary.mkdir(parents=True, exist_ok=True)
     pixmap = QPixmap(4, 4)
@@ -147,6 +150,33 @@ def test_tonic_only_run_with_no_feature_settings_shows_tonic_summary(qapp, tmp_p
         assert viewer._tonic_settings_summary_label.isHidden() is False
         assert viewer._tonic_settings_summary_label.text() == (
             "Tonic timeline: Gap-free elapsed time\n"
+            "Session shape: Within-session bleaching trend removed"
+        )
+    finally:
+        viewer.close()
+        viewer.deleteLater()
+
+
+def test_results_uses_stored_fixed_anchor_instead_of_tonic_gap_setting(
+    qapp, tmp_path
+):
+    run = _build_run(
+        tmp_path / "run",
+        include_phasic=False,
+        include_tonic=True,
+        tonic_output_mode="flatten_session_bleach_preserve_session_baseline",
+        tonic_timeline_mode="gap_free_elapsed_time",
+        timeline_anchor_mode="fixed_daily_anchor",
+    )
+    overview = load_completed_review_overview(run)
+    assert overview["tonic_settings"]["timeline_anchor_mode"] == (
+        "fixed_daily_anchor"
+    )
+    viewer = RunReportViewer()
+    try:
+        assert viewer.load_report(str(run), review_overview=overview) is True
+        assert viewer._tonic_settings_summary_label.text() == (
+            "Tonic timeline: Fixed daily anchor\n"
             "Session shape: Within-session bleaching trend removed"
         )
     finally:

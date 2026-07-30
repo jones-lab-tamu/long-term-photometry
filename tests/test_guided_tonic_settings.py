@@ -575,5 +575,30 @@ def test_format_tonic_settings_summary_non_default():
     )
 
 
+def test_format_tonic_settings_summary_prefers_consumed_fixed_anchor():
+    text = format_tonic_settings_summary(
+        {
+            "tonic_output_mode": "flatten_session_bleach_preserve_session_baseline",
+            "tonic_timeline_mode": "gap_free_elapsed_time",
+            "timeline_anchor_mode": "fixed_daily_anchor",
+        }
+    )
+    assert text == (
+        "Tonic timeline: Fixed daily anchor\n"
+        "Session shape: Within-session bleaching trend removed"
+    )
+
+
+def test_format_tonic_settings_summary_reports_consumed_civil_clock():
+    text = format_tonic_settings_summary(
+        {
+            "tonic_output_mode": "preserve_raw_session_shape",
+            "tonic_timeline_mode": "real_elapsed_time",
+            "timeline_anchor_mode": "civil",
+        }
+    )
+    assert text == "Tonic timeline: Civil clock\nSession shape: Preserved"
+
+
 def test_format_tonic_settings_summary_empty_when_no_evidence():
     assert format_tonic_settings_summary({}) == ""

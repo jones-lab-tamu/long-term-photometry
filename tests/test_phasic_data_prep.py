@@ -531,6 +531,41 @@ class TestComputeDayLayout:
         assert by_cid[95].hour_rank == 1
         assert by_cid[95].elapsed_from_start_sec == pytest.approx(95 * 1800.0)
 
+    @pytest.mark.parametrize(
+        ("recording_start_clock", "expected_hour", "expected_offset"),
+        [
+            ("07:00", 0, 0.0),
+            ("12:00", 5, 0.0),
+            ("03:00", 20, 0.0),
+        ],
+    )
+    def test_filename_order_fixed_anchor_uses_existing_clock_boundary_convention(
+        self,
+        synth_traces_dir,
+        recording_start_clock,
+        expected_hour,
+        expected_offset,
+    ):
+        entries = discover_chunks(synth_traces_dir)[:2]
+        feature_map = {
+            (cid, "Region0"): {"source_file": f"session_{cid + 1:04d}.csv"}
+            for cid, _path in entries
+        }
+        layout = compute_day_layout(
+            entries,
+            feature_map,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+            recording_start_clock=recording_start_clock,
+        )
+        first = layout.chunks[0]
+        assert first.day_idx == 0
+        assert first.hour_idx == expected_hour
+        assert first.within_hour_offset_sec == expected_offset
+        assert layout.chunks[1].elapsed_from_start_sec == pytest.approx(1800.0)
+
     def test_slot_placement_uses_clock_offset_not_occurrence_rank(self, synth_traces_dir):
         """
         Two sessions in the same hour and same half-hour bin should map to the same slot.

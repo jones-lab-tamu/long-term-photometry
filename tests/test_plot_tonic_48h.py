@@ -122,6 +122,25 @@ class TestPlotTonic48h(unittest.TestCase):
         self.assertEqual(set(df['display_downsampled'].astype(bool).unique()), {False})
         self.assertTrue(df['display_downsample_rule'].astype(str).str.contains('none', case=False).all())
 
+    def test_fixed_anchor_display_series_starts_at_confirmed_clock_offset(self):
+        out_path = os.path.join(
+            self.test_dir.name, 'custom', 'anchored_tonic_overview.png'
+        )
+        result = self._run_script([
+            '--out', out_path,
+            '--export-display-series-csv',
+            '--timeline-anchor-mode', 'fixed_daily_anchor',
+            '--fixed-daily-anchor-clock', '07:00',
+            '--recording-start-clock', '12:00:00',
+        ])
+        self.assertEqual(
+            result.returncode, 0, f"Script failed:\n{result.stderr}\n{result.stdout}"
+        )
+        display = pd.read_csv(
+            os.path.splitext(out_path)[0] + '_display_series.csv'
+        )
+        self.assertAlmostEqual(float(display['x'].min()), 5.0, places=9)
+
     def test_tonic_overview_display_decimation_helper(self):
         from tools.plot_tonic_48h import (
             TONIC_OVERVIEW_TARGET_DISPLAY_POINTS,

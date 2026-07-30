@@ -1183,8 +1183,10 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     )
     window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_index)
     window._guided_timeline_mode_combo.setCurrentIndex(
-        window._guided_timeline_mode_combo.findData("elapsed")
+        window._guided_timeline_mode_combo.findData("fixed_daily_anchor")
     )
+    window._guided_fixed_daily_anchor_clock_edit.setText("07:00")
+    window._guided_recording_start_clock_edit.setText("12:00:00")
     window._guided_csv_time_column_combo.setCurrentText("Elapsed")
     window._guided_csv_time_units_combo.setCurrentText("seconds")
     mapping_row = window._guided_csv_mapping_rows[0]
@@ -1273,6 +1275,9 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     assert plan.output_policy_status == "applied"
     assert plan.dataset_contract_snapshot.current_applied is True
     assert plan.dataset_contract_snapshot.input_format == "custom_tabular"
+    assert plan.execution_intent.timeline_anchor_mode == "fixed_daily_anchor"
+    assert plan.execution_intent.fixed_daily_anchor_clock == "07:00"
+    assert plan.execution_intent.recording_start_clock == "12:00:00"
     assert plan.dataset_contract_snapshot.contract_values[
         "custom_tabular_ordered_source_files_json"
     ] == json.dumps(
@@ -1329,6 +1334,15 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
         pure_plan.command_plan.argv.index("--format") + 1
     ]
     assert wrapper_format == "custom_tabular"
+    assert pure_plan.command_plan.argv[
+        pure_plan.command_plan.argv.index("--timeline-anchor-mode") + 1
+    ] == "fixed_daily_anchor"
+    assert pure_plan.command_plan.argv[
+        pure_plan.command_plan.argv.index("--fixed-daily-anchor-clock") + 1
+    ] == "07:00"
+    assert pure_plan.command_plan.argv[
+        pure_plan.command_plan.argv.index("--guided-recording-start-clock") + 1
+    ] == "12:00:00"
 
     parsed_formats = []
     original_validation = wrapper.validate_guided_preallocated_mode_args
@@ -1424,6 +1438,7 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
         for session in normalized["sessions"]
     ] == ["session_2.csv", "session_10.csv"]
     assert normalized["sampling"]["target_fs_hz"] == 20.0
+    assert normalized["timeline_anchor_mode"] == "fixed_daily_anchor"
 
 
 def test_close_event_refused_while_guided_run_active(window, monkeypatch):

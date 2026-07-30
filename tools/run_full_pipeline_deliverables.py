@@ -80,6 +80,7 @@ try:
         load_guided_candidate_manifest,
         verify_guided_candidate_manifest_consumption,
     )
+    from photometry_pipeline.guided_timeline import map_elapsed_coordinate
     from photometry_pipeline.guided_new_analysis_plan import (
         FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     )
@@ -3274,6 +3275,18 @@ def main():
                                  '--out', out_tonic,
                                  '--tonic-output-mode', effective_tonic_output_mode,
                                   '--tonic-timeline-mode', effective_tonic_timeline_mode]
+                if args.guided_recording_start_clock:
+                    cmd_tonic_roi.extend(
+                        ['--timeline-anchor-mode', str(args.timeline_anchor_mode)]
+                    )
+                if args.guided_recording_start_clock and args.fixed_daily_anchor_clock:
+                    cmd_tonic_roi.extend(
+                        ['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)]
+                    )
+                if args.guided_recording_start_clock:
+                    cmd_tonic_roi.extend(
+                        ['--recording-start-clock', str(args.guided_recording_start_clock)]
+                    )
                 if effective_export_display_series_csv:
                     cmd_tonic_roi.append('--export-display-series-csv')
                     cmd_tonic_roi.extend(['--source-run-profile', str(args.run_type)])
@@ -3318,6 +3331,18 @@ def main():
                 session_statuses = []
                 session_sources = []
                 missing_tonic_sessions = []
+                tonic_display_origin_sec = 0.0
+                if args.guided_recording_start_clock:
+                    origin_day, origin_within_day_sec = map_elapsed_coordinate(
+                        0.0,
+                        timeline_anchor_mode=args.timeline_anchor_mode,
+                        fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+                        recording_start_clock=args.guided_recording_start_clock,
+                    )
+                    tonic_display_origin_sec = (
+                        float(origin_day) * 86400.0
+                        + float(origin_within_day_sec)
+                    )
                 use_streaming_csv = (
                     HAS_PYARROW_CSV
                     and effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED
@@ -3441,7 +3466,9 @@ def main():
                                 if csv_file_handle is None:
                                     csv_file_handle = pa.OSFile(tonic_csv_path, 'wb')
                                 table = pa.table({
-                                    'time_hours': pa.array(t_abs / 3600.0),
+                                    'time_hours': pa.array(
+                                        (t_abs + tonic_display_origin_sec) / 3600.0
+                                    ),
                                     'tonic_df': pa.array(df_arr)
                                 })
                                 write_opts = arrow_write_header if chunks_processed == 1 else arrow_write_no_header
@@ -3479,6 +3506,7 @@ def main():
                             elapsed_start_sec=float(np.nanmin(full_t_real)),
                             elapsed_end_sec=float(np.nanmax(full_t_real)),
                         )
+                    full_t_mode = full_t_mode + tonic_display_origin_sec
                     full_tonic = pd.DataFrame(
                         {
                             'time_hours': full_t_mode / 3600.0,
@@ -3502,10 +3530,15 @@ def main():
                         for item in missing_tonic_sessions:
                             start = item.get("expected_start_time")
                             if base_start is not None and start is not None:
-                                marker_time = (start - base_start).total_seconds() / 3600.0
+                                marker_time = (
+                                    (start - base_start).total_seconds()
+                                    + tonic_display_origin_sec
+                                ) / 3600.0
                             else:
-                                marker_time = float(item.get("session_index", 0)) * (
-                                    1.0 / float(resolved_sessions_per_hour or 1.0)
+                                marker_time = (
+                                    float(item.get("session_index", 0))
+                                    * (1.0 / float(resolved_sessions_per_hour or 1.0))
+                                    + tonic_display_origin_sec / 3600.0
                                 )
                             marker_rows.append(
                                 {

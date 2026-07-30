@@ -54,6 +54,10 @@ from photometry_pipeline.completed_run_review import (
     resolve_analysis_plot_context,
     resolve_persisted_cache_strategy,
 )
+from photometry_pipeline.guided_timeline import (
+    map_elapsed_coordinate,
+    timeline_mode_label,
+)
 
 
 TONIC_OVERVIEW_TARGET_DISPLAY_POINTS = 30000
@@ -89,6 +93,22 @@ def parse_args():
             "Supported: real_elapsed_time, gap_free_elapsed_time "
             "(legacy alias compressed_recording_time also accepted)"
         ),
+    )
+    parser.add_argument(
+        '--timeline-anchor-mode',
+        choices=['civil', 'elapsed', 'fixed_daily_anchor'],
+        default='elapsed',
+        help="Accepted Guided timeline placement used for the displayed x axis.",
+    )
+    parser.add_argument(
+        '--fixed-daily-anchor-clock',
+        default=None,
+        help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS).",
+    )
+    parser.add_argument(
+        '--recording-start-clock',
+        default=None,
+        help="Effective clock time at recording start (HH:MM or HH:MM:SS).",
     )
     parser.add_argument(
         '--export-display-series-csv',
@@ -701,6 +721,24 @@ def main():
     timeline_mode = normalize_tonic_timeline_mode(args.tonic_timeline_mode)
     timeline_mode_name = tonic_timeline_mode_label(timeline_mode)
     timeline_axis = tonic_timeline_axis_label(timeline_mode)
+    origin_day, origin_within_day_sec = map_elapsed_coordinate(
+        0.0,
+        timeline_anchor_mode=args.timeline_anchor_mode,
+        fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+        recording_start_clock=args.recording_start_clock,
+    )
+    display_origin_sec = (
+        float(origin_day) * 86400.0 + float(origin_within_day_sec)
+    )
+    if args.timeline_anchor_mode != 'elapsed':
+        timeline_mode_name = timeline_mode_label(args.timeline_anchor_mode)
+        if args.timeline_anchor_mode == 'fixed_daily_anchor':
+            timeline_axis = (
+                "Anchored time (hours from daily anchor "
+                f"{args.fixed_daily_anchor_clock})"
+            )
+        else:
+            timeline_axis = "Civil-clock time (hours from day-0 midnight)"
 
     cache_path = os.path.join(args.analysis_out, 'tonic_trace_cache.h5')
     if not os.path.isfile(cache_path):
@@ -728,6 +766,7 @@ def main():
         continuous_time, sig_raw, uv_raw, deltaf_val, missing_sessions = assemble_arrays(
             cache, roi, args, return_missing_metadata=True
         )
+        continuous_time = np.asarray(continuous_time, dtype=float) + display_origin_sec
         context = resolve_analysis_plot_context(args.analysis_out)
         if "chunk_ids" not in cache["meta"]:
             raise RuntimeError("Authoritative tonic cache chunk index is unreadable.")
@@ -770,6 +809,11 @@ def main():
         missing_sessions,
         sessions_per_hour=args.sessions_per_hour,
     )
+    if display_origin_sec:
+        for item in missing_intervals:
+            item["x_hours"] = (
+                float(item["x_hours"]) + display_origin_sec / 3600.0
+            )
     
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=cache_read elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 

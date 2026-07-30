@@ -312,6 +312,65 @@ def test_plot_phasic_time_series_summary_fixed_daily_anchor_mode(tmp_path):
     assert (df_rate["time_axis_semantics"] == "Anchored time (hours from daily anchor 07:00:00)").all()
 
 
+def test_plot_phasic_filename_order_uses_confirmed_fixed_anchor_start(tmp_path):
+    analysis_out = tmp_path / "analysis_out"
+    feat_dir = analysis_out / "features"
+    feat_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "chunk_id": index,
+                "roi": "ROI1",
+                "peak_count": index + 1,
+                "auc": 0.1 + index,
+                "source_file": f"session_{index + 1:04d}.csv",
+            }
+            for index in range(2)
+        ]
+    ).to_csv(feat_dir / "features.csv", index=False)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    script_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "tools",
+        "plot_phasic_time_series_summary.py",
+    )
+    result = subprocess.run(
+        [
+            "python",
+            os.path.abspath(script_path),
+            "--analysis-out",
+            str(analysis_out),
+            "--sessions-per-hour",
+            "2",
+            "--timeline-anchor-mode",
+            "fixed_daily_anchor",
+            "--fixed-daily-anchor-clock",
+            "07:00",
+            "--recording-start-clock",
+            "12:00:00",
+            "--out-rate-png",
+            str(out_dir / "rate.png"),
+            "--out-auc-png",
+            str(out_dir / "auc.png"),
+            "--out-rate-csv",
+            str(out_dir / "rate.csv"),
+            "--out-auc-csv",
+            str(out_dir / "auc.csv"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"{result.stderr}\n\n{result.stdout}"
+    assert "Chunk ID fallback" in result.stdout
+    rate = pd.read_csv(out_dir / "rate.csv").sort_values("session_index")
+    assert rate["time_hours"].tolist() == pytest.approx([5.0, 5.5])
+    assert rate["hour"].tolist() == [5, 5]
+    assert rate["session_in_hour"].tolist() == [0, 1]
+
+
 def test_plot_phasic_time_series_summary_elapsed_mode_uses_elapsed_hours(tmp_path):
     analysis_out = tmp_path / "analysis_out"
     feat_dir = analysis_out / "features"

@@ -706,11 +706,31 @@ def compute_day_layout(
         chunks_per_day = 24 * sph
         for r in raw_rows:
             slot = int(r['chunk_id']) - int(base_id)
-            r['day_idx'] = slot // chunks_per_day
-            r['hour_idx'] = (slot // sph) % 24
-            r['hour_rank'] = slot % sph
-            r['within_hour_offset_sec'] = float(r['hour_rank']) * (3600.0 / float(sph))
-            r['elapsed_from_start_sec'] = float(slot * (3600.0 / float(sph)))
+            elapsed_sec = float(slot * (3600.0 / float(sph)))
+            r['elapsed_from_start_sec'] = elapsed_sec
+            if recording_start_clock is not None:
+                from photometry_pipeline.guided_timeline import map_elapsed_coordinate
+
+                day_idx, within_day_sec = map_elapsed_coordinate(
+                    elapsed_sec,
+                    timeline_anchor_mode=anchor_mode,
+                    fixed_daily_anchor_clock=anchor_clock_canonical,
+                    recording_start_clock=recording_start_clock,
+                )
+                r['day_idx'] = int(day_idx)
+                r['hour_idx'] = int(within_day_sec // 3600.0)
+                r['within_hour_offset_sec'] = float(within_day_sec % 3600.0)
+                r['hour_rank'] = min(
+                    sph - 1,
+                    int(r['within_hour_offset_sec'] // (3600.0 / float(sph))),
+                )
+            else:
+                r['day_idx'] = slot // chunks_per_day
+                r['hour_idx'] = (slot // sph) % 24
+                r['hour_rank'] = slot % sph
+                r['within_hour_offset_sec'] = (
+                    float(r['hour_rank']) * (3600.0 / float(sph))
+                )
 
     sph = int(max(1, sph))
 

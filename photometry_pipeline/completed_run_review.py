@@ -1205,6 +1205,10 @@ TONIC_TIMELINE_MODE_SUMMARY_LABELS = {
     "real_elapsed_time": "Real elapsed time",
     "gap_free_elapsed_time": "Gap-free elapsed time",
 }
+GUIDED_TIMELINE_MODE_SUMMARY_LABELS = {
+    "fixed_daily_anchor": "Fixed daily anchor",
+    "civil": "Civil clock",
+}
 
 
 def format_tonic_settings_summary(tonic_settings: Mapping[str, str]) -> str:
@@ -1217,8 +1221,10 @@ def format_tonic_settings_summary(tonic_settings: Mapping[str, str]) -> str:
     )
     if not output_mode or not timeline_mode:
         return ""
-    timeline_label = TONIC_TIMELINE_MODE_SUMMARY_LABELS.get(
-        timeline_mode, str(timeline_mode)
+    anchor_mode = tonic_settings.get("timeline_anchor_mode")
+    timeline_label = GUIDED_TIMELINE_MODE_SUMMARY_LABELS.get(
+        anchor_mode,
+        TONIC_TIMELINE_MODE_SUMMARY_LABELS.get(timeline_mode, str(timeline_mode)),
     )
     shape_label = TONIC_OUTPUT_MODE_SUMMARY_LABELS.get(output_mode, str(output_mode))
     return f"Tonic timeline: {timeline_label}\nSession shape: {shape_label}"
@@ -1493,6 +1499,16 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
                     "tonic_output_mode": output_mode,
                     "tonic_timeline_mode": timeline_mode,
                 }
+                run_context = top_report.get("run_context", {})
+                timeline = (
+                    run_context.get("timeline", {})
+                    if isinstance(run_context, dict)
+                    else {}
+                )
+                if isinstance(timeline, dict):
+                    anchor_mode = timeline.get("timeline_mode")
+                    if isinstance(anchor_mode, str):
+                        tonic_settings["timeline_anchor_mode"] = anchor_mode
 
     overview = {
         "run_dir": str(resolved),
