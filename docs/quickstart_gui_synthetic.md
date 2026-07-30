@@ -33,7 +33,8 @@ python gui/main.py
 5. On Select data, choose the generated recording folder.
 6. Follow its short `README.md` and the ordinary Guided prompts.
 
-The demo contains 48 CSV files, one per session, at 20 Hz with two mapped ROIs.
+The demo contains 96 CSV files, one per session, spanning 48 scheduled hours at
+20 Hz with two mapped ROIs.
 It does not require a custom config or any Full Control setup.
 
 ## 3. Complete ordinary Guided choices

@@ -25,6 +25,7 @@ from gui.synthetic_demo_generator import (
     GUIDED_DEMO_HEADERS,
     GUIDED_DEMO_ROWS_PER_SESSION,
     GUIDED_DEMO_SESSION_COUNT,
+    GUIDED_DEMO_SESSIONS_PER_DAY,
     build_long_duration_demo_command,
     copy_fast_quickstart_demo,
     generate_guided_csv_demo,
@@ -274,25 +275,62 @@ def test_guided_demo_event_counts_vary_across_sessions_and_between_rois(
     assert abs(ratio - 1.0) > 0.02
 
 
-def test_guided_demo_activity_changes_across_the_scheduled_recording(
-    guided_demo_sessions,
-):
-    quarter = len(guided_demo_sessions) // 4
+def _session_event_counts(sessions, signal_column: int) -> np.ndarray:
+    return np.array(
+        [_transient_peak_indices(session[:, signal_column]).size for session in sessions]
+    )
+
+
+def test_guided_demo_activity_changes_within_each_scheduled_day(guided_demo_sessions):
+    quarter = GUIDED_DEMO_SESSIONS_PER_DAY // 4
     for signal_column, _ in _ROI_COLUMNS:
-        counts = np.array(
-            [
-                _transient_peak_indices(session[:, signal_column]).size
-                for session in guided_demo_sessions
+        counts = _session_event_counts(guided_demo_sessions, signal_column)
+        for day_start in range(0, counts.size, GUIDED_DEMO_SESSIONS_PER_DAY):
+            day = counts[day_start : day_start + GUIDED_DEMO_SESSIONS_PER_DAY]
+            quarters = [
+                float(day[index : index + quarter].mean())
+                for index in range(0, day.size, quarter)
             ]
-        )
-        quarters = [
-            float(counts[index : index + quarter].mean())
-            for index in range(0, len(counts), quarter)
-        ]
-        # Visibly non-flat across the scheduled 24 hours...
-        assert max(quarters) > 1.4 * min(quarters)
+            # Visibly non-flat within every scheduled day...
+            assert max(quarters) > 1.4 * min(quarters), day_start
         # ...but not a clean noiseless ramp between neighbouring sessions.
         assert float(np.std(np.diff(counts))) > 3.0
+
+
+def test_guided_demo_spans_two_days_without_repeating_the_first(guided_demo_sessions):
+    assert len(guided_demo_sessions) == 2 * GUIDED_DEMO_SESSIONS_PER_DAY
+    first_day = guided_demo_sessions[:GUIDED_DEMO_SESSIONS_PER_DAY]
+    second_day = guided_demo_sessions[GUIDED_DEMO_SESSIONS_PER_DAY:]
+    # Day 2 is newly generated data, not a copy of day 1.
+    for day_one, day_two in zip(first_day, second_day):
+        assert not np.array_equal(day_one, day_two)
+        assert not np.allclose(day_one[:, _ROI1_SIGNAL], day_two[:, _ROI1_SIGNAL])
+    for signal_column, _ in _ROI_COLUMNS:
+        counts_one = _session_event_counts(first_day, signal_column)
+        counts_two = _session_event_counts(second_day, signal_column)
+        assert not np.array_equal(counts_one, counts_two)
+
+
+def test_guided_demo_daily_activity_pattern_recurs_on_the_second_day(
+    guided_demo_sessions,
+):
+    half_day = GUIDED_DEMO_SESSIONS_PER_DAY // 2
+    for signal_column, _ in _ROI_COLUMNS:
+        counts = _session_event_counts(guided_demo_sessions, signal_column)
+        days = [
+            counts[start : start + GUIDED_DEMO_SESSIONS_PER_DAY]
+            for start in range(0, counts.size, GUIDED_DEMO_SESSIONS_PER_DAY)
+        ]
+        assert len(days) == 2
+        # The same nominal daily phase is busier on both days.
+        for day in days:
+            assert day[:half_day].mean() > day[half_day:].mean()
+        # Corresponding halves are comparable across days without matching.
+        for index in (0, half_day):
+            first = days[0][index : index + half_day].mean()
+            second = days[1][index : index + half_day].mean()
+            assert 0.5 < first / second < 2.0
+            assert first != second
 
 
 def test_guided_demo_session_baselines_vary_modestly(guided_demo_sessions):
@@ -448,6 +486,7 @@ def test_guided_demo_readme_contains_required_setup_instructions():
         "not real biological data",
         "CSV files, one file per session",
         "intermittent",
+        "96 files across 48 scheduled hours",
         "Sessions per hour: 2",
         "Session duration: 600 seconds",
         "`ElapsedSeconds`",

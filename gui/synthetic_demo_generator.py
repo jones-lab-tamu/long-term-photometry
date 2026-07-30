@@ -28,8 +28,9 @@ SYNTH_SCRIPT = REPO_ROOT / "tools" / "synth_photometry_dataset.py"
 GUIDED_DEMO_FOLDER_NAME = "long_term_photometry_guided_demo"
 GUIDED_DEMO_TYPE = "Synthetic Guided CSV demo"
 GUIDED_DEMO_FORMAT = "custom_tabular"
-GUIDED_DEMO_SESSION_COUNT = 48
+GUIDED_DEMO_SESSION_COUNT = 96
 GUIDED_DEMO_SESSIONS_PER_HOUR = 2
+GUIDED_DEMO_SESSIONS_PER_DAY = 24 * GUIDED_DEMO_SESSIONS_PER_HOUR
 GUIDED_DEMO_SESSION_DURATION_SEC = 600.0
 GUIDED_DEMO_FS_HZ = 20
 GUIDED_DEMO_ROWS_PER_SESSION = 12000
@@ -77,6 +78,7 @@ Select this containing folder in Guided Mode.
 
 - Source type: CSV files, one file per session
 - Acquisition mode: intermittent
+- Sessions: 96 files across 48 scheduled hours
 - Sessions per hour: 2
 - Session duration: 600 seconds
 - Time column: `ElapsedSeconds`
@@ -171,12 +173,15 @@ def _guided_demo_session_arrays(
     *,
     rows_per_session: int,
     fs_hz: int,
-    session_count: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
     time_sec = np.arange(rows_per_session, dtype=np.float64) / float(fs_hz)
     duration_sec = float(rows_per_session) / float(fs_hz)
-    recording_phase = 2.0 * np.pi * float(session_index) / float(session_count)
+    # One activity cycle per nominal day, so a multi-day demo shows a daily
+    # pattern rather than one slow arc across the whole recording.
+    recording_phase = (
+        2.0 * np.pi * float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_DAY)
+    )
     # Each session is an independent recording on the same rig.
     session_scale = 1.0 + 0.03 * float(rng.normal())
 
@@ -345,7 +350,6 @@ def generate_guided_csv_demo(
                 session_index,
                 rows_per_session=int(_rows_per_session),
                 fs_hz=GUIDED_DEMO_FS_HZ,
-                session_count=int(_session_count),
                 rng=rng,
             )
             if not np.isfinite(values).all():

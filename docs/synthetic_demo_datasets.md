@@ -3,9 +3,10 @@
 This project uses `tools/synth_photometry_dataset.py` for both regression fixtures and tutorial datasets.
 
 For a first GUI walkthrough, choose `Tools -> Generate Guided Demo Dataset`.
-The app generates one fixed, vendor-neutral CSV recording with 48 ten-minute
-sessions, 2 sessions/hour, 20 Hz sampling, 2 ROIs, and deterministic transient
-events. Select the generated folder in Guided Mode and follow its README.
+The app generates one fixed, vendor-neutral CSV recording with 96 ten-minute
+sessions across 48 scheduled hours, 2 sessions/hour, 20 Hz sampling, 2 ROIs, and
+deterministic transient events. Select the generated folder in Guided Mode and
+follow its README.
 
 The bundled RWD example and configurable CLI generator remain developer,
 regression, and command-line resources; they are not visible GUI demo choices.
