@@ -1881,6 +1881,28 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
         "resolve_application_build_identity",
         lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
     )
+    original_context_capture = (
+        window._capture_guided_backend_validation_context
+    )
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("temporary setup-check failure")
+        ),
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "internal_error"
+    assert window._guided_run_btn.isEnabled() is False
+    assert (
+        window._guided_backend_validation_technical_details_btn.isHidden()
+        is False
+    )
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        original_context_capture,
+    )
     window._guided_backend_validate_btn.click()
     assert window._guided_backend_validation_outcome.status == (
         "validator_accepted"
@@ -1888,6 +1910,14 @@ def test_guided_csv_preview_matrix_reaches_shared_run_dispatch(
     assert window._guided_run_btn.isEnabled() is True
     assert window._guided_run_readiness_label.text() == (
         "Guided Run is ready to start."
+    )
+    assert (
+        window._guided_backend_validation_technical_details_btn.isHidden()
+        is True
+    )
+    assert (
+        window._guided_backend_validation_technical_details_label.text()
+        == ""
     )
 
     dispatched = []

@@ -16327,13 +16327,17 @@ class MainWindow(QMainWindow):
             validation_revision=context.revision,
         )
 
-    def _make_guided_backend_validation_internal_error(self):
+    def _make_guided_backend_validation_internal_error(
+        self,
+        exception: BaseException | None = None,
+    ):
         from photometry_pipeline import (
             guided_backend_validation_workflow as workflow,
         )
 
         return workflow.make_guided_backend_validation_workflow_internal_error(
-            "context"
+            "context",
+            exception,
         )
 
     def _derive_guided_execution_state_from_validation(
@@ -16458,8 +16462,10 @@ class MainWindow(QMainWindow):
                 outcome = (
                     self._run_guided_backend_validation_workflow(context)
                 )
-            except Exception:
-                outcome = self._make_guided_backend_validation_internal_error()
+            except Exception as exc:
+                outcome = self._make_guided_backend_validation_internal_error(
+                    exc
+                )
             outcome_revision = (
                 context.revision
                 if context is not None
@@ -16511,6 +16517,7 @@ class MainWindow(QMainWindow):
             # That refresh already stated the continuous setup check. The
             # intermittent wording below would overwrite it with an outcome
             # that never described this plan (CR1-F1-G).
+            self._set_guided_backend_validation_technical_details("")
             return
         status_label = getattr(
             self,
@@ -16524,6 +16531,7 @@ class MainWindow(QMainWindow):
         )
         if status_label is None or details_label is None:
             return
+        self._set_guided_backend_validation_technical_details("")
         if getattr(self, "_guided_backend_validation_active", False):
             status_label.setText(
                 "Checking your Guided setup. No run is being started."
@@ -16677,6 +16685,40 @@ class MainWindow(QMainWindow):
             lines = [f"Message: {message}"]
         lines.append("Guided Run is not available for this configuration yet.")
         details_label.setText("\n".join(lines))
+        technical_lines = [
+            f"Failed stage: {str(getattr(issue, 'stage', '') or 'unknown')}",
+            f"Detail code: {str(getattr(issue, 'detail_code', '') or 'unavailable')}",
+        ]
+        exception_details = str(
+            getattr(issue, "technical_details", "") or ""
+        ).strip()
+        if exception_details:
+            technical_lines.append(f"Exception: {exception_details}")
+        self._set_guided_backend_validation_technical_details(
+            "\n".join(technical_lines)
+        )
+
+    def _set_guided_backend_validation_technical_details(
+        self,
+        text: str,
+    ) -> None:
+        button = getattr(
+            self,
+            "_guided_backend_validation_technical_details_btn",
+            None,
+        )
+        label = getattr(
+            self,
+            "_guided_backend_validation_technical_details_label",
+            None,
+        )
+        if button is None or label is None:
+            return
+        normalized = str(text or "").strip()
+        button.setVisible(bool(normalized))
+        button.setChecked(False)
+        label.setText(normalized)
+        label.setVisible(False)
 
     def _guided_current_plan_identity_is_validated(self) -> bool:
         """Fail-closed authoritative staleness backstop.
@@ -22519,6 +22561,45 @@ class MainWindow(QMainWindow):
         )
         validation_layout.addWidget(
             self._guided_backend_validation_details_label
+        )
+        self._guided_backend_validation_technical_details_btn = QPushButton(
+            "Show technical details"
+        )
+        self._guided_backend_validation_technical_details_btn.setObjectName(
+            "guidedBackendValidationTechnicalDetailsButton"
+        )
+        self._guided_backend_validation_technical_details_btn.setCheckable(
+            True
+        )
+        self._guided_backend_validation_technical_details_btn.setVisible(
+            False
+        )
+        validation_layout.addWidget(
+            self._guided_backend_validation_technical_details_btn,
+            alignment=Qt.AlignLeft,
+        )
+        self._guided_backend_validation_technical_details_label = QLabel("")
+        self._guided_backend_validation_technical_details_label.setObjectName(
+            "guidedBackendValidationTechnicalDetails"
+        )
+        self._guided_backend_validation_technical_details_label.setWordWrap(
+            True
+        )
+        self._guided_backend_validation_technical_details_label.setProperty(
+            "guidedMutedText",
+            True,
+        )
+        self._guided_backend_validation_technical_details_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._guided_backend_validation_technical_details_label.setVisible(
+            False
+        )
+        self._guided_backend_validation_technical_details_btn.toggled.connect(
+            self._guided_backend_validation_technical_details_label.setVisible
+        )
+        validation_layout.addWidget(
+            self._guided_backend_validation_technical_details_label
         )
         new_analysis_layout.addWidget(validation_group)
 

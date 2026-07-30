@@ -14,6 +14,10 @@ from photometry_pipeline.guided_backend_validation_workflow import (
     GuidedBackendValidationWorkflowIssue,
     GuidedBackendValidationWorkflowOutcome,
 )
+from photometry_pipeline.guided_backend_validation_materialization import (
+    GuidedBackendValidationMaterializationFailure,
+    GuidedBackendValidationMaterializationIssue,
+)
 import photometry_pipeline.guided_backend_validation_workflow as workflow
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
@@ -1021,6 +1025,75 @@ def test_refused_and_error_outcome_display(
     assert "Guided Run is not available for this configuration yet" in details
 
 
+def test_check_setup_action_surfaces_specific_csv_materialization_failure(
+    window,
+    monkeypatch,
+):
+    context = GuidedBackendValidationGuiContext(
+        draft=GuidedNewAnalysisDraftPlan(input_format="custom_tabular"),
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=window._guided_backend_validation_revision,
+    )
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: context,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "materialize_guided_backend_validation_facts",
+        lambda *_args, **_kwargs: (
+            GuidedBackendValidationMaterializationFailure(
+                blocking_issues=(
+                    GuidedBackendValidationMaterializationIssue(
+                        category="custom_tabular_inspection_failed",
+                        section="parser",
+                        message=(
+                            "Setup checking stopped because session_0219.csv "
+                            "could not be loaded: its timestamps do not cover "
+                            "the confirmed 600-second session. Correct or "
+                            "replace that CSV file, then check the setup again."
+                        ),
+                        detail_code="custom_tabular_source_invalid",
+                        technical_details=(
+                            "ValueError: CUSTOM_TABULAR strict: raw_end "
+                            "599.9260s < grid_end 599.9800s "
+                            "(End Coverage Failure)"
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+
+    window._guided_backend_validate_btn.click()
+
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "materialization_failed"
+    assert outcome.blocking_issues[0].detail_code == (
+        "custom_tabular_source_invalid"
+    )
+    visible = window._guided_backend_validation_details_label.text()
+    assert "session_0219.csv" in visible
+    assert "timestamps do not cover the confirmed 600-second session" in visible
+    assert "could not complete" not in visible
+    assert window._guided_run_btn.isEnabled() is False
+    assert (
+        window._guided_backend_validation_technical_details_btn.isHidden()
+        is False
+    )
+    window._guided_backend_validation_technical_details_btn.click()
+    technical = (
+        window._guided_backend_validation_technical_details_label.text()
+    )
+    assert "Failed stage: materialization" in technical
+    assert "Detail code: custom_tabular_source_invalid" in technical
+    assert "ValueError" in technical
+    assert "End Coverage Failure" in technical
+
+
 def test_stale_accepted_outcome_never_displays_current_acceptance(window):
     window._guided_backend_validation_outcome = _accepted_outcome()
     window._guided_backend_validation_outcome_revision = (
@@ -1048,7 +1121,24 @@ def test_context_capture_exception_is_safe(window, monkeypatch):
     text = window._guided_backend_validation_status_label.text()
     assert "could not complete safely" in text
     assert "traceback" not in text
+    scientist_details = window._guided_backend_validation_details_label.text()
+    assert "sensitive traceback" not in scientist_details
+    assert "before the current Guided setup could be prepared" in (
+        scientist_details
+    )
+    assert (
+        window._guided_backend_validation_technical_details_btn.isHidden()
+        is False
+    )
+    window._guided_backend_validation_technical_details_btn.click()
+    technical = (
+        window._guided_backend_validation_technical_details_label.text()
+    )
+    assert "Failed stage: context" in technical
+    assert "Detail code: context_exception" in technical
+    assert "RuntimeError: sensitive traceback" in technical
     assert window._guided_backend_validation_outcome.run_authorization is False
+    assert window._guided_run_btn.isEnabled() is False
 
 
 def test_validate_click_calls_no_write_run_or_allocation_api(

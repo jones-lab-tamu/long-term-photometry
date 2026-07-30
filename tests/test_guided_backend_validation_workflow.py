@@ -240,7 +240,11 @@ def test_internal_exceptions_map_to_safe_internal_error(
     outcome = _call()
     assert outcome.status == "internal_error"
     assert outcome.blocking_issues[0].category == "workflow_internal_error"
+    assert outcome.blocking_issues[0].technical_details == (
+        "RuntimeError: sensitive repr must not escape"
+    )
     assert "sensitive" not in outcome.user_summary
+    assert "sensitive" not in outcome.blocking_issues[0].message
     assert outcome.request_identity is None
 
 

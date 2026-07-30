@@ -364,6 +364,7 @@ STAGE_2C_VALID_ISSUES = {
     "npm_filename_timestamp_duplicate",
     "npm_parser_contract_invalid",
     "npm_inspection_failed",
+    "custom_tabular_inspection_failed",
     "npm_schedule_gap",
     "npm_early_session",
     "npm_session_overlap_detected",
@@ -380,6 +381,7 @@ class GuidedBackendValidationMaterializationIssue:
     message: str
     detail_code: str | None = None
     debug_context: tuple[Any, ...] = ()
+    technical_details: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.category, str) or not self.category:
@@ -390,6 +392,8 @@ class GuidedBackendValidationMaterializationIssue:
             raise ValueError("section must be a non-empty string.")
         if not isinstance(self.message, str) or not self.message:
             raise ValueError("message must be a non-empty string.")
+        if not isinstance(self.technical_details, str):
+            raise ValueError("technical_details must be a string.")
         if not isinstance(self.debug_context, tuple):
             raise ValueError("debug_context must be a tuple.")
 
@@ -480,6 +484,7 @@ def _failure(
     message: str,
     *,
     detail_code: str | None = None,
+    technical_details: str = "",
 ) -> GuidedBackendValidationMaterializationFailure:
     return GuidedBackendValidationMaterializationFailure(
         blocking_issues=(
@@ -488,6 +493,7 @@ def _failure(
                 section=section,
                 message=message,
                 detail_code=detail_code,
+                technical_details=technical_details,
             ),
         )
     )
@@ -2536,6 +2542,7 @@ def materialize_guided_backend_validation_facts(
 
     if is_custom_tabular:
         values = draft.dataset_contract_snapshot.contract_values
+        current_candidate_relative_path = ""
         try:
             confirmed_order = json.loads(
                 str(values["custom_tabular_ordered_source_files_json"])
@@ -2578,6 +2585,9 @@ def materialize_guided_backend_validation_facts(
                 item["roi_id"] for item in interpretation["roi_mappings"]
             )
             for position, candidate in enumerate(snapshot.candidates):
+                current_candidate_relative_path = (
+                    candidate.canonical_relative_path
+                )
                 candidate_path = os.path.join(
                     snapshot.source_root_canonical,
                     *candidate.canonical_relative_path.split("/"),
@@ -2610,11 +2620,28 @@ def materialize_guided_backend_validation_facts(
                     detail_code="custom_tabular_roi_inventory_mismatch",
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            source_name = (
+                current_candidate_relative_path or "the selected CSV source"
+            )
+            if "End Coverage Failure" in str(exc):
+                message = (
+                    f"Setup checking stopped because {source_name} could not "
+                    "be loaded: its timestamps do not cover the confirmed "
+                    f"{float(draft.session_duration_sec or 0.0):g}-second "
+                    "session. Correct or replace that CSV file, then check "
+                    "the setup again."
+                )
+            else:
+                message = (
+                    f"Setup checking stopped because {source_name} could not "
+                    f"be loaded: {exc}"
+                )
             return _failure(
                 "custom_tabular_inspection_failed",
                 "parser",
-                str(exc),
+                message,
                 detail_code="custom_tabular_source_invalid",
+                technical_details=f"{type(exc).__name__}: {exc}",
             )
 
     validated_first_recording_start = None

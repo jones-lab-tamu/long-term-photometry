@@ -126,6 +126,7 @@ class GuidedBackendValidationWorkflowIssue:
     section: str
     message: str
     detail_code: str = ""
+    technical_details: str = ""
 
     def __post_init__(self) -> None:
         for name in ("stage", "category", "section", "message"):
@@ -134,6 +135,8 @@ class GuidedBackendValidationWorkflowIssue:
                 raise ValueError(f"{name} must be a non-empty string.")
         if not isinstance(self.detail_code, str):
             raise ValueError("detail_code must be a string.")
+        if not isinstance(self.technical_details, str):
+            raise ValueError("technical_details must be a string.")
 
 
 @dataclass(frozen=True)
@@ -229,6 +232,9 @@ def _normalized_issues(
             section=str(getattr(issue, "section", "") or stage),
             message=str(getattr(issue, "message", "") or "Validation failed."),
             detail_code=str(getattr(issue, "detail_code", "") or ""),
+            technical_details=str(
+                getattr(issue, "technical_details", "") or ""
+            ),
         )
         for issue in issues
     )
@@ -248,7 +254,39 @@ def _cancelled() -> GuidedBackendValidationWorkflowOutcome:
     )
 
 
-def _internal_error(stage: str) -> GuidedBackendValidationWorkflowOutcome:
+def _internal_error(
+    stage: str,
+    exception: BaseException | None = None,
+) -> GuidedBackendValidationWorkflowOutcome:
+    stage_messages = {
+        "context": (
+            "Setup checking stopped before the current Guided setup could be "
+            "prepared. Review the selected setup and check again."
+        ),
+        "materialization": (
+            "Setup checking stopped while reading or verifying the selected "
+            "source. Confirm that the source files are available and "
+            "unchanged, then check again."
+        ),
+        "compile": (
+            "Setup checking stopped while preparing the current Guided "
+            "request. Review the setup and check again."
+        ),
+        "validator": (
+            "Setup checking stopped while verifying the prepared Guided "
+            "request. Review the setup and check again."
+        ),
+        "guided_plan_identity": (
+            "Setup checking stopped while confirming that the current plan "
+            "still matches the reviewed setup. Return to Review Plan, confirm "
+            "it, and check again."
+        ),
+    }
+    technical_details = ""
+    if exception is not None:
+        technical_details = (
+            f"{type(exception).__name__}: {str(exception) or '<no message>'}"
+        )
     return GuidedBackendValidationWorkflowOutcome(
         status="internal_error",
         accepted_for_backend_validation=False,
@@ -262,8 +300,13 @@ def _internal_error(stage: str) -> GuidedBackendValidationWorkflowOutcome:
                 stage=stage,
                 category="workflow_internal_error",
                 section="workflow",
-                message="The Guided setup check could not complete.",
+                message=stage_messages.get(
+                    stage,
+                    "Setup checking stopped unexpectedly. Review the current "
+                    "setup and check again.",
+                ),
                 detail_code=f"{stage}_exception",
+                technical_details=technical_details,
             ),
         ),
         user_summary="The Guided setup check could not complete safely.",
@@ -272,12 +315,13 @@ def _internal_error(stage: str) -> GuidedBackendValidationWorkflowOutcome:
 
 def make_guided_backend_validation_workflow_internal_error(
     stage: str = "context",
+    exception: BaseException | None = None,
 ) -> GuidedBackendValidationWorkflowOutcome:
     """Return a safe in-memory outcome for an adapter boundary exception."""
     normalized_stage = (
         stage if isinstance(stage, str) and stage else "context"
     )
-    return _internal_error(normalized_stage)
+    return _internal_error(normalized_stage, exception)
 
 
 def _is_cancelled(
@@ -311,8 +355,8 @@ def validate_current_guided_draft_for_backend(
             cancellation_check=cancellation_check,
             additional_protected_roots=additional_protected_roots,
         )
-    except Exception:
-        return _internal_error("materialization")
+    except Exception as exc:
+        return _internal_error("materialization", exc)
     if isinstance(materialized, GuidedBackendValidationMaterializationFailure):
         return GuidedBackendValidationWorkflowOutcome(
             status="materialization_failed",
@@ -338,8 +382,8 @@ def validate_current_guided_draft_for_backend(
             facts=materialized.facts,
             validator_contract=validator_contract,
         )
-    except Exception:
-        return _internal_error("compile")
+    except Exception as exc:
+        return _internal_error("compile", exc)
     if isinstance(compiled, GuidedBackendValidationCompileFailure):
         return GuidedBackendValidationWorkflowOutcome(
             status="compile_failed",
@@ -365,8 +409,8 @@ def validate_current_guided_draft_for_backend(
             canonical_request_identity=compiled.canonical_request_identity,
             validator_contract=validator_contract,
         )
-    except Exception:
-        return _internal_error("validator")
+    except Exception as exc:
+        return _internal_error("validator", exc)
     if validated.accepted is not True:
         return GuidedBackendValidationWorkflowOutcome(
             status="validator_refused",
@@ -388,8 +432,8 @@ def validate_current_guided_draft_for_backend(
         )
     try:
         guided_plan_identity = compute_guided_new_analysis_draft_plan_identity(draft)
-    except Exception:
-        return _internal_error("guided_plan_identity")
+    except Exception as exc:
+        return _internal_error("guided_plan_identity", exc)
     return GuidedBackendValidationWorkflowOutcome(
         status="validator_accepted",
         accepted_for_backend_validation=True,
