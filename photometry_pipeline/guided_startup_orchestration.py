@@ -463,6 +463,18 @@ def _default_subprocess_runner(
     )
 
 
+_WRAPPER_FAILURE_DETAIL_LIMIT = 4000
+
+
+def _bounded_wrapper_failure_message(process: GuidedWrapperProcessResult) -> str:
+    stderr = str(process.stderr or "").strip()
+    for line in reversed(stderr.splitlines()):
+        marker = line.find("Child command ")
+        if marker >= 0:
+            return line[marker:][-_WRAPPER_FAILURE_DETAIL_LIMIT:]
+    return process.stderr or "Wrapper process returned a failure result."
+
+
 def _write_start_failure_marker(
     *,
     run_dir: str,
@@ -647,7 +659,7 @@ def run_guided_startup_to_wrapper(
         issue=GuidedStartupOrchestrationIssue(
             "wrapper_returned_nonzero",
             "wrapper",
-            process.stderr or "Wrapper process returned a failure result.",
+            _bounded_wrapper_failure_message(process),
         ),
         plan=plan,
         allocation=allocated,

@@ -17585,6 +17585,29 @@ class MainWindow(QMainWindow):
             "Guided Run could not start because the selected CSV input format "
             "was not accepted by the execution handoff."
         )
+        child_failure_detail = next(
+            (
+                str(getattr(issue, "message", "") or "")
+                for issue in blocking_issues
+                if "Child command analyze_photometry.py " in str(
+                    getattr(issue, "message", "") or ""
+                )
+                and " failed with return code " in str(
+                    getattr(issue, "message", "") or ""
+                )
+            ),
+            "",
+        )
+        child_failure_payload = (
+            child_failure_detail.partition(": ")[2] or child_failure_detail
+        )
+        child_failure_reason = child_failure_payload.rsplit(" | ", 1)[-1]
+        child_failure_summary = (
+            "Guided Run stopped while analyzing the recording: "
+            + child_failure_reason
+            if child_failure_detail
+            else ""
+        )
         # The consumed authorization/startup-request/plan-identity triple
         # must not be reusable for a second Run once a result is recorded --
         # clear all of it atomically (not just the startup request) without
@@ -17604,6 +17627,8 @@ class MainWindow(QMainWindow):
                 if getattr(result, "status", "") == "wrapper_running"
                 else format_handoff_summary
                 if format_handoff_refused
+                else child_failure_summary
+                if child_failure_summary
                 else str(
                     getattr(
                         result,
@@ -17631,6 +17656,12 @@ class MainWindow(QMainWindow):
                         format_handoff_summary
                         + "\n\nTechnical details: "
                         + str(blocking_issues[0].message)
+                    )
+                elif child_failure_detail:
+                    details_label.setText(
+                        child_failure_summary
+                        + "\n\nTechnical details: "
+                        + child_failure_detail
                     )
                 else:
                     details_label.setText(

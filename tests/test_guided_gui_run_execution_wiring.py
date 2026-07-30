@@ -645,6 +645,78 @@ def test_csv_format_handoff_refusal_is_visible_in_guided_run(
     assert technical in details
 
 
+def test_child_failure_reason_reaches_guided_without_unbounded_transcript(
+    window, allocation_case, qapp, tmp_path
+):
+    import sys
+
+    import photometry_pipeline.guided_startup_orchestration as orchestration
+    import tools.run_full_pipeline_deliverables as wrapper
+
+    known_reason = (
+        "session_0042.csv could not be loaded: known compact failure"
+    )
+    child_script = tmp_path / "analyze_photometry.py"
+    child_script.write_text(
+        "\n".join(
+            (
+                "import sys",
+                "print('BEGIN_UNBOUNDED_TRANSCRIPT')",
+                "print('noise-line\\n' * 1000)",
+                f"print({known_reason!r})",
+                "sys.exit(7)",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def runner(command):
+        try:
+            wrapper.run_cmd(
+                [sys.executable, str(child_script)]
+            )
+        except RuntimeError as exc:
+            return orchestration.GuidedWrapperProcessResult(
+                returncode=7,
+                stdout="",
+                stderr=f"RuntimeError: {exc}",
+                command=command,
+                started=True,
+                completed=True,
+            )
+        raise AssertionError("known failing child unexpectedly succeeded")
+
+    startup_request, _plan = allocation_case
+    _set_ready(window, startup_request)
+    run_dir = Path(startup_request.planned_allocated_run_dir)
+    window._guided_backend_execution_runner = runner
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+
+    result = window._guided_backend_execution_result
+    assert result.status == "wrapper_failed", result.blocking_issues
+    assert result.diagnostics.wrapper_returncode == 7
+    assert len(result.blocking_issues[0].message) <= 4000
+    assert known_reason in result.blocking_issues[0].message
+    assert "BEGIN_UNBOUNDED_TRANSCRIPT" not in (
+        result.blocking_issues[0].message
+    )
+    visible = (
+        "Guided Run stopped while analyzing the recording: " + known_reason
+    )
+    assert window._guided_run_readiness_label.text() == visible
+    details = window._guided_run_execution_details_label.text()
+    assert visible in details
+    assert "Child command " in details
+    assert "failed with return code 7" in details
+    assert "BEGIN_UNBOUNDED_TRANSCRIPT" not in details
+    assert run_dir.is_dir()
+    assert window._guided_run_btn.isEnabled() is False
+    assert window._current_guided_startup_transaction_request() is None
+    assert known_reason in window._log_view.toPlainText()
+
+
 def test_execution_details_label_clears_on_next_run_start(
     window, startup_request, monkeypatch, qapp
 ):
@@ -1074,6 +1146,7 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
 
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
+    import photometry_pipeline.guided_startup_orchestration as orchestration
     import photometry_pipeline.guided_startup_transaction as startup_transaction
     import photometry_pipeline.preview.correction_preview as correction_preview
     import tools.run_full_pipeline_deliverables as wrapper
@@ -1269,7 +1342,41 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
         "validate_guided_preallocated_mode_args",
         capture_wrapper_format,
     )
-    runner, calls = _real_wrapper_runner(monkeypatch)
+    original_run_cmd = wrapper.run_cmd
+    captured_child = {}
+
+    class StopAfterTonicChild(BaseException):
+        pass
+
+    def run_tonic_child_then_stop(command_argv, roi_label=None):
+        assert command_argv[command_argv.index("--mode") + 1] == "tonic"
+        captured_child["command"] = tuple(command_argv)
+        captured_child["result"] = original_run_cmd(
+            command_argv, roi_label=roi_label
+        )
+        raise StopAfterTonicChild()
+
+    def runner(command):
+        monkeypatch.setattr(
+            wrapper.sys, "argv", [command[1], *command[2:]]
+        )
+        monkeypatch.setattr(
+            wrapper, "run_cmd", run_tonic_child_then_stop
+        )
+        try:
+            wrapper.main()
+        except StopAfterTonicChild:
+            pass
+        assert "result" in captured_child
+        return orchestration.GuidedWrapperProcessResult(
+            returncode=None,
+            stdout="stopped after successful tonic child execution",
+            stderr="",
+            command=command,
+            started=True,
+            completed=False,
+        )
+
     window._guided_backend_execution_runner = runner
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
@@ -1277,7 +1384,18 @@ def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
     result = window._guided_backend_execution_result
     assert result.status == "wrapper_running"
     assert parsed_formats and set(parsed_formats) == {"custom_tabular"}
-    assert calls == {"live_verify": 1, "analysis": 0, "root_makedirs": 0}
+    assert captured_child["result"]["returncode"] == 0
+    child_command = captured_child["command"]
+    assert child_command[child_command.index("--format") + 1] == (
+        "custom_tabular"
+    )
+    assert child_command[child_command.index("--mode") + 1] == "tonic"
+    assert child_command[
+        child_command.index("--guided-candidate-manifest") + 1
+    ] == str(
+        Path(request.planned_allocated_run_dir)
+        / "guided_candidate_manifest.json"
+    )
     run_dir = Path(request.planned_allocated_run_dir)
     effective_config = yaml.safe_load(
         (run_dir / "config_effective.yaml").read_text(encoding="utf-8")
@@ -1385,9 +1503,8 @@ def test_real_gui_path_press_run_after_authorization(
     fragile to unrelated failures in -- the full pipeline run (a live
     manual run of this path further confirms real allocation,
     materialization, and wrapper invocation now succeed; the wrapper's
-    own analysis subprocess then fails for reasons in
-    analyze_photometry.py/tools/run_full_pipeline_deliverables.py, a
-    separate backend/runner concern out of scope for this patch).
+    own analysis subprocess remains deliberately outside this test's
+    controlled boundary).
     """
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping

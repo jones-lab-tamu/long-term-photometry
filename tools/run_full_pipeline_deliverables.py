@@ -29,6 +29,7 @@ import numpy as np
 import time
 import secrets
 import errno
+import threading
 from datetime import datetime, timezone
 
 try:
@@ -160,6 +161,33 @@ def _extract_cmd_label(cmd):
     return os.path.basename(cmd[0])
 
 
+_CHILD_FAILURE_DETAIL_LIMIT = 3000
+
+
+def _bounded_child_failure_detail(stdout, stderr):
+    detail = str(stderr or "").strip() or str(stdout or "").strip()
+    if not detail:
+        return "no diagnostic output"
+    tail = detail[-_CHILD_FAILURE_DETAIL_LIMIT:]
+    compact = " | ".join(
+        line.strip() for line in tail.splitlines() if line.strip()
+    )
+    return compact[-_CHILD_FAILURE_DETAIL_LIMIT:]
+
+
+def _forward_child_stream(stream, target, retained_tail):
+    while True:
+        chunk = stream.readline(1024)
+        if not chunk:
+            break
+        target.write(chunk)
+        target.flush()
+        retained_tail[0] = (
+            retained_tail[0] + chunk
+        )[-_CHILD_FAILURE_DETAIL_LIMIT:]
+    stream.close()
+
+
 def run_cmd(cmd, roi_label=None):
     label = _extract_cmd_label(cmd)
     roi_info = f" roi={roi_label}" if roi_label else ""
@@ -169,12 +197,36 @@ def run_cmd(cmd, roi_label=None):
     print(f"TIMING START cmd={label}{roi_info} at {started_utc}", flush=True)
     print(f"Running: {' '.join(cmd)}", flush=True)
     
-    try:
-        subprocess.check_call(cmd)
-        returncode = 0
-    except subprocess.CalledProcessError:
-        # check_call raises on non-zero, but we want to be explicit if we were using run
-        raise
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stdout_tail = [""]
+    stderr_tail = [""]
+    stdout_thread = threading.Thread(
+        target=_forward_child_stream,
+        args=(process.stdout, sys.stdout, stdout_tail),
+    )
+    stderr_thread = threading.Thread(
+        target=_forward_child_stream,
+        args=(process.stderr, sys.stderr, stderr_tail),
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    returncode = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    if returncode != 0:
+        detail = _bounded_child_failure_detail(
+            stdout_tail[0], stderr_tail[0]
+        )
+        raise RuntimeError(
+            f"Child command {label} failed with return code "
+            f"{returncode}: {detail}"
+        )
 
     elapsed = time.perf_counter() - t0
     finished_utc = _utc_now_iso()
