@@ -62,7 +62,7 @@ class GenerateSyntheticDemoDatasetDialog(QDialog):
         layout.addWidget(
             QLabel(
                 "Create one synthetic CSV recording for the ordinary Guided "
-                "Workflow. The demo has fixed, reviewer-friendly settings."
+                "Workflow. The demo has fixed, friendly settings."
             )
         )
 
