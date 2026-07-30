@@ -122,7 +122,7 @@ def test_current_native_artifact_mutation_refuses_before_wrapper_claim(prepared_
     assert refused.blocking_issues[0].category == "startup_artifact_hash_mismatch"
 
 
-@pytest.mark.parametrize("base_format", ("rwd", "npm"))
+@pytest.mark.parametrize("base_format", ("rwd",))
 @pytest.mark.parametrize(
     "changes",
     (
@@ -141,32 +141,80 @@ def test_current_native_artifact_mutation_refuses_before_wrapper_claim(prepared_
     ),
 )
 def test_internal_flag_conflicts_refuse(prepared_case, changes, base_format):
-    """Every existing safety check applies identically regardless of
-    format -- an accepted NPM format does not bypass any other Guided
-    preallocated-mode conflict check."""
+    """Every existing safety check remains active for a prepared command."""
     with pytest.raises(RuntimeError, match="handoff refused"):
         _validate(prepared_case, format=base_format, **changes)
 
 
-@pytest.mark.parametrize("base_format", ("rwd", "npm"))
+@pytest.mark.parametrize("base_format", ("rwd",))
 def test_valid_preallocated_directory_validates_for_supported_formats(
     prepared_case, base_format
 ):
-    """An otherwise valid Guided preallocated argument set is accepted
-    for both currently supported formats -- RWD and NPM alike."""
+    """The prepared RWD command remains accepted through the real claim gate."""
     validation = _validate(prepared_case, format=base_format)
     assert validation.accepted
 
 
 @pytest.mark.parametrize(
-    "unsupported_format", ("custom_tabular", "auto", "unknown_format", None, "")
+    "supported_format", ("rwd", "npm", "custom_tabular")
+)
+def test_supported_format_allowlist_reaches_claim_validation(
+    tmp_path, monkeypatch, supported_format
+):
+    command = (
+        "python\nwrapper.py\n--format\n"
+        f"{supported_format}\n--mode\nphasic\n"
+    )
+    (tmp_path / startup.GUIDED_COMMAND_RECORD_FILENAME).write_text(
+        command, encoding="utf-8"
+    )
+    accepted = object()
+    monkeypatch.setattr(
+        wrapper,
+        "validate_guided_preallocated_startup",
+        lambda **_kwargs: accepted,
+    )
+    args = SimpleNamespace(
+        guided_preallocated_run_dir=True,
+        input="source",
+        out=str(tmp_path),
+        out_base=None,
+        config="config.yaml",
+        format=supported_format,
+        mode="phasic",
+        run_type="full",
+        overwrite=False,
+        include_rois=None,
+        exclude_rois=None,
+        traces_only=False,
+        acquisition_mode=None,
+        preview_first_n=None,
+        validate_only=False,
+        discover=False,
+        guided_candidate_manifest="manifest.json",
+    )
+
+    assert wrapper.validate_guided_preallocated_mode_args(args) is accepted
+
+
+@pytest.mark.parametrize(
+    "unsupported_format", ("auto", "unknown_format", None, "")
 )
 def test_unsupported_format_refuses(prepared_case, unsupported_format):
-    """Only RWD and NPM are supported Guided preallocated formats --
-    custom_tabular, auto, and any unrecognized or missing format value
-    must still be refused."""
+    """Auto, unrecognized, and missing formats remain fail-closed."""
     with pytest.raises(RuntimeError, match="handoff refused"):
         _validate(prepared_case, format=unsupported_format)
+
+
+@pytest.mark.parametrize("different_format", ("npm", "custom_tabular"))
+def test_supported_format_cannot_disagree_with_prepared_command(
+    prepared_case, different_format
+):
+    with pytest.raises(
+        RuntimeError,
+        match="input format does not match the prepared startup command",
+    ):
+        _validate(prepared_case, format=different_format)
 
 
 @pytest.mark.parametrize(

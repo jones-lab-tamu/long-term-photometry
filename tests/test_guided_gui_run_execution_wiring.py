@@ -586,6 +586,65 @@ def test_wrapper_failure_surfaces_actionable_scientist_message(
     assert status in logged
 
 
+def test_csv_format_handoff_refusal_is_visible_in_guided_run(
+    window, startup_request, monkeypatch, qapp
+):
+    technical = (
+        "Error: Guided preallocated startup handoff refused: "
+        "a supported input format is required."
+    )
+    issue = backend.GuidedBackendExecutionIssue(
+        category="wrapper_returned_nonzero",
+        section="wrapper",
+        message=technical,
+        user_safe_message=(
+            "Guided Run started, but the analysis reported an error."
+        ),
+    )
+    result = backend.GuidedBackendExecutionResult(
+        status="wrapper_failed",
+        ok=False,
+        user_visible_state="failed_during_run",
+        user_summary="Guided Run started, but the analysis reported an error.",
+        run_directory=r"C:\output\guided-run",
+        completed_run_candidate_path=None,
+        requires_completed_run_loader_validation=False,
+        wrapper_started=True,
+        wrapper_completed=True,
+        blocking_issues=(issue,),
+        diagnostics=backend.GuidedBackendExecutionDiagnostics(
+            orchestration_status="wrapper_failed",
+            pure_plan_status="planned_non_effectful",
+            allocation_status="allocated_startup_status_written",
+            materialization_status="materialized",
+            wrapper_started=True,
+            wrapper_completed=True,
+            wrapper_returncode=1,
+            failure_marker_path=None,
+            startup_transaction_identity=None,
+            wrapper_command=None,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: result,
+    )
+    _set_ready(window, startup_request)
+
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+
+    visible = (
+        "Guided Run could not start because the selected CSV input format "
+        "was not accepted by the execution handoff."
+    )
+    assert window._guided_run_readiness_label.text() == visible
+    details = window._guided_run_execution_details_label.text()
+    assert visible in details
+    assert technical in details
+
+
 def test_execution_details_label_clears_on_next_run_start(
     window, startup_request, monkeypatch, qapp
 ):
@@ -1005,6 +1064,248 @@ def test_real_backend_reaches_initial_status_boundary_only(
     ):
         assert not (run_dir / prohibited).exists()
     assert classify_completed_run_candidate(str(run_dir))[0] is False
+
+
+def test_natural_guided_csv_reaches_real_wrapper_startup_boundary(
+    window, tmp_path, monkeypatch, qapp
+):
+    import numpy as np
+    import yaml
+
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    import photometry_pipeline.guided_startup_transaction as startup_transaction
+    import photometry_pipeline.preview.correction_preview as correction_preview
+    import tools.run_full_pipeline_deliverables as wrapper
+    from gui.main_window import GUIDED_WORKFLOW_STEPS
+    from photometry_pipeline.core.types import Chunk
+
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+
+    source_root = tmp_path / "csv_sessions"
+    source_root.mkdir()
+    preview_output = tmp_path / "preview_output"
+    preview_output.mkdir()
+    output_parent = tmp_path / "output_parent"
+    output_parent.mkdir()
+    output_policy_target = output_parent / "guided_csv_output"
+    source_files = []
+    for index, name in enumerate(("session_2.csv", "session_10.csv")):
+        source = source_root / name
+        rows = ["Elapsed,Green,Iso"]
+        rows.extend(
+            f"{sample / 20.0:.2f},{2.0 + sample * 0.001:.6f},"
+            f"{1.0 + sample * 0.001:.6f}"
+            for sample in range(12000)
+        )
+        source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        source_files.append(source)
+
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_input_dir_edit.setText(str(source_root))
+    window._guided_output_dir_edit.setText(str(preview_output))
+    acquisition_index = (
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_index)
+    window._guided_timeline_mode_combo.setCurrentIndex(
+        window._guided_timeline_mode_combo.findData("elapsed")
+    )
+    window._guided_csv_time_column_combo.setCurrentText("Elapsed")
+    window._guided_csv_time_units_combo.setCurrentText("seconds")
+    mapping_row = window._guided_csv_mapping_rows[0]
+    mapping_row["name"].setText("Fiber A")
+    mapping_row["signal"].setCurrentText("Green")
+    mapping_row["reference"].setCurrentText("Iso")
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    discovery = {
+        "resolved_format": "custom_tabular",
+        "n_total_discovered": 2,
+        "n_preview": 2,
+        "sessions": [
+            {
+                "index": index,
+                "session_id": source.stem,
+                "path": str(source),
+                "included_in_preview": True,
+            }
+            for index, source in enumerate(source_files)
+        ],
+        "rois": [{"roi_id": "Fiber A"}],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    window._guided_sessions_per_hour_edit.setText("1")
+    window._guided_session_duration_edit.setText("600")
+
+    time_sec = np.arange(60, dtype=float) / 20.0
+    signal = 2.0 + np.arange(60, dtype=float) * 0.001
+    reference = 1.0 + np.arange(60, dtype=float) * 0.001
+
+    def load_preview(path, input_format, config, chunk_id):
+        assert input_format == "custom_tabular"
+        assert config.target_fs_hz == 20.0
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=path,
+            format=input_format,
+            time_sec=time_sec,
+            uv_raw=reference[:, None],
+            sig_raw=signal[:, None],
+            fs_hz=20.0,
+            channel_names=["Fiber A"],
+            metadata={},
+        )
+
+    monkeypatch.setattr(correction_preview, "load_chunk", load_preview)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._guided_preview_roi_combo.setCurrentIndex(
+        window._guided_preview_roi_combo.findData("Fiber A")
+    )
+    window._guided_preview_generate_btn.click()
+    assert window._guided_preview_last_result["status"] in {
+        "success",
+        "partial",
+    }
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("Fiber A")
+    )
+    window._guided_confirm_chunk_combo.setCurrentIndex(0)
+    strategy_index = window._guided_confirm_strategy_combo.findText(
+        "Global Linear Regression"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    )
+    window._guided_feature_event_apply_btn.click()
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_review_dataset_contract_action_btn.click()
+    window._guided_output_path_edit.setText(str(output_policy_target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied", (
+        window._guided_output_status_label.text()
+    )
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.input_format == "custom_tabular"
+    assert plan.output_policy_status == "applied"
+    assert plan.dataset_contract_snapshot.current_applied is True
+    assert plan.dataset_contract_snapshot.input_format == "custom_tabular"
+    assert plan.dataset_contract_snapshot.contract_values[
+        "custom_tabular_ordered_source_files_json"
+    ] == json.dumps(
+        ["session_2.csv", "session_10.csv"], separators=(",", ":")
+    )
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied", (
+        window._guided_new_analysis_output_policy_stale_reasons
+    )
+
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted", (
+        outcome.blocking_issues,
+        window._log_view.toPlainText(),
+    )
+    assert outcome.compile_result.request.source.source_format == (
+        "custom_tabular"
+    )
+    request = window._current_guided_startup_transaction_request()
+    assert request is not None
+    assert request.startup_authority.source_format == "custom_tabular"
+    config_values = {
+        item.name: item.value
+        for item in request.payload_result.config_payload.values
+    }
+    assert config_values["target_fs_hz"] == 20.0
+    assert config_values["chunk_duration_sec"] == 600.0
+    assert config_values["custom_tabular_time_col"] == "Elapsed"
+    assert config_values["custom_tabular_time_unit"] == "seconds"
+    assert json.loads(
+        config_values["custom_tabular_roi_mapping_json"]
+    ) == [
+        {
+            "roi_id": "Fiber A",
+            "signal_column": "Green",
+            "reference_column": "Iso",
+        }
+    ]
+    pure_plan = startup_transaction.plan_guided_startup_transaction(request)
+    wrapper_format = pure_plan.command_plan.argv[
+        pure_plan.command_plan.argv.index("--format") + 1
+    ]
+    assert wrapper_format == "custom_tabular"
+
+    parsed_formats = []
+    original_validation = wrapper.validate_guided_preallocated_mode_args
+
+    def capture_wrapper_format(args):
+        parsed_formats.append(args.format)
+        return original_validation(args)
+
+    monkeypatch.setattr(
+        wrapper,
+        "validate_guided_preallocated_mode_args",
+        capture_wrapper_format,
+    )
+    runner, calls = _real_wrapper_runner(monkeypatch)
+    window._guided_backend_execution_runner = runner
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+
+    result = window._guided_backend_execution_result
+    assert result.status == "wrapper_running"
+    assert parsed_formats and set(parsed_formats) == {"custom_tabular"}
+    assert calls == {"live_verify": 1, "analysis": 0, "root_makedirs": 0}
+    run_dir = Path(request.planned_allocated_run_dir)
+    effective_config = yaml.safe_load(
+        (run_dir / "config_effective.yaml").read_text(encoding="utf-8")
+    )
+    assert effective_config["target_fs_hz"] == 20.0
+    assert effective_config["chunk_duration_sec"] == 600.0
+    assert effective_config["custom_tabular_time_col"] == "Elapsed"
+    assert effective_config["custom_tabular_time_unit"] == "seconds"
+    assert json.loads(
+        effective_config["custom_tabular_roi_mapping_json"]
+    ) == [
+        {
+            "roi_id": "Fiber A",
+            "signal_column": "Green",
+            "reference_column": "Iso",
+        }
+    ]
+    normalized = json.loads(
+        (
+            run_dir / "guided_normalized_recording_description.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert normalized["adapter_format"] == "custom_tabular"
+    assert [
+        Path(session["canonical_source_reference"]).name
+        for session in normalized["sessions"]
+    ] == ["session_2.csv", "session_10.csv"]
+    assert normalized["sampling"]["target_fs_hz"] == 20.0
 
 
 def test_close_event_refused_while_guided_run_active(window, monkeypatch):

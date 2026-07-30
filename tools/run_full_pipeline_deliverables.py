@@ -1222,13 +1222,27 @@ def validate_guided_preallocated_mode_args(args):
             "Guided preallocated startup handoff refused: analysis mode does not "
             "match the prepared startup command."
         )
+    format_positions = [
+        index for index, value in enumerate(command_values) if value == "--format"
+    ]
+    if (
+        len(format_positions) == 1
+        and format_positions[0] + 1 < len(command_values)
+        and command_values[format_positions[0] + 1]
+        != getattr(args, "format", None)
+    ):
+        raise RuntimeError(
+            "Guided preallocated startup handoff refused: input format does not "
+            "match the prepared startup command."
+        )
     conflicts = (
         (not getattr(args, "guided_candidate_manifest", None), "manifest required"),
         (not getattr(args, "out", None), "--out required"),
         (bool(getattr(args, "out_base", None)), "--out-base prohibited"),
         (bool(getattr(args, "overwrite", False)), "overwrite prohibited"),
         (
-            getattr(args, "format", None) not in {"rwd", "npm"},
+            getattr(args, "format", None)
+            not in {"rwd", "npm", "custom_tabular"},
             "a supported input format is required",
         ),
         (

@@ -17571,6 +17571,20 @@ class MainWindow(QMainWindow):
     def _finish_guided_backend_execution_with_result(self, result) -> None:
         """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
+        blocking_issues = getattr(result, "blocking_issues", None) or ()
+        format_handoff_refused = (
+            getattr(result, "status", "") == "wrapper_failed"
+            and any(
+                "Guided preallocated startup handoff refused: "
+                "a supported input format is required"
+                in str(getattr(issue, "message", "") or "")
+                for issue in blocking_issues
+            )
+        )
+        format_handoff_summary = (
+            "Guided Run could not start because the selected CSV input format "
+            "was not accepted by the execution handoff."
+        )
         # The consumed authorization/startup-request/plan-identity triple
         # must not be reusable for a second Run once a result is recorded --
         # clear all of it atomically (not just the startup request) without
@@ -17588,6 +17602,8 @@ class MainWindow(QMainWindow):
                 else
                 "Guided Run has started."
                 if getattr(result, "status", "") == "wrapper_running"
+                else format_handoff_summary
+                if format_handoff_refused
                 else str(
                     getattr(
                         result,
@@ -17601,7 +17617,6 @@ class MainWindow(QMainWindow):
             self, "_guided_run_execution_details_label", None
         )
         if details_label is not None:
-            blocking_issues = getattr(result, "blocking_issues", None) or ()
             if (
                 not recovered
                 and
@@ -17611,18 +17626,24 @@ class MainWindow(QMainWindow):
                 }
                 and blocking_issues
             ):
-                details_label.setText(
-                    "The analysis stopped before results were completed. "
-                    "Check the selected recording and setup, then try again. "
-                    "If the problem repeats, keep the run folder and ask for "
-                    "support."
-                )
-                # The scientist-facing panel above deliberately stays
-                # generic; the real failure detail (blocking_issues[0].
-                # message, which for a wrapper_failed/wrapper_start_failed
-                # result already carries the subprocess's own stderr -- see
+                if format_handoff_refused:
+                    details_label.setText(
+                        format_handoff_summary
+                        + "\n\nTechnical details: "
+                        + str(blocking_issues[0].message)
+                    )
+                else:
+                    details_label.setText(
+                        "The analysis stopped before results were completed. "
+                        "Check the selected recording and setup, then try again. "
+                        "If the problem repeats, keep the run folder and ask for "
+                        "support."
+                    )
+                # Other wrapper failures stay generic in the scientist-facing
+                # panel. The real failure detail (blocking_issues[0].message,
+                # which already carries the subprocess's stderr -- see
                 # guided_startup_orchestration.run_guided_startup_to_wrapper)
-                # is persisted to the existing app log instead, so it is not
+                # is also persisted to the existing app log, so it is not
                 # silently lost once this transient in-memory result is
                 # replaced by the next run.
                 diagnostics = getattr(result, "diagnostics", None)
