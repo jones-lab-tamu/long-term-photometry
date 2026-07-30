@@ -71,7 +71,17 @@ from gui.validate_run_policy import (
 )
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.utils import natural_sort_key
-from photometry_pipeline.io.adapters import inspect_custom_tabular_header, sniff_format
+from photometry_pipeline.io.adapters import (
+    _scan_time_column_metadata_chunked,
+    inspect_custom_tabular_header,
+    sniff_format,
+)
+from photometry_pipeline.guided_sampling_rate import (
+    GUIDED_SAMPLING_RATE_FAILURE_MESSAGE,
+    GUIDED_SAMPLING_RATE_RELATIVE_TOLERANCE,
+    GuidedSamplingRateError,
+    normalize_guided_sampling_rate_hz,
+)
 from photometry_pipeline.core.tonic_output import (
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
     TONIC_OUTPUT_MODE_PRESERVE_RAW,
@@ -8756,8 +8766,9 @@ class MainWindow(QMainWindow):
         cadence_sec = float(recording.cadence.nominal_cadence_seconds)
         if cadence_sec <= 0.0:
             raise RuntimeError("The recording cadence could not be used.")
+        target_fs_hz = normalize_guided_sampling_rate_hz(1.0 / cadence_sec)
         overrides: dict[str, object] = {
-            "target_fs_hz": 1.0 / cadence_sec,
+            "target_fs_hz": target_fs_hz,
             "rwd_time_col": str(recording.source.selected_time_column),
         }
         channels = tuple(recording.roi.available_roi_channels)
@@ -8791,6 +8802,62 @@ class MainWindow(QMainWindow):
             }
         )
         return overrides
+
+    def _guided_recording_target_fs_hz(self, input_format: str) -> float:
+        """Resolve the one recording-wide Guided target used by previews."""
+        fmt = str(input_format or "").strip().lower()
+        snapshot = getattr(
+            self, "_guided_new_analysis_dataset_contract_snapshot", None
+        )
+        if (
+            snapshot is not None
+            and getattr(snapshot, "current_applied", False)
+            and str(getattr(snapshot, "input_format", "") or "").strip().lower()
+            == fmt
+        ):
+            stored = dict(getattr(snapshot, "contract_values", {}) or {}).get(
+                "target_fs_hz"
+            )
+            if (
+                isinstance(stored, (int, float))
+                and not isinstance(stored, bool)
+                and math.isfinite(float(stored))
+                and float(stored) > 0.0
+            ):
+                return float(stored)
+
+        if fmt == "rwd":
+            if self._guided_effective_acquisition_mode() == "continuous":
+                return float(
+                    self._guided_continuous_recording_reader_overrides()[
+                        "target_fs_hz"
+                    ]
+                )
+            cache = getattr(self, "_rwd_contract_cache", None)
+            cached = (
+                cache.get("overrides") if isinstance(cache, dict) else None
+            )
+            if isinstance(cached, dict) and cached.get("target_fs_hz") is not None:
+                return normalize_guided_sampling_rate_hz(
+                    float(cached["target_fs_hz"])
+                )
+            inferred = self._infer_rwd_dataset_contract_overrides(
+                "rwd", whole_hz=True
+            )
+            return float(inferred["target_fs_hz"])
+        if fmt == "npm":
+            inferred = self._infer_npm_dataset_contract_overrides(
+                "npm", whole_hz=True
+            )
+            return float(inferred["target_fs_hz"])
+        if fmt == "custom_tabular":
+            interpretation = self._guided_csv_interpretation()
+            return float(
+                self._infer_custom_tabular_dataset_target_fs_hz(
+                    interpretation
+                )
+            )
+        raise GuidedSamplingRateError(GUIDED_SAMPLING_RATE_FAILURE_MESSAGE)
 
     def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
         if not hasattr(self, "_guided_preview_source_status_label"):
@@ -10302,6 +10369,7 @@ class MainWindow(QMainWindow):
                 continuous_window_index = segment.get(
                     "continuous_window_index"
                 )
+                applied_npm_snapshot = False
                 if continuous_window_index is not None:
                     # One continuous recording: the reader settings come from
                     # the recording already accepted by the recording check.
@@ -10315,7 +10383,9 @@ class MainWindow(QMainWindow):
                         str(segment["source_path"])
                     )
                     config_overrides = {
-                        "target_fs_hz": float(local_contract["fs_hz"]),
+                        "target_fs_hz": self._guided_recording_target_fs_hz(
+                            "rwd"
+                        ),
                         "chunk_duration_sec": float(
                             local_contract["chunk_duration_sec"]
                         ),
@@ -10328,6 +10398,9 @@ class MainWindow(QMainWindow):
                 elif segment["input_format"] == "custom_tabular":
                     interpretation = self._guided_csv_interpretation()
                     config_overrides = {
+                        "target_fs_hz": self._guided_recording_target_fs_hz(
+                            "custom_tabular"
+                        ),
                         "custom_tabular_time_col": interpretation["time_column"],
                         "custom_tabular_time_unit": interpretation["time_unit"],
                         "custom_tabular_roi_mapping_json": json.dumps(
@@ -10337,17 +10410,56 @@ class MainWindow(QMainWindow):
                         ),
                     }
                 else:
-                    # A local preview uses one selected session. Do not repeat
-                    # full-dataset NPM contract inference across every session.
-                    config_overrides = self._infer_npm_dataset_contract_overrides(
-                        "npm",
-                        input_path=str(segment["source_path"]),
-                        baseline_config=self._active_baseline_config(),
+                    snapshot = getattr(
+                        self,
+                        "_guided_new_analysis_dataset_contract_snapshot",
+                        None,
                     )
+                    if (
+                        snapshot is not None
+                        and getattr(snapshot, "current_applied", False)
+                        and str(
+                            getattr(snapshot, "input_format", "") or ""
+                        ).strip().lower()
+                        == "npm"
+                    ):
+                        applied_npm_snapshot = True
+                        applied_values = dict(
+                            getattr(snapshot, "contract_values", {}) or {}
+                        )
+                        npm_preview_keys = (
+                            "npm_time_axis",
+                            "npm_system_ts_col",
+                            "npm_computer_ts_col",
+                            "npm_led_col",
+                            "npm_region_prefix",
+                            "npm_region_suffix",
+                            "chunk_duration_sec",
+                            "allow_partial_final_chunk",
+                            "adapter_value_nan_policy",
+                        )
+                        config_overrides = {
+                            key: applied_values[key]
+                            for key in npm_preview_keys
+                            if key in applied_values
+                        }
+                        config_overrides["target_fs_hz"] = (
+                            self._guided_recording_target_fs_hz("npm")
+                        )
+                    else:
+                        config_overrides = (
+                            self._infer_npm_dataset_contract_overrides(
+                                "npm", whole_hz=True
+                            )
+                        )
                 if not isinstance(config_overrides, dict):
                     config_overrides = {}
                 duration_text = self._duration_edit.text().strip()
-                if duration_text and segment["input_format"] != "rwd":
+                if (
+                    duration_text
+                    and segment["input_format"] != "rwd"
+                    and not applied_npm_snapshot
+                ):
                     config_overrides["chunk_duration_sec"] = float(
                         duration_text
                     )
@@ -14283,6 +14395,14 @@ class MainWindow(QMainWindow):
                     inferred = self._guided_continuous_recording_reader_overrides()
                 else:
                     inferred = self._infer_dataset_contract_overrides(fmt)
+            except GuidedSamplingRateError:
+                validation_issues.extend(
+                    (
+                        GUIDED_SAMPLING_RATE_FAILURE_MESSAGE,
+                        "Selected recording: "
+                        f"{identity.input_source_path or 'unknown'}",
+                    )
+                )
             except Exception as exc:
                 validation_issues.append(
                     f"RWD dataset semantics could not be resolved: {exc}"
@@ -14301,7 +14421,20 @@ class MainWindow(QMainWindow):
                         and not isinstance(raw_target_fs_hz, bool)
                         and raw_target_fs_hz > 0
                     ):
-                        target_fs_hz_value = float(raw_target_fs_hz)
+                        try:
+                            target_fs_hz_value = (
+                                normalize_guided_sampling_rate_hz(
+                                    float(raw_target_fs_hz)
+                                )
+                            )
+                        except GuidedSamplingRateError:
+                            validation_issues.extend(
+                                (
+                                    GUIDED_SAMPLING_RATE_FAILURE_MESSAGE,
+                                    "Selected recording: "
+                                    f"{identity.input_source_path or 'unknown'}",
+                                )
+                            )
                 missing_semantics = [
                     name
                     for name in semantic_names
@@ -14334,15 +14467,55 @@ class MainWindow(QMainWindow):
                     else "npm_computer_ts_col"
                 ),
             )
+            try:
+                inferred = self._infer_npm_dataset_contract_overrides(
+                    "npm",
+                    input_path=str(identity.input_source_path or ""),
+                    baseline_config=baseline,
+                    whole_hz=True,
+                )
+            except GuidedSamplingRateError:
+                validation_issues.extend(
+                    (
+                        GUIDED_SAMPLING_RATE_FAILURE_MESSAGE,
+                        "Selected recording: "
+                        f"{identity.input_source_path or 'unknown'}",
+                    )
+                )
+                inferred = {}
+            except ValueError as exc:
+                validation_issues.append(str(exc))
+                inferred = {}
             dataset_semantics = {
-                "npm_time_axis": str(getattr(baseline, "npm_time_axis", "")),
-                "npm_system_ts_col": str(getattr(baseline, "npm_system_ts_col", "")),
-                "npm_computer_ts_col": str(getattr(baseline, "npm_computer_ts_col", "")),
-                "npm_led_col": str(getattr(baseline, "npm_led_col", "")),
-                "npm_region_prefix": str(getattr(baseline, "npm_region_prefix", "")),
-                "npm_region_suffix": str(getattr(baseline, "npm_region_suffix", "")),
-                "target_fs_hz": float(getattr(baseline, "target_fs_hz", 0.0)),
-                "allow_partial_final_chunk": bool(identity.allow_partial_final_window),
+                "npm_time_axis": str(
+                    inferred.get("npm_time_axis", baseline.npm_time_axis)
+                ),
+                "npm_system_ts_col": str(
+                    inferred.get(
+                        "npm_system_ts_col", baseline.npm_system_ts_col
+                    )
+                ),
+                "npm_computer_ts_col": str(
+                    inferred.get(
+                        "npm_computer_ts_col", baseline.npm_computer_ts_col
+                    )
+                ),
+                "npm_led_col": str(
+                    inferred.get("npm_led_col", baseline.npm_led_col)
+                ),
+                "npm_region_prefix": str(
+                    inferred.get(
+                        "npm_region_prefix", baseline.npm_region_prefix
+                    )
+                ),
+                "npm_region_suffix": str(
+                    inferred.get(
+                        "npm_region_suffix", baseline.npm_region_suffix
+                    )
+                ),
+                "allow_partial_final_chunk": bool(
+                    identity.allow_partial_final_window
+                ),
                 "adapter_value_nan_policy": str(
                     getattr(baseline, "adapter_value_nan_policy", "strict")
                 ),
@@ -14351,10 +14524,11 @@ class MainWindow(QMainWindow):
                 dataset_semantics["chunk_duration_sec"] = float(
                     identity.session_duration_sec
                 )
-            target_fs_hz_value = float(dataset_semantics["target_fs_hz"])
-            if not math.isfinite(target_fs_hz_value) or target_fs_hz_value <= 0:
+            if inferred.get("target_fs_hz") is not None:
+                target_fs_hz_value = float(inferred["target_fs_hz"])
+            else:
                 validation_issues.append(
-                    "The NPM sampling rate is missing or invalid."
+                    GUIDED_SAMPLING_RATE_FAILURE_MESSAGE
                 )
             missing_semantics = [
                 name
@@ -14414,16 +14588,25 @@ class MainWindow(QMainWindow):
                         "custom_tabular_header_rule": "ordinary_first_row",
                         "custom_tabular_delimiter": "comma",
                     }
-                    target_fs_hz_value = float(
-                        getattr(self._active_baseline_config(), "target_fs_hz", 0.0)
-                    )
-                    if (
-                        not math.isfinite(target_fs_hz_value)
-                        or target_fs_hz_value <= 0
-                    ):
-                        validation_issues.append(
-                            "The target sampling rate is missing or invalid."
+                    try:
+                        target_fs_hz_value = float(
+                            self._infer_custom_tabular_dataset_target_fs_hz(
+                                interpretation,
+                                input_path=str(
+                                    identity.input_source_path or ""
+                                ),
+                            )
                         )
+                    except GuidedSamplingRateError:
+                        validation_issues.extend(
+                            (
+                                GUIDED_SAMPLING_RATE_FAILURE_MESSAGE,
+                                "Selected recording: "
+                                f"{identity.input_source_path or 'unknown'}",
+                            )
+                        )
+                    except ValueError as exc:
+                        validation_issues.append(str(exc))
                     status = "inferred" if not validation_issues else "invalid"
         elif fmt == "auto":
             status = "invalid"
@@ -14457,15 +14640,12 @@ class MainWindow(QMainWindow):
             },
             format_specific={
                 "structural_only": False,
-                "dataset_semantics_inferred_from_selected_input": fmt == "rwd",
+                "dataset_semantics_inferred_from_selected_input": fmt
+                in {"rwd", "npm", "custom_tabular"},
                 "dataset_semantics_source": (
-                    "configured"
-                    if fmt == "npm"
-                    else (
-                        "scientist_confirmed_csv_interpretation"
-                        if fmt == "custom_tabular"
-                        else "source_validated_candidate"
-                    )
+                    "selected_recording"
+                    if fmt in {"rwd", "npm", "custom_tabular"}
+                    else "source_validated_candidate"
                 ),
                 "diagnostic_scope_signature": signatures["diagnostic_scope_signature"],
             },
@@ -14518,22 +14698,23 @@ class MainWindow(QMainWindow):
             current_identity,
         )
         if not differences and str(snapshot.input_format or "").strip().lower() == "npm":
-            current_candidate = self._guided_new_analysis_dataset_contract_candidate()
-            npm_contract_keys = {
-                "npm_time_axis",
-                "npm_system_ts_col",
-                "npm_computer_ts_col",
-                "npm_led_col",
-                "npm_region_prefix",
-                "npm_region_suffix",
-                "target_fs_hz",
-                "allow_partial_final_chunk",
-                "adapter_value_nan_policy",
+            baseline = self._active_baseline_config()
+            current_npm_values = {
+                "npm_time_axis": str(baseline.npm_time_axis),
+                "npm_led_col": str(baseline.npm_led_col),
+                "npm_region_prefix": str(baseline.npm_region_prefix),
+                "npm_region_suffix": str(baseline.npm_region_suffix),
+                "allow_partial_final_chunk": bool(
+                    current_identity.allow_partial_final_window
+                ),
+                "adapter_value_nan_policy": str(
+                    baseline.adapter_value_nan_policy
+                ),
             }
             if any(
                 snapshot.contract_values.get(key)
-                != current_candidate.contract_values.get(key)
-                for key in npm_contract_keys
+                != value
+                for key, value in current_npm_values.items()
             ):
                 differences.append("NPM import settings changed")
         if not differences:
@@ -16292,7 +16473,7 @@ class MainWindow(QMainWindow):
                 npm_led_col=str(values.get("npm_led_col", baseline.npm_led_col)),
                 npm_region_prefix=str(values.get("npm_region_prefix", baseline.npm_region_prefix)),
                 npm_region_suffix=str(values.get("npm_region_suffix", baseline.npm_region_suffix)),
-                target_fs_hz=float(values.get("target_fs_hz", baseline.target_fs_hz)),
+                target_fs_hz=float(values["target_fs_hz"]),
                 session_duration_sec=float(draft.session_duration_sec or baseline.chunk_duration_sec),
                 allow_partial_final_chunk=bool(
                     values.get("allow_partial_final_chunk", draft.allow_partial_final_window)
@@ -18528,6 +18709,33 @@ class MainWindow(QMainWindow):
                 parts.append(f"Custom for {', '.join(custom_rois)}")
             fe_lines.append(f"Feature detection: {'; '.join(parts)}.")
 
+        sampling_values = dict(
+            getattr(plan.dataset_contract_snapshot, "contract_values", {})
+            or {}
+        )
+        sampling_rate = sampling_values.get("target_fs_hz")
+        if (
+            isinstance(sampling_rate, (int, float))
+            and not isinstance(sampling_rate, bool)
+            and math.isfinite(float(sampling_rate))
+            and float(sampling_rate) > 0.0
+        ):
+            sampling_lines = [
+                f"Sampling rate: {int(float(sampling_rate))} Hz",
+                "Automatically determined from the recording.",
+            ]
+        elif GUIDED_SAMPLING_RATE_FAILURE_MESSAGE in tuple(
+            getattr(
+                plan.dataset_contract_snapshot,
+                "validation_issues",
+                (),
+            )
+            or ()
+        ):
+            sampling_lines = [GUIDED_SAMPLING_RATE_FAILURE_MESSAGE]
+        else:
+            sampling_lines = []
+
         if plan.input_format == "custom_tabular":
             snapshot = plan.dataset_contract_snapshot
             values = dict(getattr(snapshot, "contract_values", {}) or {})
@@ -18559,6 +18767,7 @@ class MainWindow(QMainWindow):
                 "Time: "
                 f"{values.get('custom_tabular_time_col', 'not selected')} "
                 f"({values.get('custom_tabular_time_unit', 'not selected')})",
+                *sampling_lines,
                 f"Recording structure: {timing_summary}",
                 "Timeline placement:",
                 *(
@@ -18658,6 +18867,7 @@ class MainWindow(QMainWindow):
             f"Dataset contract snapshot status: {snapshot.status}",
             f"Dataset contract current_applied: {str(bool(snapshot.current_applied)).lower()}",
             f"Dataset contract explicitly_applied: {str(bool(snapshot.explicitly_applied)).lower()}",
+            *sampling_lines,
         ])
         if snapshot.input_format:
             lines.append(f"Dataset contract input_format: {snapshot.input_format}")
@@ -20493,7 +20703,7 @@ class MainWindow(QMainWindow):
                 return overrides
             contract = self._infer_rwd_chunk_contract(source_path)
             return {
-                "target_fs_hz": float(contract["fs_hz"]),
+                "target_fs_hz": self._guided_recording_target_fs_hz("rwd"),
                 "chunk_duration_sec": float(
                     contract["chunk_duration_sec"]
                 ),
@@ -20517,13 +20727,20 @@ class MainWindow(QMainWindow):
                 "custom_tabular_time_col",
                 "custom_tabular_time_unit",
                 "custom_tabular_roi_mapping_json",
+                "target_fs_hz",
             )
             if any(not values.get(name) for name in required):
                 raise ValueError(
                     "The confirmed CSV column interpretation is incomplete."
                 )
             return {name: values[name] for name in required}
-        overrides = self._infer_dataset_contract_overrides(input_format)
+        overrides = (
+            self._infer_npm_dataset_contract_overrides(
+                "npm", whole_hz=True
+            )
+            if input_format == "npm"
+            else self._infer_dataset_contract_overrides(input_format)
+        )
         result = dict(overrides) if isinstance(overrides, dict) else {}
         duration_text = self._duration_edit.text().strip()
         if duration_text:
@@ -27843,6 +28060,71 @@ class MainWindow(QMainWindow):
         )
         return has_time and has_led and has_roi
 
+    def _infer_custom_tabular_dataset_target_fs_hz(
+        self,
+        interpretation: dict[str, object],
+        *,
+        input_path: str | None = None,
+    ) -> float:
+        """Infer one whole-Hz target from every accepted CSV session."""
+        folder = (
+            self._guided_input_dir_edit.text().strip()
+            if input_path is None
+            else str(input_path)
+        )
+        time_col = str(interpretation.get("time_column") or "").strip()
+        time_scale = float(
+            interpretation.get("time_scale_to_seconds") or 0.0
+        )
+        ordered = list(interpretation.get("ordered_source_files") or [])
+        if not folder or not time_col or time_scale <= 0.0 or not ordered:
+            raise ValueError(
+                "The confirmed CSV timing interpretation is incomplete."
+            )
+
+        session_rates: list[float] = []
+        session_paths: list[str] = []
+        for source_name in ordered:
+            source_path = (
+                str(source_name)
+                if os.path.isabs(str(source_name))
+                else os.path.join(folder, str(source_name))
+            )
+            scan = _scan_time_column_metadata_chunked(
+                path=source_path,
+                time_col=time_col,
+                header_row=0,
+                context=f"CSV session {os.path.basename(source_path)}",
+            )
+            median_dt_sec = float(scan["median_dt_raw"]) * time_scale
+            if not math.isfinite(median_dt_sec) or median_dt_sec <= 0.0:
+                raise GuidedSamplingRateError(
+                    GUIDED_SAMPLING_RATE_FAILURE_MESSAGE
+                )
+            session_rates.append(1.0 / median_dt_sec)
+            session_paths.append(source_path)
+
+        representative_rate = float(median(session_rates))
+        rate_tolerance = max(
+            1e-6,
+            representative_rate
+            * GUIDED_SAMPLING_RATE_RELATIVE_TOLERANCE,
+        )
+        for source_path, session_rate in zip(
+            session_paths, session_rates, strict=True
+        ):
+            if not math.isclose(
+                session_rate,
+                representative_rate,
+                rel_tol=0.0,
+                abs_tol=rate_tolerance,
+            ):
+                raise GuidedSamplingRateError(
+                    f"{GUIDED_SAMPLING_RATE_FAILURE_MESSAGE} "
+                    f"Source: {source_path}"
+                )
+        return normalize_guided_sampling_rate_hz(representative_rate)
+
     def _infer_npm_chunk_contract(self, csv_path: str, cfg: Config) -> dict:
         with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
             reader = csv.reader(f)
@@ -27982,6 +28264,7 @@ class MainWindow(QMainWindow):
         *,
         input_path: str | None = None,
         baseline_config: Config | None = None,
+        whole_hz: bool = False,
     ) -> dict:
         if fmt_text not in ("auto", "npm"):
             return {}
@@ -28010,7 +28293,10 @@ class MainWindow(QMainWindow):
         dur_vals = [float(c["chunk_duration_sec"]) for c in contracts]
         rep_fs = float(median(fs_vals))
         rep_duration = float(median(dur_vals))
-        fs_tol = max(1e-6, rep_fs * 5e-3)
+        fs_tol = max(
+            1e-6,
+            rep_fs * GUIDED_SAMPLING_RATE_RELATIVE_TOLERANCE,
+        )
         # NPM long runs are known to show per-file duration drift; enforce a
         # bounded spread guard instead of exact equality.
         dur_tol = max(1.0 / max(rep_fs, 1e-9), rep_duration * 0.10)
@@ -28051,12 +28337,17 @@ class MainWindow(QMainWindow):
                     f"Observed duration range [{min(dur_vals):.9f}, {max(dur_vals):.9f}]."
                 )
 
+        target_fs_hz = (
+            normalize_guided_sampling_rate_hz(rep_fs)
+            if whole_hz
+            else float(round(rep_fs, 9))
+        )
         out = {
             "npm_time_axis": str(base["time_axis"]),
             "npm_led_col": str(base["led_col"]),
             "npm_region_prefix": str(base["region_prefix"]),
             "npm_region_suffix": str(base["region_suffix"]),
-            "target_fs_hz": float(round(rep_fs, 9)),
+            "target_fs_hz": target_fs_hz,
             "chunk_duration_sec": float(round(rep_duration, 9)),
         }
         if base["time_axis"] == "system_timestamp":
@@ -28430,6 +28721,7 @@ class MainWindow(QMainWindow):
         input_path: str | None = None,
         exclude_final_override: bool | None = None,
         emit_warning: bool = True,
+        whole_hz: bool = False,
     ) -> dict:
         """
         Infer RWD acquisition contract from selected input data.
@@ -28493,11 +28785,16 @@ class MainWindow(QMainWindow):
             if c.get("metadata_effective_fs_hz") is not None
         ]
         if metadata_fs_values:
-            nominal_fs = float(median(metadata_fs_values))
+            inferred_nominal_fs = float(median(metadata_fs_values))
             nominal_fs_source = "metadata_effective_fps"
         else:
-            nominal_fs = float(base["fs_hz"])
+            inferred_nominal_fs = float(base["fs_hz"])
             nominal_fs_source = "first_chunk_median_timestamp_delta"
+        nominal_fs = (
+            normalize_guided_sampling_rate_hz(inferred_nominal_fs)
+            if whole_hz
+            else inferred_nominal_fs
+        )
         fs_tol = max(1e-6, nominal_fs * 1e-4)
         fs_warning_tol = max(fs_tol, nominal_fs * 1e-3)
         fs_hard_tol = max(fs_warning_tol, nominal_fs * 5e-3)
@@ -28738,7 +29035,7 @@ class MainWindow(QMainWindow):
             ]
 
         out = {
-            "target_fs_hz": float(round(nominal_fs, 9)),
+            "target_fs_hz": nominal_fs,
             "chunk_duration_sec": float(round(nominal_duration, 9)),
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
@@ -30036,6 +30333,7 @@ class MainWindow(QMainWindow):
             fmt,
             input_path=input_dir,
             baseline_config=baseline_config,
+            whole_hz=True,
         )
         if npm_overrides:
             data_contract_overrides = npm_overrides
@@ -30054,6 +30352,7 @@ class MainWindow(QMainWindow):
                     input_path=input_dir,
                     exclude_final_override=exclude_final,
                     emit_warning=emit_warning,
+                    whole_hz=True,
                 )
             )
         if not isinstance(data_contract_overrides, dict):

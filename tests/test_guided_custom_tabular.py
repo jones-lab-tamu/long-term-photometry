@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -316,12 +317,33 @@ def test_guided_csv_controls_show_label_order_and_require_confirmation(
             "session_2.csv",
             "session_10.csv",
         ]
+        window._discovery_cache = {"resolved_format": "custom_tabular"}
+        acquisition_index = (
+            window._guided_acquisition_mode_combo.findData("intermittent")
+        )
+        window._guided_acquisition_mode_combo.setCurrentIndex(
+            acquisition_index
+        )
+        window._guided_sessions_per_hour_edit.setText("1")
+        window._guided_session_duration_edit.setText("0.5")
+        candidate = (
+            window._guided_new_analysis_dataset_contract_candidate()
+        )
+        assert candidate.status == "inferred"
+        assert candidate.contract_values["target_fs_hz"] == 10.0
+        window._guided_new_analysis_dataset_contract_snapshot = replace(
+            candidate,
+            status="applied",
+            explicitly_applied=True,
+        )
         plan = window._build_guided_new_analysis_draft_plan()
         summary = window._guided_new_analysis_draft_plan_summary_text(
             plan, evaluate_new_analysis_plan_readiness(plan)
         )
         assert "Source type: CSV files" in summary
-        assert "CSV session order: incomplete" in summary
+        assert "CSV session order: confirmed filename order" in summary
+        assert "Sampling rate: 10 Hz" in summary
+        assert "Automatically determined from the recording." in summary
         assert "custom_tabular" not in summary
         assert "RWD" not in summary
         assert "Doric" not in summary

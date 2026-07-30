@@ -504,6 +504,7 @@ def test_custom_tabular_natural_backend_validation_path_accepts_original_csvs(
         item.name: item.value
         for item in payload_result.config_payload.values
     }
+    assert payload_fields["target_fs_hz"] == 2.0
     assert payload_fields["custom_tabular_time_col"] == "Elapsed"
     assert payload_fields["custom_tabular_time_unit"] == "seconds"
     assert json.loads(

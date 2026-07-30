@@ -24,6 +24,7 @@ from photometry_pipeline.guided_continuous_rwd_projection import (
 from photometry_pipeline.guided_continuous_rwd_recording import (
     build_guided_continuous_rwd_recording_description,
 )
+from photometry_pipeline import guided_continuous_rwd_recording as recording_subject
 from photometry_pipeline.guided_continuous_rwd_review_binding import (
     GuidedContinuousRwdReviewBinding,
     build_guided_continuous_rwd_review_binding,
@@ -68,7 +69,7 @@ def _source_text(
     raw_times=None,
 ) -> str:
     if raw_times is None:
-        raw_times = [1000, 101000, 201000, 301000, 401000, 501000, 601000]
+        raw_times = [1000, 1001, 1002, 1003, 1004, 1005, 1006]
     suffix = "," if terminal else ""
     header = (
         f"{timestamp_column},CH1-410,CH1-470,CH2-410,CH2-470,"
@@ -131,6 +132,7 @@ def _build_case(
 @pytest.fixture(autouse=True)
 def _small_c2_blocks(monkeypatch):
     monkeypatch.setattr(block_subject, "MAXIMUM_OWNED_SAMPLES_PER_BLOCK", 3)
+    monkeypatch.setattr(recording_subject, "MINIMUM_DURATION_SEC", 6.0)
 
 
 @pytest.fixture
@@ -202,10 +204,10 @@ def test_nonzero_origin_normalization_subtracts_before_scaling(tmp_path):
     case = _build_case(
         tmp_path,
         timestamp_column="TimeStamp",
-        raw_times=[1000, 101000, 201000, 301000, 401000, 501000, 601000],
+        raw_times=[1000, 1001, 1002, 1003, 1004, 1005, 1006],
     )
     times = np.concatenate([item.target_elapsed_seconds for item in _iterator(case)])
-    np.testing.assert_array_equal(times, np.arange(0.0, 601.0, 100.0))
+    np.testing.assert_array_equal(times, np.arange(0.0, 7.0, 1.0))
     assert times[0] == 0.0
 
 
@@ -379,8 +381,8 @@ def test_excluded_roi_values_are_not_parsed_into_projection(case):
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ("101000,", "1000,"),
-        ("201000,", "50000,"),
+        ("1001,", "1000,"),
+        ("1002,", "999,"),
     ],
 )
 def test_duplicate_and_backward_timestamps_are_refused(case, old, new):
@@ -397,7 +399,7 @@ def test_first_origin_and_final_endpoint_drift_are_refused(case):
     assert caught.value.category == "timestamp_violation"
 
     case = _build_case(case.source.parent.parent / "second")
-    _mutate_same_size(case.source, lambda body: body.replace("601000,", "601001,", 1))
+    _mutate_same_size(case.source, lambda body: body.replace("1006,", "1007,", 1))
     with pytest.raises(subject.ContinuousRwdProjectionReaderError) as caught:
         list(_iterator(case))
     assert caught.value.category == "timestamp_violation"
@@ -406,7 +408,7 @@ def test_first_origin_and_final_endpoint_drift_are_refused(case):
 def test_middle_blocks_reuse_bracketing_rows_without_target_overlap(tmp_path):
     case = _build_case(
         tmp_path,
-        raw_times=[1000, 101000, 191000, 311000, 401000, 501000, 601000],
+        raw_times=[1000, 1001, 1001.9375, 1003.0625, 1004, 1005, 1006],
     )
     assert case.binding.continuity_evaluation.outcome == CONTINUITY_PASSED
     results = list(_iterator(case))
@@ -421,7 +423,7 @@ def test_final_block_before_endpoint_still_consumes_trailing_rows(case):
     iterator = _iterator(case)
     first, second, final = next(iterator), next(iterator), next(iterator)
     assert final.target_elapsed_seconds[-1] == case.grid.last_target_elapsed_seconds
-    assert final.target_elapsed_seconds[-1] == 600.0
+    assert final.target_elapsed_seconds[-1] == 6.0
     with pytest.raises(StopIteration):
         next(iterator)
     assert [first.block_index, second.block_index, final.block_index] == [0, 1, 2]
@@ -430,12 +432,12 @@ def test_final_block_before_endpoint_still_consumes_trailing_rows(case):
 def test_final_target_before_accepted_endpoint_is_verified(tmp_path):
     case = _build_case(
         tmp_path,
-        raw_times=[1000, 101000, 201000, 301000, 401000, 501000, 601050],
+        raw_times=[1000, 1001, 1002, 1003, 1004, 1005, 1006.0005],
     )
-    assert case.grid.last_target_elapsed_seconds == 600.0
-    assert case.binding.recording.time.measured_support_end_seconds == pytest.approx(600.05)
+    assert case.grid.last_target_elapsed_seconds == 6.0
+    assert case.binding.recording.time.measured_support_end_seconds == pytest.approx(6.0005)
     results = list(_iterator(case))
-    assert results[-1].target_elapsed_seconds[-1] == 600.0
+    assert results[-1].target_elapsed_seconds[-1] == 6.0
     assert results[-1].source_row_stop == 7
 
 

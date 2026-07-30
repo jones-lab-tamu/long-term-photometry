@@ -16,6 +16,9 @@ import photometry_pipeline.preview.correction_preview as correction_preview_modu
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
+from photometry_pipeline.guided_new_analysis_plan import (
+    GuidedNewAnalysisDatasetContractSnapshot,
+)
 from photometry_pipeline.guided_run_plan import (
     CorrectionStrategyChoice,
     EvidenceChunkReview,
@@ -6187,10 +6190,44 @@ def test_npm_local_preview_runs_off_the_gui_thread_and_blocks_duplicate_start(
     window._discovery_cache = discovery
     window._populate_discovery_ui(discovery)
     window._refresh_guided_diagnostics_panel()
+    applied_values = {
+        "npm_time_axis": "system_timestamp",
+        "npm_system_ts_col": "Timestamp",
+        "npm_computer_ts_col": "ComputerTimestamp",
+        "npm_led_col": "LedState",
+        "npm_region_prefix": "Region",
+        "npm_region_suffix": "G",
+        "chunk_duration_sec": 600.0,
+        "allow_partial_final_chunk": False,
+        "adapter_value_nan_policy": "strict",
+        "target_fs_hz": 20.0,
+    }
+    window._guided_new_analysis_dataset_contract_snapshot = (
+        GuidedNewAnalysisDatasetContractSnapshot(
+            status="applied",
+            input_format="npm",
+            resolved_input_format="npm",
+            acquisition_mode="intermittent",
+            contract_values=applied_values,
+            source_identity=(
+                window._guided_new_analysis_dataset_contract_source_identity()
+            ),
+            explicitly_applied=True,
+        )
+    )
+    inference_calls = []
+
+    def fallback_inference(*args, **kwargs):
+        inference_calls.append((args, kwargs))
+        return {
+            **applied_values,
+            "target_fs_hz": 20.0,
+        }
+
     monkeypatch.setattr(
         window,
         "_infer_npm_dataset_contract_overrides",
-        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+        fallback_inference,
     )
 
     gui_thread_id = threading.get_ident()
@@ -6324,6 +6361,40 @@ def test_npm_local_preview_runs_off_the_gui_thread_and_blocks_duplicate_start(
     assert calls[0][0][0] == str(source_files[0].resolve())
     assert calls[0][1]["roi"] == "Region0"
     assert calls[0][1]["adapter_chunk_index"] == 0
+    assert calls[0][1]["config_overrides"] == applied_values
+    assert inference_calls == []
+    assert (
+        window._guided_new_analysis_dataset_contract_snapshot.current_applied
+        is True
+    )
+
+    window._guided_preview_chunk_combo.setCurrentIndex(1)
+    assert (
+        window._guided_new_analysis_dataset_contract_snapshot.current_applied
+        is True
+    )
+    window._guided_preview_generate_btn.click()
+    for _ in range(100):
+        qapp.processEvents()
+        if window._guided_correction_preview_thread is None:
+            break
+        QTest.qWait(10)
+
+    assert len(calls) == 2
+    assert calls[1][0][0] == str(source_files[1].resolve())
+    assert calls[1][1]["config_overrides"] == applied_values
+    assert inference_calls == []
+
+    changed_source = tmp_path / "changed_npm_source"
+    changed_source.mkdir()
+    window._guided_input_dir_edit.setText(str(changed_source))
+    window._refresh_guided_new_analysis_dataset_contract_staleness()
+    assert (
+        window._guided_new_analysis_dataset_contract_snapshot.current_applied
+        is False
+    )
+    assert window._guided_recording_target_fs_hz("npm") == 20.0
+    assert len(inference_calls) == 1
 
 
 @pytest.mark.parametrize("create_output_dir", [True, False])
@@ -6341,7 +6412,10 @@ def test_npm_preview_report_failure_is_delivered_on_gui_thread(
     monkeypatch.setattr(
         window,
         "_infer_npm_dataset_contract_overrides",
-        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+        lambda *args, **kwargs: {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+        },
     )
     gui_thread_id = threading.get_ident()
     report_thread_ids = []
@@ -6453,7 +6527,10 @@ def test_npm_preview_computation_failure_is_classified_before_reporting(
     monkeypatch.setattr(
         window,
         "_infer_npm_dataset_contract_overrides",
-        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+        lambda *args, **kwargs: {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+        },
     )
     gui_thread_id = threading.get_ident()
     computation_thread_ids = []
@@ -6574,8 +6651,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
     loads = []
 
-    def fake_load_chunk(path, input_format, _config, chunk_id):
-        loads.append((path, input_format, chunk_id))
+    def fake_load_chunk(path, input_format, config, chunk_id):
+        loads.append(
+            (path, input_format, chunk_id, config.target_fs_hz)
+        )
         return Chunk(
             chunk_id=chunk_id,
             source_file=path,
@@ -6596,13 +6675,16 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "_infer_rwd_chunk_contract",
         lambda path: {
             "csv_path": path,
-            "fs_hz": 20.0,
+            "fs_hz": 20.040883402,
             "chunk_duration_sec": 600.0,
             "time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
         },
     )
+    window._rwd_contract_cache = {
+        "overrides": {"target_fs_hz": 20.0},
+    }
     runner = _FakeDiagnosticCacheRunner()
     window._guided_diagnostic_cache_runner = runner
     window._set_guided_workflow_mode("new_analysis")
@@ -6626,7 +6708,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert result["source_type"] == "local_raw_segment"
     assert result["preview_only"] is True
     assert result["production_analysis"] is False
-    assert loads == [(str(source_files[2].resolve()), "rwd", 0)]
+    assert loads == [
+        (str(source_files[2].resolve()), "rwd", 0, 20.0)
+    ]
     assert runner.argv is None
     assert window._guided_diagnostic_cache_record is None
     assert Path(result["visual_preview_path"]).is_file()

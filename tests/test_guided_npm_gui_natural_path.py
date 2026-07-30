@@ -110,7 +110,7 @@ def _configure_npm_new_analysis_setup(window, tmp_path, monkeypatch):
     session_files = []
     for index in range(2):
         session_path = input_dir / f"photometryData2026-01-0{index + 1}T12_00_00.csv"
-        _write_real_npm_session(session_path, n_seconds=3.0, rate_hz=45.0)
+        _write_real_npm_session(session_path, n_seconds=3.0, rate_hz=20.0)
         session_files.append(session_path)
 
     window._guided_input_dir_edit.setText(str(input_dir))
@@ -150,7 +150,7 @@ def _configure_npm_new_analysis_setup(window, tmp_path, monkeypatch):
 def _fake_npm_load_chunk(path, input_format, _config, chunk_id, **_kwargs):
     import numpy as np
 
-    time_sec = np.arange(120, dtype=float) / 40.0
+    time_sec = np.arange(60, dtype=float) / 20.0
     uv = 1.0 + 0.03 * np.sin(time_sec * 0.2)
     sig = 1.2 * uv + 0.05 * np.sin(time_sec * 0.9)
     return Chunk(
@@ -160,7 +160,7 @@ def _fake_npm_load_chunk(path, input_format, _config, chunk_id, **_kwargs):
         time_sec=time_sec,
         uv_raw=np.column_stack([uv] * len(NPM_ROIS)),
         sig_raw=np.column_stack([sig * (1.0 + 0.01 * i) for i in range(len(NPM_ROIS))]),
-        fs_hz=40.0,
+        fs_hz=20.0,
         channel_names=list(NPM_ROIS),
         metadata={},
     )
@@ -415,6 +415,14 @@ def test_natural_path_npm_reaches_check_my_setup_and_dispatches_shared_run(
     assert request.startup_authority.included_roi_ids == tuple(included_rois)
     assert Path(request.planned_allocated_run_dir).parent == output_dir.resolve()
     assert window._guided_backend_execution_active is True
+    payload_values = {
+        item.name: item.value
+        for item in request.payload_result.config_payload.values
+    }
+    assert payload_values["target_fs_hz"] == 20.0
+    assert payload_values["target_fs_hz"] != (
+        window._active_baseline_config().target_fs_hz
+    )
 
     # No numerical execution and no allocation: the worker itself was
     # replaced above, so the wrapper subprocess is never spawned and the

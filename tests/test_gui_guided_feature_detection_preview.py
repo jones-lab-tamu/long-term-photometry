@@ -788,11 +788,12 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
         input_format="custom_tabular",
         resolved_input_format="custom_tabular",
         acquisition_mode="intermittent",
-        contract_values={
-            "custom_tabular_time_col": "ElapsedSeconds",
-            "custom_tabular_time_unit": "seconds",
-            "custom_tabular_roi_mapping_json": json.dumps(mappings),
-        },
+            contract_values={
+                "custom_tabular_time_col": "ElapsedSeconds",
+                "custom_tabular_time_unit": "seconds",
+                "custom_tabular_roi_mapping_json": json.dumps(mappings),
+                "target_fs_hz": 2.0,
+            },
         explicitly_applied=True,
     )
     window._active_config_source_path = lambda: "C:/config.yaml"
@@ -839,6 +840,7 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
         "custom_tabular_time_col": "ElapsedSeconds",
         "custom_tabular_time_unit": "seconds",
         "custom_tabular_roi_mapping_json": json.dumps(mappings),
+        "target_fs_hz": 2.0,
     }
     assert "time_sec" not in kwargs["config_overrides"].values()
 

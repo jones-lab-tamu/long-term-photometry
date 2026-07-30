@@ -220,7 +220,7 @@ def test_exact_fraction_origin_count_and_endpoint_invariants(valid_case):
         (600.0, 1.0, 601, 600.0),
         (600.0, 0.000025, 24_000_001, 600.0),
         (5_000_000.0, 0.1, 50_000_001, 5_000_000.0),
-        (347_345.634853, 0.099997, 3_473_561, 347_345.57932),
+        (347_345.634853, 0.099997, 3_473_457, 347_345.6),
     ],
 )
 def test_builder_boundary_arithmetic(duration, cadence, expected_count, expected_last):
@@ -238,11 +238,11 @@ def test_next_float_below_minimum_uses_exact_scalar_count_without_binary_off_by_
     assert subject._resolve_target_sample_count(support, cadence) == 6000
 
 
-def test_cadence_is_exact_b1_authority_not_conventional_or_duration_derived():
+def test_cadence_is_normalized_from_reliable_b1_authority():
     recording, evaluation = _authorities(duration=601.0, cadence=0.099997, row_count=17)
     grid = _build((recording, evaluation))
-    assert grid.cadence_fraction == Fraction(99997, 1_000_000)
-    assert grid.cadence_seconds != 0.1
+    assert grid.cadence_fraction == Fraction(1, 10)
+    assert grid.cadence_seconds == 0.1
     assert grid.cadence_seconds != recording.time.measured_duration_seconds / 16
     assert grid.target_sample_count != recording.source.valid_timestamp_count
 
@@ -486,7 +486,10 @@ def test_path_only_relocation_does_not_change_grid_identity(valid_case):
 
 
 def test_fewer_than_two_samples_and_overflow_are_refused():
-    with pytest.raises(subject.ContinuousRwdTargetGridError, match="at least two"):
+    with pytest.raises(
+        subject.ContinuousRwdTargetGridError,
+        match="Sampling rate could not be determined reliably",
+    ):
         _build(_authorities(duration=600.0, cadence=1000.0))
     with pytest.raises(subject.ContinuousRwdTargetGridError, match="64-bit"):
         _build(_authorities(duration=600.0, cadence=1e-20))

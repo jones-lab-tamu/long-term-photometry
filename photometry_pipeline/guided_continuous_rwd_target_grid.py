@@ -23,6 +23,10 @@ from photometry_pipeline.guided_continuous_rwd_recording import (
     _validate_description as _validate_recording_description,
 )
 from photometry_pipeline.guided_identity import encode_canonical_value
+from photometry_pipeline.guided_sampling_rate import (
+    GuidedSamplingRateError,
+    normalize_guided_sampling_rate_hz,
+)
 
 
 SCHEMA_NAME = "guided_continuous_rwd_target_grid"
@@ -304,10 +308,13 @@ def build_guided_continuous_rwd_target_grid(
         ) from exc
     _validate_b2_compatibility(recording, continuity_evaluation)
 
-    cadence = _decimal_fraction(
-        recording.cadence.nominal_cadence_seconds,
-        "nominal cadence",
-    )
+    try:
+        target_fs_hz = normalize_guided_sampling_rate_hz(
+            1.0 / recording.cadence.nominal_cadence_seconds
+        )
+    except GuidedSamplingRateError as exc:
+        raise ContinuousRwdTargetGridError(str(exc)) from exc
+    cadence = Fraction(1, int(target_fs_hz))
     support = _decimal_fraction(
         recording.time.measured_support_end_seconds,
         "measured support end",

@@ -123,31 +123,37 @@ def _configure_minimal_npm_contract_state(window):
     window._guided_session_duration_edit.setText("120")
 
 
-def test_npm_dataset_contract_candidate_does_not_call_legacy_inference(
+def test_npm_dataset_contract_candidate_uses_recording_rate_inference(
     window,
     monkeypatch,
 ):
     _configure_minimal_npm_contract_state(window)
-
-    def fail_legacy_inference(_format):
-        raise AssertionError("legacy GUI NPM inference must not be called")
-
+    calls = []
     monkeypatch.setattr(
         window,
-        "_infer_dataset_contract_overrides",
-        fail_legacy_inference,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: (
+            calls.append((args, kwargs))
+            or {
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "Timestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+                "target_fs_hz": 20.0,
+            }
+        ),
     )
 
     candidate = window._guided_new_analysis_dataset_contract_candidate()
 
     assert candidate.status == "inferred"
-    assert candidate.format_specific["dataset_semantics_source"] == "configured"
+    assert calls and calls[0][1]["whole_hz"] is True
+    assert candidate.format_specific["dataset_semantics_source"] == "selected_recording"
     assert candidate.format_specific[
         "dataset_semantics_inferred_from_selected_input"
-    ] is False
-    assert candidate.contract_values["npm_led_col"] == (
-        window._active_baseline_config().npm_led_col
-    )
+    ] is True
+    assert candidate.contract_values["target_fs_hz"] == 20.0
 
 
 def test_rwd_dataset_contract_candidate_reuses_discovery_contract_cache(
@@ -314,8 +320,15 @@ def test_npm_context_builds_parser_from_applied_settings_without_legacy_inferenc
     _configure_minimal_npm_contract_state(window)
     monkeypatch.setattr(
         window,
-        "_infer_dataset_contract_overrides",
-        lambda _format: pytest.fail("legacy GUI NPM inference was called"),
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: {
+            "npm_time_axis": "system_timestamp",
+            "npm_system_ts_col": "Timestamp",
+            "npm_led_col": "LedState",
+            "npm_region_prefix": "Region",
+            "npm_region_suffix": "G",
+            "target_fs_hz": 20.0,
+        },
     )
     candidate = window._guided_new_analysis_dataset_contract_candidate()
     snapshot = replace(candidate, status="applied", explicitly_applied=True)
@@ -341,9 +354,7 @@ def test_npm_context_builds_parser_from_applied_settings_without_legacy_inferenc
     assert context.parser_contract.npm_region_prefix == (
         window._active_baseline_config().npm_region_prefix
     )
-    assert context.parser_contract.target_fs_hz == (
-        window._active_baseline_config().target_fs_hz
-    )
+    assert context.parser_contract.target_fs_hz == 20.0
 
 
 def test_applied_npm_parser_setting_change_marks_dataset_contract_stale(
@@ -351,6 +362,11 @@ def test_applied_npm_parser_setting_change_marks_dataset_contract_stale(
     monkeypatch,
 ):
     _configure_minimal_npm_contract_state(window)
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: {"target_fs_hz": 20.0},
+    )
     candidate = window._guided_new_analysis_dataset_contract_candidate()
     window._guided_new_analysis_dataset_contract_snapshot = replace(
         candidate,

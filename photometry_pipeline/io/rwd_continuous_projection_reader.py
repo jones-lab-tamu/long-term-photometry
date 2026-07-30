@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+from fractions import Fraction
 import hashlib
 import math
 from pathlib import Path
@@ -53,6 +54,10 @@ from photometry_pipeline.guided_continuous_rwd_target_grid import (
     _decimal_fraction,
     _validate_target_grid_description,
     compute_continuous_rwd_discontinuity_evaluation_identity,
+)
+from photometry_pipeline.guided_sampling_rate import (
+    GuidedSamplingRateError,
+    normalize_guided_sampling_rate_hz,
 )
 
 
@@ -224,15 +229,18 @@ def _validate_authorities(
     if target_grid.continuity_evaluation_identity != expected_continuity_identity:
         _fail("invalid_authority_binding", "C1 continuity identity does not match B2.")
     try:
-        expected_cadence = _decimal_fraction(
-            recording.cadence.nominal_cadence_seconds,
-            "nominal cadence",
+        expected_target_fs_hz = normalize_guided_sampling_rate_hz(
+            1.0 / recording.cadence.nominal_cadence_seconds
         )
+        expected_cadence = Fraction(1, int(expected_target_fs_hz))
         expected_support = _decimal_fraction(
             recording.time.measured_support_end_seconds,
             "measured support end",
         )
-    except ContinuousRwdTargetGridError as exc:
+    except (
+        ContinuousRwdTargetGridError,
+        GuidedSamplingRateError,
+    ) as exc:
         raise ContinuousRwdProjectionReaderError(
             "invalid_authority_binding", "B1 cannot establish C1 scalar authority."
         ) from exc
