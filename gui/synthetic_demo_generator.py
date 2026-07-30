@@ -42,6 +42,18 @@ GUIDED_DEMO_HEADERS = (
     "ROI2_Reference",
 )
 
+# Fixed internal shape of the demonstration signals. These are not user options
+# and are not exposed anywhere in the application.
+_EVENT_RATE_PER_MIN = (3.2, 2.6)  # ROI1, ROI2 baseline transient rate
+_EVENT_RATE_MODULATION = (0.55, 0.38)  # recording-scale swing of the rate
+_EVENT_AMPLITUDE_MODULATION = (0.22, 0.14)  # recording-scale swing of amplitude
+_EVENT_ROI_PHASE_OFFSET = 0.9  # ROI2 activity lags ROI1 across the recording
+_EVENT_MEDIAN_AMPLITUDE = (1.9, 2.15)
+_EVENT_RISE_SEC = (0.08, 0.26)
+_EVENT_DECAY_SEC = (0.45, 2.4)
+_EVENT_TAIL_GUARD_SEC = 2.0  # keep transients from being cut off at session end
+_REFERENCE_EVENT_BLEED = 0.05  # small event leak into the reference channel
+
 
 @dataclass(frozen=True)
 class DemoGenerationResult:
@@ -78,10 +90,80 @@ Recommended timeline display:
 - Start of plotted day: `07:00`
 - Clock time at recording start: `12:00:00`
 
-The signals contain deterministic baseline variation, mild bleaching, noise,
-and synthetic transient events for demonstrating the workflow.
+The signals contain deterministic bleaching, shared optical variation, noise,
+occasional common-mode artifacts, and irregular calcium-like transients for
+demonstrating the workflow.
 Do not draw biological conclusions from this dataset.
 """
+
+
+def _slow_variation(
+    rng: np.random.Generator,
+    samples: int,
+    fs_hz: int,
+    tau_sec: float,
+    std: float,
+) -> np.ndarray:
+    """Smoothly wandering zero-mean variation, from smoothed white noise."""
+    white = rng.normal(0.0, 1.0, samples)
+    if samples < 2 or std <= 0.0:
+        return np.zeros(samples, dtype=np.float64)
+    span = max(1, min(int(round(tau_sec * float(fs_hz))), max(1, samples // 4)))
+    kernel_length = min(4 * span, samples)
+    kernel = np.exp(-np.arange(kernel_length, dtype=np.float64) / float(span))
+    kernel /= float(np.sqrt(np.sum(kernel * kernel)))
+    return float(std) * np.convolve(white, kernel, mode="same")
+
+
+def _transient_kernel(fs_hz: int, rise_sec: float, decay_sec: float) -> np.ndarray:
+    """Causal calcium-like transient: fast rise, slower exponential decay."""
+    length = max(2, int(round(6.0 * decay_sec * float(fs_hz))))
+    offsets = np.arange(length, dtype=np.float64) / float(fs_hz)
+    shape = np.exp(-offsets / decay_sec) - np.exp(-offsets / rise_sec)
+    peak = float(np.max(shape))
+    if peak <= 0.0:
+        return np.zeros(length, dtype=np.float64)
+    return shape / peak
+
+
+def _event_start_times(
+    rng: np.random.Generator,
+    duration_sec: float,
+    rate_per_sec: float,
+) -> np.ndarray:
+    """Irregular start times from exponential inter-event intervals."""
+    usable_sec = float(duration_sec) - _EVENT_TAIL_GUARD_SEC
+    expected = max(1.0, float(rate_per_sec) * max(usable_sec, 0.0))
+    intervals = rng.exponential(1.0 / float(rate_per_sec), int(3.0 * expected) + 8)
+    if usable_sec <= 0.0:
+        return np.zeros(0, dtype=np.float64)
+    start_times = np.cumsum(intervals)
+    return start_times[start_times < usable_sec]
+
+
+def _shared_artifact_trace(
+    rng: np.random.Generator,
+    samples: int,
+    fs_hz: int,
+) -> np.ndarray:
+    """A few mild common-mode disturbances seen by both channels."""
+    trace = np.zeros(samples, dtype=np.float64)
+    for _ in range(int(rng.integers(0, 3))):
+        amplitude = float(rng.uniform(0.35, 1.10))
+        if rng.random() >= 0.25:
+            amplitude = -amplitude
+        length = max(2, int(round(float(rng.uniform(1.2, 4.5)) * float(fs_hz))))
+        start = int(rng.integers(0, max(1, samples)))
+        stop = min(samples, start + length)
+        if stop <= start:
+            continue
+        progress = np.arange(stop - start, dtype=np.float64) / float(length)
+        shape = np.sqrt(progress) * np.exp(-3.0 * progress)
+        peak = float(np.max(shape))
+        if peak <= 0.0:
+            continue
+        trace[start:stop] += amplitude * shape / peak
+    return trace
 
 
 def _guided_demo_session_arrays(
@@ -93,44 +175,80 @@ def _guided_demo_session_arrays(
     rng: np.random.Generator,
 ) -> np.ndarray:
     time_sec = np.arange(rows_per_session, dtype=np.float64) / float(fs_hz)
+    duration_sec = float(rows_per_session) / float(fs_hz)
     recording_phase = 2.0 * np.pi * float(session_index) / float(session_count)
-    shared_noise = rng.normal(0.0, 0.075, rows_per_session)
-    shared_wave = 0.28 * np.sin(2.0 * np.pi * time_sec / 47.0 + recording_phase)
-    bleach = -0.85 * (1.0 - np.exp(-time_sec / 260.0))
-    slow_recording = 1.2 * np.sin(recording_phase)
+    # Each session is an independent recording on the same rig.
+    session_scale = 1.0 + 0.03 * float(rng.normal())
 
     columns = [time_sec]
     for roi_index in range(2):
-        roi_phase = recording_phase + roi_index * 0.55
-        reference_noise = rng.normal(0.0, 0.055 + roi_index * 0.005, rows_per_session)
+        # Non-calcium optical structure seen by both channels of this ROI.
+        bleach = -float(rng.uniform(0.7, 1.6)) * (
+            1.0 - np.exp(-time_sec / float(rng.uniform(180.0, 420.0)))
+        )
+        drift = _slow_variation(rng, rows_per_session, fs_hz, 30.0, 0.42)
+        common_wander = _slow_variation(rng, rows_per_session, fs_hz, 1.8, 0.20)
+        common_noise = rng.normal(0.0, 0.09, rows_per_session)
+        common = session_scale * (bleach + drift + common_wander) + common_noise
+        artifacts = _shared_artifact_trace(rng, rows_per_session, fs_hz)
+        artifact_reference_scale = float(rng.uniform(0.78, 1.06))
+
+        # Calcium-like transients, more active in one half of the recording.
+        activity_phase = recording_phase - roi_index * _EVENT_ROI_PHASE_OFFSET
+        rate_per_min = (
+            _EVENT_RATE_PER_MIN[roi_index]
+            * (1.0 + _EVENT_RATE_MODULATION[roi_index] * np.sin(activity_phase))
+            * float(np.exp(rng.normal(0.0, 0.16)))
+        )
+        amplitude_scale = 1.0 + _EVENT_AMPLITUDE_MODULATION[roi_index] * np.sin(
+            activity_phase
+        )
+        start_times = _event_start_times(
+            rng, duration_sec, max(0.25, rate_per_min) / 60.0
+        )
+        amplitudes = np.clip(
+            amplitude_scale
+            * rng.lognormal(
+                np.log(_EVENT_MEDIAN_AMPLITUDE[roi_index]), 0.45, start_times.size
+            ),
+            0.6,
+            9.0,
+        )
+        rise_times = rng.uniform(*_EVENT_RISE_SEC, start_times.size)
+        decay_times = rng.uniform(*_EVENT_DECAY_SEC, start_times.size)
+        events = np.zeros(rows_per_session, dtype=np.float64)
+        for start_time, amplitude, rise_sec, decay_sec in zip(
+            start_times, amplitudes, rise_times, decay_times
+        ):
+            start = int(round(float(start_time) * float(fs_hz)))
+            kernel = _transient_kernel(fs_hz, float(rise_sec), float(decay_sec))
+            stop = min(rows_per_session, start + kernel.size)
+            if stop > start:
+                events[start:stop] += float(amplitude) * kernel[: stop - start]
+
+        # Channel-specific level, coupling, and noise.
+        reference_level = 100.0 + roi_index * 7.0 + float(rng.normal(0.0, 0.9))
+        signal_level = 118.0 + roi_index * 8.5 + float(rng.normal(0.0, 1.1))
+        reference_gain = float(rng.uniform(0.82, 0.95))
+        signal_gain = float(rng.uniform(1.02, 1.18))
+        reference_wander = _slow_variation(rng, rows_per_session, fs_hz, 2.5, 0.07)
+        signal_wander = _slow_variation(rng, rows_per_session, fs_hz, 2.5, 0.08)
         reference = (
-            100.0
-            + roi_index * 7.0
-            + slow_recording * (0.65 + roi_index * 0.1)
-            + bleach * (0.75 + roi_index * 0.08)
-            + shared_wave
-            + shared_noise
-            + reference_noise
+            reference_level
+            + reference_gain * common
+            + artifact_reference_scale * artifacts
+            + _REFERENCE_EVENT_BLEED * events
+            + reference_wander
+            + rng.normal(0.0, 0.20, rows_per_session)
         )
         signal = (
-            118.0
-            + roi_index * 8.5
-            + 1.08 * (reference - (100.0 + roi_index * 7.0))
-            + 0.45 * np.sin(2.0 * np.pi * time_sec / 91.0 + roi_phase)
-            + rng.normal(0.0, 0.08, rows_per_session)
+            signal_level
+            + signal_gain * common
+            + artifacts
+            + events
+            + signal_wander
+            + rng.normal(0.0, 0.22, rows_per_session)
         )
-        event_centers = np.array([62.0, 174.0, 286.0, 407.0, 526.0])
-        event_centers += ((session_index * 7 + roi_index * 11) % 17) - 8
-        for event_number, center in enumerate(event_centers):
-            amplitude = (
-                3.2
-                + 0.35 * roi_index
-                + 0.25 * np.sin(recording_phase + event_number)
-            )
-            width_sec = 0.85 + 0.08 * ((event_number + roi_index) % 3)
-            signal += amplitude * np.exp(
-                -0.5 * ((time_sec - center) / width_sec) ** 2
-            )
         columns.extend([signal, reference])
     return np.column_stack(columns)
 

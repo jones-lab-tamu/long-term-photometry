@@ -1,3 +1,4 @@
+import csv
 import json
 import subprocess
 import sys
@@ -14,6 +15,9 @@ from photometry_pipeline.completed_run_review import load_completed_review_overv
 from photometry_pipeline.config import Config
 from photometry_pipeline.discovery import discover_inputs
 from photometry_pipeline.io.adapters import load_chunk
+from photometry_pipeline.preview.correction_preview import (
+    run_guided_local_correction_preview,
+)
 from gui.synthetic_demo_dialog import GenerateSyntheticDemoDatasetDialog
 from gui.synthetic_demo_generator import (
     GUIDED_DEMO_FOLDER_NAME,
@@ -32,10 +36,93 @@ from gui.synthetic_demo_generator import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+GUIDED_DEMO_ROI_MAPPING_JSON = json.dumps(
+    [
+        {
+            "roi_id": "ROI1",
+            "signal_column": "ROI1_Signal",
+            "reference_column": "ROI1_Reference",
+        },
+        {
+            "roi_id": "ROI2",
+            "signal_column": "ROI2_Signal",
+            "reference_column": "ROI2_Reference",
+        },
+    ],
+    separators=(",", ":"),
+)
+
 
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+def _write_guided_demo_config(directory: Path) -> Path:
+    """Build the ordinary Guided CSV configuration for the demo dataset."""
+    config = yaml.safe_load(
+        (REPO_ROOT / "config" / "qc_universal_config.yaml").read_text(encoding="utf-8")
+    )
+    config.update(
+        {
+            "target_fs_hz": float(GUIDED_DEMO_FS_HZ),
+            "chunk_duration_sec": 600.0,
+            "custom_tabular_time_col": "ElapsedSeconds",
+            "custom_tabular_time_unit": "seconds",
+            "custom_tabular_roi_mapping_json": GUIDED_DEMO_ROI_MAPPING_JSON,
+        }
+    )
+    config_path = directory / "guided_demo_config.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
+    return config_path
+
+
+def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    window = max(1, int(window))
+    padded = np.pad(values, (window // 2, window - 1 - window // 2), mode="edge")
+    return np.convolve(padded, np.ones(window) / window, mode="valid")
+
+
+def _fast_component(trace: np.ndarray, *, baseline_window_sec: float = 20.0) -> np.ndarray:
+    """Transient-scale component: sample noise smoothed away, slow drift removed."""
+    smoothed = _moving_average(trace, 0.25 * GUIDED_DEMO_FS_HZ)
+    return smoothed - _moving_average(smoothed, baseline_window_sec * GUIDED_DEMO_FS_HZ)
+
+
+def _transient_peak_indices(trace: np.ndarray, *, min_amplitude: float = 1.0) -> np.ndarray:
+    """Transient peaks at least one second apart. A test measurement only."""
+    residual = _fast_component(trace)
+    interior = residual[1:-1]
+    candidates = (
+        np.flatnonzero(
+            (interior >= min_amplitude)
+            & (interior >= residual[:-2])
+            & (interior > residual[2:])
+        )
+        + 1
+    )
+    kept: list[int] = []
+    for index in candidates:
+        if not kept or index - kept[-1] >= GUIDED_DEMO_FS_HZ:
+            kept.append(int(index))
+    return np.array(kept, dtype=int)
+
+
+@pytest.fixture(scope="module")
+def guided_demo_sessions(tmp_path_factory) -> list[np.ndarray]:
+    """The full production demo dataset, loaded once for signal-character tests."""
+    parent = tmp_path_factory.mktemp("guided_demo_signal_character")
+    result = generate_guided_csv_demo(parent)
+    assert result.success, result.message
+    return [
+        np.loadtxt(path, delimiter=",", skiprows=1)
+        for path in sorted(result.input_dir.glob("session_*.csv"))
+    ]
+
+
+# Column offsets in the generated CSV files.
+_TIME, _ROI1_SIGNAL, _ROI1_REFERENCE, _ROI2_SIGNAL, _ROI2_REFERENCE = range(5)
+_ROI_COLUMNS = ((_ROI1_SIGNAL, _ROI1_REFERENCE), (_ROI2_SIGNAL, _ROI2_REFERENCE))
 
 
 def test_fixed_guided_demo_production_contract(tmp_path: Path):
@@ -80,35 +167,18 @@ def test_fixed_guided_demo_production_contract(tmp_path: Path):
     for header in GUIDED_DEMO_HEADERS:
         assert np.isfinite(data[header]).all()
     assert not np.array_equal(data["ROI1_Signal"], data["ROI2_Signal"])
-    assert np.corrcoef(data["ROI1_Signal"], data["ROI1_Reference"])[0, 1] > 0.45
-    assert np.corrcoef(data["ROI2_Signal"], data["ROI2_Reference"])[0, 1] > 0.45
-    roi1_residual = data["ROI1_Signal"] - 1.08 * (
-        data["ROI1_Reference"] - 100.0
-    ) - 118.0
-    roi2_residual = data["ROI2_Signal"] - 1.08 * (
-        data["ROI2_Reference"] - 107.0
-    ) - 126.5
-    assert np.max(roi1_residual) > 2.8
-    assert np.max(roi2_residual) > 3.0
+    assert np.corrcoef(data["ROI1_Signal"], data["ROI1_Reference"])[0, 1] > 0.35
+    assert np.corrcoef(data["ROI2_Signal"], data["ROI2_Reference"])[0, 1] > 0.35
+    # Each signal carries transients well above its own sample-to-sample noise.
+    for roi in ("ROI1", "ROI2"):
+        signal = data[f"{roi}_Signal"]
+        noise = float(np.std(np.diff(signal)))
+        assert np.max(_fast_component(signal)) > 5.0 * noise
     production_config = Config(
         target_fs_hz=20.0,
         chunk_duration_sec=600.0,
         custom_tabular_time_col="ElapsedSeconds",
-        custom_tabular_roi_mapping_json=json.dumps(
-            [
-                {
-                    "roi_id": "ROI1",
-                    "signal_column": "ROI1_Signal",
-                    "reference_column": "ROI1_Reference",
-                },
-                {
-                    "roi_id": "ROI2",
-                    "signal_column": "ROI2_Signal",
-                    "reference_column": "ROI2_Reference",
-                },
-            ],
-            separators=(",", ":"),
-        ),
+        custom_tabular_roi_mapping_json=GUIDED_DEMO_ROI_MAPPING_JSON,
     )
     discovery = discover_inputs(
         str(result.input_dir),
@@ -134,6 +204,165 @@ def test_guided_demo_is_reproducible_with_fixed_seed(tmp_path: Path):
         assert (first.input_dir / name).read_bytes() == (
             second.input_dir / name
         ).read_bytes()
+
+
+def test_guided_demo_event_timing_is_irregular_and_differs_across_sessions(
+    guided_demo_sessions,
+):
+    peak_seconds = [
+        set((_transient_peak_indices(session[:, _ROI1_SIGNAL]) // GUIDED_DEMO_FS_HZ).tolist())
+        for session in guided_demo_sessions
+    ]
+    assert all(len(seconds) > 5 for seconds in peak_seconds)
+    # No transient position is repeated in every session.
+    assert set.intersection(*peak_seconds) == set()
+    # Neighbouring sessions share little more than chance.
+    overlaps = [
+        len(first & second) / max(1, min(len(first), len(second)))
+        for first, second in zip(peak_seconds, peak_seconds[1:])
+    ]
+    assert float(np.mean(overlaps)) < 0.25
+    # Spacing is irregular rather than a repeated grid.
+    first_gaps = np.diff(np.sort(np.fromiter(peak_seconds[0], dtype=float)))
+    assert float(np.std(first_gaps)) > 5.0
+
+
+def test_guided_demo_transients_decay_more_slowly_than_they_rise(guided_demo_sessions):
+    segments = []
+    for session in guided_demo_sessions[:12]:
+        residual = _fast_component(session[:, _ROI1_SIGNAL])
+        before = int(1.5 * GUIDED_DEMO_FS_HZ)
+        after = int(5.0 * GUIDED_DEMO_FS_HZ)
+        for index in _transient_peak_indices(
+            session[:, _ROI1_SIGNAL], min_amplitude=1.5
+        ):
+            if before <= index < residual.size - after:
+                segments.append(residual[index - before : index + after])
+    assert len(segments) > 50
+    average = np.mean(np.array(segments), axis=0)
+    peak = int(1.5 * GUIDED_DEMO_FS_HZ)
+    half_second = int(0.5 * GUIDED_DEMO_FS_HZ)
+    # Half a second after the peak the transient is still elevated; half a
+    # second before it, it has barely started.
+    assert average[peak + half_second] > 2.0 * average[peak - half_second]
+    rising_area = float(np.sum(average[peak - before : peak]))
+    falling_area = float(np.sum(average[peak + 1 : peak + 1 + before]))
+    assert falling_area > 1.5 * rising_area
+
+
+def test_guided_demo_event_counts_vary_across_sessions_and_between_rois(
+    guided_demo_sessions,
+):
+    counts = {
+        roi: np.array(
+            [
+                _transient_peak_indices(session[:, signal_column]).size
+                for session in guided_demo_sessions
+            ]
+        )
+        for roi, (signal_column, _) in zip(("ROI1", "ROI2"), _ROI_COLUMNS)
+    }
+    for roi, values in counts.items():
+        assert values.min() > 0, roi
+        # Not a fixed number of events per session.
+        assert len(set(values.tolist())) > 10, roi
+        assert float(values.std()) > 3.0, roi
+    assert not np.array_equal(counts["ROI1"], counts["ROI2"])
+    # Related but distinguishable overall activity.
+    ratio = counts["ROI1"].sum() / counts["ROI2"].sum()
+    assert 0.5 < ratio < 2.0
+    assert abs(ratio - 1.0) > 0.02
+
+
+def test_guided_demo_activity_changes_across_the_scheduled_recording(
+    guided_demo_sessions,
+):
+    quarter = len(guided_demo_sessions) // 4
+    for signal_column, _ in _ROI_COLUMNS:
+        counts = np.array(
+            [
+                _transient_peak_indices(session[:, signal_column]).size
+                for session in guided_demo_sessions
+            ]
+        )
+        quarters = [
+            float(counts[index : index + quarter].mean())
+            for index in range(0, len(counts), quarter)
+        ]
+        # Visibly non-flat across the scheduled 24 hours...
+        assert max(quarters) > 1.4 * min(quarters)
+        # ...but not a clean noiseless ramp between neighbouring sessions.
+        assert float(np.std(np.diff(counts))) > 3.0
+
+
+def test_guided_demo_session_baselines_vary_modestly(guided_demo_sessions):
+    for column in (_ROI1_SIGNAL, _ROI1_REFERENCE, _ROI2_SIGNAL, _ROI2_REFERENCE):
+        starts = np.array(
+            [float(session[: GUIDED_DEMO_FS_HZ, column].mean()) for session in guided_demo_sessions]
+        )
+        # No two sessions begin at exactly the same fluorescence level.
+        assert len(set(np.round(starts, 6).tolist())) == len(guided_demo_sessions)
+        assert 0.1 < float(starts.std()) < 5.0
+        assert float(starts.max() - starts.min()) < 0.25 * float(np.abs(starts.mean()))
+
+
+def test_guided_demo_within_session_bleaching_is_present_and_varies(
+    guided_demo_sessions,
+):
+    edge = 10 * GUIDED_DEMO_FS_HZ
+    declines = np.array(
+        [
+            float(session[:edge, _ROI1_SIGNAL].mean() - session[-edge:, _ROI1_SIGNAL].mean())
+            for session in guided_demo_sessions
+        ]
+    )
+    assert float(np.median(declines)) > 0.0
+    assert float(declines.std()) > 0.05
+    # Bleaching stays small next to the transients riding on top of it.
+    assert float(declines.max()) < 5.0
+
+
+def test_guided_demo_signal_reference_relationship_is_positive_but_imperfect(
+    guided_demo_sessions,
+):
+    for signal_column, reference_column in _ROI_COLUMNS:
+        correlations = np.array(
+            [
+                float(np.corrcoef(session[:, signal_column], session[:, reference_column])[0, 1])
+                for session in guided_demo_sessions
+            ]
+        )
+        assert correlations.min() > 0.2
+        assert float(np.median(correlations)) > 0.4
+        # The reference is not a rescaled copy of the signal.
+        assert correlations.max() < 0.97
+        assert float(correlations.std()) > 0.01
+
+
+def test_guided_demo_shared_disturbances_appear_in_signal_and_reference(
+    guided_demo_sessions,
+):
+    matched = 0
+    inspected = 0
+    for session in guided_demo_sessions:
+        for signal_column, reference_column in _ROI_COLUMNS:
+            reference_fast = _fast_component(
+                session[:, reference_column], baseline_window_sec=10.0
+            )
+            signal_fast = _fast_component(
+                session[:, signal_column], baseline_window_sec=10.0
+            )
+            dip = int(np.argmin(reference_fast))
+            if reference_fast[dip] > -0.6:
+                continue
+            inspected += 1
+            nearby = signal_fast[max(0, dip - 10) : dip + 11]
+            if float(nearby.min()) < -0.3:
+                matched += 1
+    assert inspected > 20
+    # A disturbance strong enough to show in the reference also shows in the
+    # signal, at a similar but not identical amplitude.
+    assert matched >= 0.8 * inspected
 
 
 def test_guided_demo_refuses_existing_final_folder(tmp_path: Path):
@@ -169,6 +398,47 @@ def test_guided_demo_failure_cleans_transaction_and_leaves_no_final_folder(
     assert "simulated generation failure" in result.message
     assert not (tmp_path / GUIDED_DEMO_FOLDER_NAME).exists()
     assert not list(tmp_path.glob(f".{GUIDED_DEMO_FOLDER_NAME}.tmp-*"))
+
+
+def test_guided_demo_real_correction_preview_keeps_transients_for_both_rois(
+    tmp_path: Path,
+):
+    generated = generate_guided_csv_demo(tmp_path / "source_parent", _session_count=1)
+    assert generated.success, generated.message
+    config_path = _write_guided_demo_config(tmp_path)
+    source = generated.input_dir / "session_0001.csv"
+
+    for roi in ("ROI1", "ROI2"):
+        result = run_guided_local_correction_preview(
+            source,
+            tmp_path / f"preview_{roi}",
+            roi=roi,
+            chunk_index=0,
+            input_format="custom_tabular",
+            config_path=config_path,
+        )
+        assert result["status"] == "success", result.get("errors")
+        assert not result.get("errors")
+
+        trace_path = (
+            Path(result["preview_output_dir"])
+            / "method_robust_global_event_reject_trace.csv"
+        )
+        rows = list(csv.DictReader(trace_path.open(encoding="utf-8")))
+        signal = np.array([float(row["sig_raw"]) for row in rows])
+        reference = np.array([float(row["uv_raw"]) for row in rows])
+        corrected = np.array([float(row["delta_f"]) for row in rows])
+        assert np.isfinite(corrected).all()
+
+        # Common variation is removed without flattening the transients.
+        raw_coupling = abs(float(np.corrcoef(signal, reference)[0, 1]))
+        corrected_coupling = abs(float(np.corrcoef(corrected, reference)[0, 1]))
+        assert raw_coupling > 0.3
+        assert corrected_coupling < 0.5 * raw_coupling
+        assert float(corrected.std()) > 0.0
+        prominence = (corrected.max() - corrected.mean()) / corrected.std()
+        assert prominence > 5.0
+        assert _transient_peak_indices(corrected).size > 5
 
 
 def test_guided_demo_readme_contains_required_setup_instructions():
@@ -257,36 +527,7 @@ def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(
         "session_0002.csv",
     ]
 
-    config = yaml.safe_load(
-        (REPO_ROOT / "config" / "qc_universal_config.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
-    config.update(
-        {
-            "target_fs_hz": 20.0,
-            "chunk_duration_sec": 600.0,
-            "custom_tabular_time_col": "ElapsedSeconds",
-            "custom_tabular_time_unit": "seconds",
-            "custom_tabular_roi_mapping_json": json.dumps(
-                [
-                    {
-                        "roi_id": "ROI1",
-                        "signal_column": "ROI1_Signal",
-                        "reference_column": "ROI1_Reference",
-                    },
-                    {
-                        "roi_id": "ROI2",
-                        "signal_column": "ROI2_Signal",
-                        "reference_column": "ROI2_Reference",
-                    },
-                ],
-                separators=(",", ":"),
-            ),
-        }
-    )
-    config_path = tmp_path / "guided_demo_config.yaml"
-    config_path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
+    config_path = _write_guided_demo_config(tmp_path)
     parsed_config = Config.from_yaml(str(config_path))
     discovery = discover_inputs(
         str(generated.input_dir),
@@ -348,6 +589,25 @@ def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(
     assert (run_dir / "_analysis" / "phasic_out").is_dir()
     features = run_dir / "_analysis" / "phasic_out" / "features" / "features.csv"
     assert features.stat().st_size > 0
+    feature_rows = list(csv.DictReader(features.open(encoding="utf-8")))
+    assert {row["roi"] for row in feature_rows} == {"ROI1", "ROI2"}
+    peak_counts = {
+        roi: [
+            int(float(row["peak_count"]))
+            for row in sorted(
+                (candidate for candidate in feature_rows if candidate["roi"] == roi),
+                key=lambda candidate: int(candidate["chunk_id"]),
+            )
+        ]
+        for roi in ("ROI1", "ROI2")
+    }
+    for roi, counts in peak_counts.items():
+        assert len(counts) == 2, roi
+        # Real Feature Detection finds transients, and not a fixed five.
+        assert all(count > 5 for count in counts), (roi, counts)
+        assert counts != [5, 5], roi
+    assert peak_counts["ROI1"] != peak_counts["ROI2"]
+    assert all(row["status"] == "valid" for row in feature_rows)
     day_plots = [
         path
         for roi in ("ROI1", "ROI2")
