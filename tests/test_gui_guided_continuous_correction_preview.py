@@ -34,6 +34,7 @@ from gui.main_window import (
     MainWindow,
 )
 
+from gui.synthetic_demo_generator import GUIDED_CONTINUOUS_DEMO_FILE_NAME
 from tests.test_guided_continuous_rwd_correction_pass_persistence import _values
 
 
@@ -713,24 +714,28 @@ def test_continuous_csv_feature_detection_uses_the_same_ordered_windows(
     assert feature.currentIndex() == current
 
 
-def test_auto_structure_never_reads_one_continuous_csv_as_a_session(
+def test_auto_structure_reads_one_csv_file_as_one_continuous_recording(
     window, qapp, tmp_path, monkeypatch
 ):
-    """The reported defect: Detect automatically silently chose sessions.
+    """One CSV file is one continuous recording, decided by file count alone.
 
-    A whole 48-hour continuous CSV was read as one intermittent session named
-    after the file, so both preview selectors offered only that entry and every
-    preview showed the start of the recording. CSV has two structures now, and
-    one file does not say which, so this must ask instead of guessing.
+    A session-based CSV dataset is a file per session, so a lone file is the
+    whole recording. Nothing inside the file is consulted. The scientist is not
+    interrupted: ``no_real_modals`` is left in place, so any dialog raised here
+    would fail this test.
     """
-    from PySide6.QtWidgets import QMessageBox
+    import photometry_pipeline.io.csv_continuous_source as csv_source_module
 
-    shown = []
+    inspected = []
+    real_inspect = csv_source_module.inspect_continuous_csv_recording
+
+    def spy(source_file, **kwargs):
+        inspected.append(Path(source_file).name)
+        return real_inspect(source_file, **kwargs)
+
+    # Both call sites import this from the source module at call time.
     monkeypatch.setattr(
-        QMessageBox,
-        "critical",
-        staticmethod(lambda *args, **_k: shown.append(args[2] if len(args) > 2 else "")),
-        raising=False,
+        csv_source_module, "inspect_continuous_csv_recording", spy
     )
 
     folder = _continuous_csv_folder(tmp_path / "csv")
@@ -738,27 +743,50 @@ def test_auto_structure_never_reads_one_continuous_csv_as_a_session(
         window, qapp, folder, structure=GUIDED_STRUCTURE_CHOICE_AUTO
     )
 
-    # No ROIs and no sessions are installed from a guessed structure.
-    assert window._guided_roi_list.count() == 0
-    assert not (getattr(window, "_discovery_cache", None) or {})
+    # Discovery resolved continuous and found both ROIs.
+    assert [
+        window._guided_roi_list.item(index).text()
+        for index in range(window._guided_roi_list.count())
+    ] == ["ROI1", "ROI2"]
+    assert window._guided_effective_acquisition_mode() == "continuous"
+    discovery = getattr(window, "_discovery_cache", None) or {}
+    assert discovery.get("resolved_format") == "custom_tabular"
+    assert discovery.get("acquisition_mode") == "continuous"
+    # A continuous recording is one recording, not a set of sessions.
+    assert not discovery.get("sessions")
 
-    # The refusal names the choice the scientist has to make.
-    assert shown, "the scientist was told nothing"
-    reason = " ".join(str(text) for text in shown)
-    assert "one CSV file" in reason
-    assert "continuous recording" in reason
-    assert "single session" in reason
-    assert "recording structure" in reason
+    # The draft carries both facts the continuous route needs.
+    draft = window._guided_continuous_rwd_live_draft()
+    assert draft is not None
+    assert draft.input_format == "custom_tabular"
+    assert draft.acquisition_mode == "continuous"
 
-    # Nothing is offered as a preview segment, least of all the file name.
-    assert window._guided_preview_chunk_combo.count() == 0
-    assert window._guided_feature_preview_segment_combo.count() == 0
+    # The continuous CSV inspector really read the one file -- once for ROI
+    # discovery, once for the recording check, and never anything else.
+    window._continuous_window_sec_spin.setValue(200.0)
+    _walk_to_correction_approach(window, qapp)
+    assert inspected
+    assert set(inspected) == {GUIDED_CONTINUOUS_DEMO_FILE_NAME}
+
+    binding = window._guided_continuous_rwd_review_binding
+    assert binding is not None
+    assert binding.recording.source_format == "custom_tabular"
+    assert binding.recording.acquisition_mode == "continuous"
+
+    # Both preview selectors offer the continuous windows on first entry.
+    correction = window._guided_preview_chunk_combo
+    feature = window._guided_feature_preview_segment_combo
+    assert correction.count() > 1
+    assert _identities(feature) == _identities(correction)
+    labels = [correction.itemText(i) for i in range(correction.count())]
+    assert labels[0].startswith("Window 1 (0:00:00")
+    assert "continuous_recording" not in labels
 
 
 def test_auto_structure_still_reads_several_csv_files_as_sessions(
     window, qapp, tmp_path
 ):
-    """Several CSV files are unambiguously repeated sessions."""
+    """More than one CSV file is repeated sessions, as before."""
     from gui.synthetic_demo_generator import generate_guided_csv_demo
 
     result = generate_guided_csv_demo(tmp_path / "sessions", _session_count=3)
@@ -776,10 +804,31 @@ def test_auto_structure_still_reads_several_csv_files_as_sessions(
         for index in range(window._guided_roi_list.count())
     ] == ["ROI1", "ROI2"]
     assert window._guided_effective_acquisition_mode() == "intermittent"
-    assert (
-        len((getattr(window, "_discovery_cache", None) or {}).get("sessions") or [])
-        == 3
+    sessions = (getattr(window, "_discovery_cache", None) or {}).get("sessions") or []
+    assert len(sessions) == 3
+    # Natural filename order is unchanged.
+    assert [str(entry.get("session_id") or entry.get("index")) for entry in sessions] == sorted(
+        str(entry.get("session_id") or entry.get("index")) for entry in sessions
     )
+
+
+def test_explicitly_chosen_structure_is_never_overridden_by_auto_detection(
+    window, qapp, tmp_path
+):
+    """One CSV file still reads as a session when the scientist says so."""
+    folder = _continuous_csv_folder(tmp_path / "csv")
+
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+    _select_csv_data(window, qapp, folder, structure="intermittent")
+    assert window._guided_effective_acquisition_mode() == "intermittent"
+    assert len(
+        (getattr(window, "_discovery_cache", None) or {}).get("sessions") or []
+    ) == 1
+
+    _select_csv_data(window, qapp, folder, structure="continuous")
+    assert window._guided_effective_acquisition_mode() == "continuous"
+    assert not (getattr(window, "_discovery_cache", None) or {}).get("sessions")
 
 
 # ---------------------------------------------------------------------------
