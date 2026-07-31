@@ -19,6 +19,8 @@ before, and that changing the setup invalidates evidence built from the old one.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from PySide6.QtCore import QDeadlineTimer, Qt
@@ -479,6 +481,206 @@ def test_feature_detection_reuses_continuous_window_selector_and_bounded_preview
     window._guided_feature_preview_roi_combo.setCurrentIndex(1)
     qapp.processEvents()
     assert window._guided_feature_preview_segment_combo.currentIndex() == 4
+
+# ---------------------------------------------------------------------------
+# One generic CSV file: the same windows, from the same authority
+# ---------------------------------------------------------------------------
+
+
+def _continuous_csv_folder(folder):
+    """One uninterrupted 8 Hz generic CSV recording, via the demo writer."""
+    from gui.synthetic_demo_generator import generate_guided_continuous_demo
+
+    result = generate_guided_continuous_demo(folder, _duration_sec=1200.0)
+    assert result.success, result.message
+    return Path(result.input_dir)
+
+
+def _select_csv_data(window, qapp, folder):
+    """The ordinary Select-data controls for one continuous CSV recording."""
+    window._on_guided_start_setup_new_analysis()
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    index = window._guided_acquisition_mode_combo.findData("continuous")
+    assert index >= 0
+    window._guided_acquisition_mode_combo.setCurrentIndex(index)
+    window._guided_input_dir_edit.setText(str(folder))
+    window._guided_output_dir_edit.setText(str(folder.parent / "output"))
+    window._refresh_guided_csv_source_interpretation()
+    time_combo = window._guided_csv_time_column_combo
+    time_combo.setCurrentIndex(time_combo.findData("ElapsedSeconds"))
+    units = window._guided_csv_time_units_combo
+    units.setCurrentIndex(units.findData("seconds"))
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    while len(window._guided_csv_mapping_rows) < 2:
+        window._add_guided_csv_mapping_row()
+    for row, roi in zip(window._guided_csv_mapping_rows, ("ROI1", "ROI2")):
+        row["name"].setText(roi)
+        row["signal"].setCurrentIndex(row["signal"].findData(f"{roi}_Signal"))
+        row["reference"].setCurrentIndex(
+            row["reference"].findData(f"{roi}_Reference")
+        )
+    # A generic CSV carries only elapsed seconds, so the clock is stated here.
+    window._guided_fixed_daily_anchor_clock_edit.setText("07:00")
+    window._guided_recording_start_clock_edit.setText("12:00:00")
+    window._on_guided_discover_rois()
+    _pump(qapp, lambda: window._guided_roi_discovery_running)
+    _pump(
+        qapp,
+        lambda: getattr(window, "_guided_roi_discovery_thread", None) is not None,
+        20_000,
+    )
+    for row in range(window._guided_roi_list.count()):
+        window._guided_roi_list.item(row).setCheckState(Qt.Checked)
+    qapp.processEvents()
+
+
+def _identities(combo):
+    return [
+        (combo.itemText(index), combo.itemData(index)["continuous_window_index"])
+        for index in range(combo.count())
+    ]
+
+
+def test_continuous_csv_offers_the_same_windows_as_the_segment_authority(
+    window, qapp, tmp_path
+):
+    """Correction Preview is not limited to a single whole-recording entry."""
+    folder = _continuous_csv_folder(tmp_path / "csv")
+    _select_csv_data(window, qapp, folder)
+    window._continuous_window_sec_spin.setValue(200.0)
+    _check_recording(window, qapp)
+    _open_correction_approach(window)
+
+    # Before any correction choice exists, only whole windows are offered --
+    # the same pre-plan rule the RWD path uses.
+    segments = _segments(window)
+    assert len(segments) == 5
+    for index, segment in enumerate(segments):
+        assert segment["continuous_window_index"] == index
+        assert segment["window_start_sec"] == pytest.approx(index * 200.0)
+        assert segment["window_end_sec"] == pytest.approx((index + 1) * 200.0)
+    for earlier, later in zip(segments, segments[1:]):
+        assert earlier["window_end_sec"] == pytest.approx(
+            later["window_start_sec"]
+        )
+    labels = [
+        window._guided_preview_chunk_combo.itemText(index)
+        for index in range(window._guided_preview_chunk_combo.count())
+    ]
+    assert labels[0].startswith("Window 1 (0:00:00")
+    assert labels[-1].startswith("Window 5 (0:13:20")
+    # The whole-recording name is never the only preview segment.
+    assert len(labels) > 1
+    assert not any(label == "continuous_recording" for label in labels)
+
+
+def test_continuous_csv_feature_detection_uses_the_same_ordered_windows(
+    window, qapp, tmp_path, monkeypatch
+):
+    """Both preview stages resolve identical segment identities and bounds."""
+    folder = _continuous_csv_folder(tmp_path / "csv")
+    _select_csv_data(window, qapp, folder)
+    window._continuous_window_sec_spin.setValue(200.0)
+    _check_recording(window, qapp)
+    _open_correction_approach(window)
+    _generate_and_confirm_corrections(window, qapp)
+
+    window._on_guided_continue_to_feature_detection()
+    qapp.processEvents()
+    _open_correction_approach(window)
+    qapp.processEvents()
+
+    correction = window._guided_preview_chunk_combo
+    feature = window._guided_feature_preview_segment_combo
+    assert feature.count() > 1
+    assert _identities(feature) == _identities(correction)
+
+    native_plan = window._guided_continuous_rwd_native_segment_plan()
+    assert native_plan is not None
+    target_grid, segment_plan = native_plan
+    cadence = target_grid.cadence_fraction
+    data = [feature.itemData(index) for index in range(feature.count())]
+    assert [int(item["continuous_window_index"]) for item in data] == [
+        int(item.segment_index) for item in segment_plan.descriptors
+    ]
+    np.testing.assert_allclose(
+        [float(item["window_start_sec"]) for item in data],
+        [
+            float(item.start_target_index * cadence)
+            for item in segment_plan.descriptors
+        ],
+    )
+    np.testing.assert_allclose(
+        [float(item["window_end_sec"]) for item in data],
+        [
+            float(item.stop_target_index * cadence)
+            for item in segment_plan.descriptors
+        ],
+    )
+
+    # Selecting a middle window really moves the rows that are read.
+    window._guided_feature_event_apply_btn.click()
+    qapp.processEvents()
+    real_compute = main_window_module.compute_guided_local_preview_dff_trace_in_memory
+    captured = []
+
+    def counted_compute(*args, **kwargs):
+        captured.append(dict(kwargs))
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        counted_compute,
+    )
+
+    # Window 0 already has retained Step 4 evidence, so these three force the
+    # real bounded read rather than reuse.
+    seen = []
+    for index in (1, 3, feature.count() - 1):
+        feature.setCurrentIndex(index)
+        window._on_guided_generate_feature_detection_preview()
+        qapp.processEvents()
+        assert (
+            window._guided_feature_preview_last_result is not None
+        ), window._guided_feature_preview_status_label.text()
+        selected = window._guided_feature_preview_on_demand_trace[
+            "continuous_analysis_window"
+        ]
+        # What was read is the interval the chosen segment declares. The
+        # declared end is exclusive, so the last sample read sits within one
+        # cadence of it -- which is how the final segment ends at the
+        # recording's last sample rather than a nominal multiple.
+        declared = feature.itemData(index)
+        cadence_sec = float(cadence)
+        assert selected["window_index"] == index
+        assert selected["window_start_sec"] == pytest.approx(
+            declared["window_start_sec"]
+        )
+        assert (
+            declared["window_end_sec"] - cadence_sec
+            <= selected["window_end_sec"]
+            <= declared["window_end_sec"]
+        )
+        assert selected["window_start_sec"] == pytest.approx(index * 200.0)
+        seen.append((selected["row_start"], selected["row_stop"]))
+
+    # Distinct, non-overlapping row ranges: each preview read its own interval.
+    assert len(set(seen)) == 3
+    assert all(stop > start for start, stop in seen)
+    assert seen == sorted(seen)
+    assert captured
+
+    # Both ROIs stay mapped, and the ROI change keeps the selected window.
+    assert [
+        window._guided_feature_preview_roi_combo.itemText(index)
+        for index in range(window._guided_feature_preview_roi_combo.count())
+    ] == ["ROI1", "ROI2"]
+    current = feature.currentIndex()
+    window._guided_feature_preview_roi_combo.setCurrentIndex(1)
+    qapp.processEvents()
+    assert feature.currentIndex() == current
+
 
 # ---------------------------------------------------------------------------
 # The intermittent path is untouched

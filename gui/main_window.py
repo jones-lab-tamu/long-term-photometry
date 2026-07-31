@@ -20578,20 +20578,14 @@ class MainWindow(QMainWindow):
             or provenance.get("preview_id")
             or ""
         )
-        discovery_format = str(
-            (getattr(self, "_discovery_cache", None) or {}).get(
-                "resolved_format"
-            )
-            or (
-                self._guided_format_combo.currentText()
-                if hasattr(self, "_guided_format_combo")
-                else ""
-            )
-        ).strip().lower()
+        # Preview segmentation belongs to the accepted continuous recording,
+        # not to the format it was read from: the same authority Step 4 uses
+        # answers here too, so both previews offer the same windows in the
+        # same order. It returns None for anything that is not an accepted
+        # continuous plan, which leaves the session path below untouched.
         continuous_segments = (
             self._guided_continuous_preview_window_segments()
             if self._guided_effective_acquisition_mode() == "continuous"
-            and discovery_format == "rwd"
             else None
         )
         if continuous_segments is not None:
@@ -21001,20 +20995,24 @@ class MainWindow(QMainWindow):
         self, segment: dict[str, object], input_format: str
     ) -> dict[str, object]:
         source_path = str(segment.get("source_path") or "")
-        if input_format == "rwd":
-            if segment.get("continuous_window_index") is not None:
-                overrides = dict(
-                    self._guided_continuous_recording_reader_overrides()
+        # An analysis window of an accepted continuous recording is read the
+        # way that recording established, whatever format it came from. The
+        # per-format branches below describe session sources only, and the
+        # dataset-contract branch in particular belongs to session CSV.
+        if segment.get("continuous_window_index") is not None:
+            overrides = dict(
+                self._guided_continuous_recording_reader_overrides()
+            )
+            if segment.get("continuous_window_sec") is not None:
+                overrides["continuous_window_sec"] = float(
+                    segment["continuous_window_sec"]
                 )
-                if segment.get("continuous_window_sec") is not None:
-                    overrides["continuous_window_sec"] = float(
-                        segment["continuous_window_sec"]
-                    )
-                if segment.get("continuous_step_sec") is not None:
-                    overrides["continuous_step_sec"] = float(
-                        segment["continuous_step_sec"]
-                    )
-                return overrides
+            if segment.get("continuous_step_sec") is not None:
+                overrides["continuous_step_sec"] = float(
+                    segment["continuous_step_sec"]
+                )
+            return overrides
+        if input_format == "rwd":
             contract = self._infer_rwd_chunk_contract(source_path)
             return {
                 "target_fs_hz": self._guided_recording_target_fs_hz("rwd"),
