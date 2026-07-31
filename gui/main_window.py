@@ -510,6 +510,13 @@ GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
     # message instead of prompting for confirmation.
     "missing_npm_channel_mapping",
     "missing_npm_dataset_contract",
+    # CSV's own categories, for the same reason. A continuous CSV recording
+    # cannot have its contract detected at discovery time, because the reader
+    # facts come from the recording check that runs afterwards -- so it
+    # reaches Review Plan needing exactly the confirmation continuous RWD
+    # needs, and must be offered it rather than told it is unsupported.
+    "missing_custom_tabular_column_mapping",
+    "missing_custom_tabular_dataset_contract",
 ))
 
 
@@ -14780,7 +14787,47 @@ class MainWindow(QMainWindow):
             if not validation_issues:
                 status = "inferred"
         elif fmt == "custom_tabular":
-            if acq != "intermittent":
+            if acq == "continuous":
+                # One continuous CSV has no session files to order and no
+                # filename chronology; its reader facts are the ones the
+                # recording check already accepted, exactly as continuous RWD
+                # above takes its facts from the accepted recording rather
+                # than from session inference.
+                try:
+                    inferred = self._guided_continuous_recording_reader_overrides()
+                except Exception as exc:
+                    status = "invalid"
+                    validation_issues.append(
+                        f"CSV dataset semantics could not be resolved: {exc}"
+                    )
+                else:
+                    dataset_semantics = {
+                        name: inferred[name]
+                        for name in (
+                            "custom_tabular_time_col",
+                            "custom_tabular_time_unit",
+                            "custom_tabular_roi_mapping_json",
+                        )
+                        if inferred.get(name)
+                    }
+                    raw_target_fs_hz = inferred.get("target_fs_hz")
+                    if (
+                        isinstance(raw_target_fs_hz, (int, float))
+                        and not isinstance(raw_target_fs_hz, bool)
+                        and raw_target_fs_hz > 0
+                    ):
+                        target_fs_hz_value = float(raw_target_fs_hz)
+                    else:
+                        validation_issues.append(
+                            GUIDED_SAMPLING_RATE_FAILURE_MESSAGE
+                        )
+                    if len(dataset_semantics) != 3:
+                        validation_issues.append(
+                            "the accepted recording did not report the CSV "
+                            "time and fluorescence columns"
+                        )
+                    status = "inferred" if not validation_issues else "invalid"
+            elif acq != "intermittent":
                 status = "unsupported"
                 validation_issues.append(
                     "the CSV dataset contract applies to session-based "

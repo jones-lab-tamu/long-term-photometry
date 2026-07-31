@@ -2484,18 +2484,25 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
                 issue_category=None if npm_has_mapping else "missing_npm_dataset_contract",
             ))
     elif fmt == "custom_tabular":
-        custom_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
-            plan.dataset_contract_snapshot,
-            (
-                "custom_tabular_time_col",
-                "custom_tabular_time_unit",
-                "custom_tabular_roi_mapping_json",
+        # One continuous CSV is a single file read on its own elapsed-time
+        # axis, so the session-ordering half of the interpretation -- which
+        # files, in what order, and the chronology that order establishes --
+        # does not exist for it. Only the column mapping applies.
+        custom_tabular_mapping_fields = (
+            "custom_tabular_time_col",
+            "custom_tabular_time_unit",
+            "custom_tabular_roi_mapping_json",
+        )
+        if acq != "continuous":
+            custom_tabular_mapping_fields += (
                 "custom_tabular_ordered_source_files_json",
                 "custom_tabular_order_confirmed",
                 "custom_tabular_chronology_authority",
                 "custom_tabular_header_rule",
                 "custom_tabular_delimiter",
-            ),
+            )
+        custom_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
+            plan.dataset_contract_snapshot, custom_tabular_mapping_fields
         )
         fields.append(_execution_field(
             "custom_tabular_column_mapping",

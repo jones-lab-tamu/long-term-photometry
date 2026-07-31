@@ -120,7 +120,8 @@ def _confirm_corrections(window) -> None:
         window._on_generate_guided_correction_preview()
         assert _pump(
             lambda: not window._guided_correction_preview_running
-            and window._guided_correction_preview_thread is None
+            and window._guided_correction_preview_thread is None,
+            limit=400000,
         ), window._guided_preview_status_label.text()
     window._refresh_guided_diagnostics_panel()
     window._refresh_guided_correction_next_action()
@@ -325,3 +326,164 @@ def test_continuous_csv_runs_to_a_completed_continuous_run(
         assert list((run_dir / roi / "day_plots").glob("*.png"))
     events = run_dir / "_analysis" / "phasic_out" / "features" / "continuous_phasic_events.csv"
     assert sum(1 for _ in events.open(encoding="utf-8")) - 1 > 0
+
+
+def _confirm_dataset_settings(window) -> None:
+    """Press the visible Review Plan confirmation, as continuous RWD needs too."""
+    button = window._guided_review_dataset_contract_action_btn
+    assert button.isHidden() is False, window._guided_review_plan_status_label.text()
+    button.click()
+    _pump(lambda: not window._guided_dataset_contract_confirmation_active)
+    QCoreApplication.processEvents()
+
+
+def _reach_review_plan(window, folder, output):
+    """The ordinary workflow, driven by the real Continue buttons."""
+    _select_continuous_csv(window, folder)
+    window._guided_output_dir_edit.setText(str(output))
+    _map_columns(window)
+    _set_timeline(window)
+    _discover_rois(window)
+    for index in range(window._guided_roi_list.count()):
+        window._guided_roi_list.item(index).setCheckState(Qt.Checked)
+    QCoreApplication.processEvents()
+
+    window._on_guided_continue_to_recording_structure()
+    QCoreApplication.processEvents()
+    window._on_guided_continue_to_correction_approach()
+    QCoreApplication.processEvents()
+    assert _pump(
+        lambda: window._guided_continuous_rwd_check_thread is None, limit=200000
+    ), window._guided_continuous_rwd_check_status_label.text()
+    assert window._guided_continuous_rwd_review_binding is not None
+
+    _confirm_corrections(window)
+    window._on_guided_continue_to_feature_detection()
+    QCoreApplication.processEvents()
+    window._guided_feature_event_apply_btn.click()
+    QCoreApplication.processEvents()
+    window._on_guided_continue_to_review_plan()
+    QCoreApplication.processEvents()
+
+
+def _go_to_run_and_check_setup(window) -> None:
+    """Go to Run, then press Check my setup, which prepares the run.
+
+    Run-page entry is deliberately passive for both Guided modes: continuous
+    preparation starts only from this button, exactly as it does for RWD.
+    """
+    window._guided_review_go_to_run_btn.click()
+    QCoreApplication.processEvents()
+    window._guided_backend_validate_btn.click()
+    QCoreApplication.processEvents()
+    assert _pump(
+        lambda: not window._guided_continuous_rwd_preparation_active(), limit=400000
+    ), window._guided_continuous_rwd_status_message
+
+
+def test_continuous_csv_review_plan_reaches_an_enabled_go_to_run(
+    window, continuous_csv_folder, tmp_output
+):
+    """Review Plan must not call a supported continuous CSV plan unsupported."""
+    from photometry_pipeline.guided_new_analysis_plan import (
+        evaluate_guided_new_analysis_execution_subset_readiness,
+        evaluate_new_analysis_plan_readiness,
+    )
+
+    _reach_review_plan(window, continuous_csv_folder, tmp_output)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert evaluate_new_analysis_plan_readiness(plan).plan_complete_for_handoff is True
+
+    # Before confirmation the scientist is offered the same confirmation
+    # continuous RWD is offered -- never "Guided Run does not yet support".
+    status = window._guided_review_plan_status_label.text()
+    assert "Plan completeness: Complete" in status
+    assert "does not yet support this configuration" not in status
+    assert "detected dataset settings have not been confirmed yet" in status
+
+    _confirm_dataset_settings(window)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.input_format == "custom_tabular"
+    assert plan.acquisition_mode == "continuous"
+    assert plan.dataset_contract_snapshot.current_applied is True
+    values = dict(plan.dataset_contract_snapshot.contract_values or {})
+    # The confirmed contract is the mapping the recording check accepted, and
+    # carries no session-ordering fields, which one file does not have.
+    assert values["custom_tabular_time_col"] == "ElapsedSeconds"
+    assert values["custom_tabular_time_unit"] == "seconds"
+    assert "ROI1_Signal" in values["custom_tabular_roi_mapping_json"]
+    assert "ROI2_Signal" in values["custom_tabular_roi_mapping_json"]
+    assert "custom_tabular_ordered_source_files_json" not in values
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert subset.first_subset_executable is True, subset.blocking_issues
+
+    status = window._guided_review_plan_status_label.text()
+    assert "This plan is ready" in status
+    assert "does not yet support this configuration" not in status
+    assert "Full Control" not in status
+    for forbidden in ("custom_tabular", "CR1", "RWD", "producer"):
+        assert forbidden not in status
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+
+def test_continuous_csv_runs_from_the_guided_run_button(
+    window, continuous_csv_folder, tmp_output
+):
+    """Go to Run, then the ordinary Run button, then a completed run."""
+    _reach_review_plan(window, continuous_csv_folder, tmp_output)
+    _confirm_dataset_settings(window)
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+    _go_to_run_and_check_setup(window)
+    assert (
+        window._guided_continuous_rwd_prepared_run is not None
+    ), window._guided_continuous_rwd_status_message
+    assert window._guided_run_btn.isEnabled() is True
+
+    window._guided_run_btn.click()
+    assert _pump(
+        lambda: not window._guided_continuous_rwd_execution_active, limit=600000
+    ), window._guided_continuous_rwd_status_message
+
+    run_dir = Path(window._guided_continuous_rwd_completed_run_dir)
+    assert run_dir.is_dir(), window._guided_continuous_rwd_status_message
+    assert json.loads(
+        (run_dir / "status.json").read_text(encoding="utf-8")
+    )["status"] == "success"
+    report = json.loads((run_dir / "run_report.json").read_text(encoding="utf-8"))
+    assert report["source"]["acquisition_mode"] == "continuous"
+    for roi in ("ROI1", "ROI2"):
+        assert (run_dir / roi / "tables" / "continuous_tonic_window_summary.csv").exists()
+        assert (run_dir / roi / "tables" / "continuous_phasic_window_summary.csv").exists()
+        assert list((run_dir / roi / "day_plots").glob("*.png"))
+    events = (
+        run_dir / "_analysis" / "phasic_out" / "features" / "continuous_phasic_events.csv"
+    )
+    assert sum(1 for _ in events.open(encoding="utf-8")) - 1 > 0
+
+
+def test_changing_the_setup_after_confirmation_closes_run_again(
+    window, continuous_csv_folder, tmp_output
+):
+    """Currentness is not weakened: a later edit must withdraw Run."""
+    _reach_review_plan(window, continuous_csv_folder, tmp_output)
+    _confirm_dataset_settings(window)
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+    _go_to_run_and_check_setup(window)
+    assert window._guided_run_btn.isEnabled() is True
+
+    # The scientist changes the analysis window after preparing. The plan is
+    # still valid, so continuous readiness still owns Run -- and must withdraw
+    # it, because the prepared run belongs to the previous plan.
+    window._continuous_window_sec_spin.setValue(
+        float(window._continuous_window_sec_spin.value()) + 60.0
+    )
+    QCoreApplication.processEvents()
+
+    assert window._guided_continuous_rwd_prepared_run is None
+    assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_continuous_rwd_run_readiness()[0] is False
