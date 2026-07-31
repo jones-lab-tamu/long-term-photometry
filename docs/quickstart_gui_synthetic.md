@@ -27,15 +27,22 @@ python gui/main.py
 ## 2. Generate and select the demo
 
 1. Choose `Tools -> Generate Guided Demo Dataset`.
-2. Select a destination folder.
-3. Wait for `long_term_photometry_guided_demo` to be created.
-4. Open Guided Workflow and start a new analysis.
-5. On Select data, choose the generated recording folder.
-6. Follow its short `README.md` and the ordinary Guided prompts.
+2. Choose a recording structure:
+   - `Intermittent recording, 48 hours`
+   - `Continuous recording, 48 hours`
+3. Select a destination folder.
+4. Wait for the demo folder to be created.
+5. Open Guided Workflow and start a new analysis.
+6. On Select data, choose the generated recording folder.
+7. Follow its short `README.md` and the ordinary Guided prompts.
 
-The demo contains 96 CSV files, one per session, spanning 48 scheduled hours at
-20 Hz with two mapped ROIs.
-It does not require a custom config or any Full Control setup.
+The intermittent demo creates `long_term_photometry_guided_demo`: 96 CSV files,
+one per session, spanning 48 scheduled hours at 20 Hz with two mapped ROIs.
+
+The continuous demo creates `long_term_photometry_continuous_demo`: one
+uninterrupted 48-hour recording at 8 Hz with two ROIs.
+
+Neither demo requires a custom config or any Full Control setup.
 
 ## 3. Complete ordinary Guided choices
 

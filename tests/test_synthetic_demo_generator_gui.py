@@ -506,7 +506,12 @@ def test_dialog_has_one_fixed_guided_flow_and_no_rwd_presets(qapp):
     dialog = GenerateSyntheticDemoDatasetDialog()
     try:
         assert dialog.windowTitle() == "Generate Guided Demo Dataset"
-        assert dialog.findChildren(QComboBox) == []
+        # The only choice is the acquisition structure; no format, preset, or
+        # sampling-rate selectors.
+        combos = dialog.findChildren(QComboBox)
+        assert [combo.objectName() for combo in combos] == [
+            "recording_structure_combo"
+        ]
         assert [
             widget.objectName() for widget in dialog.findChildren(QLineEdit)
         ] == ["output_folder_edit"]
@@ -548,8 +553,11 @@ def test_docs_present_guided_demo_as_normal_gui_path():
     assert "Tools -> Generate Guided Demo Dataset" in quickstart
     assert "long_term_photometry_guided_demo" in quickstart
     assert "Set as Current Input" not in quickstart
-    assert "one fixed, vendor-neutral CSV recording" in demo_docs
+    assert "Intermittent recording, 48 hours" in demo_docs
+    assert "Continuous recording, 48 hours" in demo_docs
+    assert "one vendor-neutral CSV recording" in demo_docs
     assert "not visible GUI demo choices" in demo_docs
+    assert "long_term_photometry_continuous_demo" in quickstart
 
 
 def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(
