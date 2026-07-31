@@ -496,11 +496,11 @@ def _continuous_csv_folder(folder):
     return Path(result.input_dir)
 
 
-def _select_csv_data(window, qapp, folder):
+def _select_csv_data(window, qapp, folder, *, structure="continuous"):
     """The ordinary Select-data controls for one continuous CSV recording."""
     window._on_guided_start_setup_new_analysis()
     window._guided_format_combo.setCurrentText("custom_tabular")
-    index = window._guided_acquisition_mode_combo.findData("continuous")
+    index = window._guided_acquisition_mode_combo.findData(structure)
     assert index >= 0
     window._guided_acquisition_mode_combo.setCurrentIndex(index)
     window._guided_input_dir_edit.setText(str(folder))
@@ -534,6 +534,28 @@ def _select_csv_data(window, qapp, folder):
     qapp.processEvents()
 
 
+def _walk_to_correction_approach(window, qapp):
+    """Press the two Continue buttons a scientist actually presses.
+
+    ``_on_guided_continue_to_correction_approach`` starts the recording check
+    and navigates immediately, so arriving on the page does not mean the
+    accepted recording exists yet. Nothing here refreshes a panel by hand:
+    the only wait is for the worker the button started.
+    """
+    window._on_guided_continue_to_recording_structure()
+    qapp.processEvents()
+    window._on_guided_continue_to_correction_approach()
+    qapp.processEvents()
+    _pump(
+        qapp,
+        lambda: getattr(window, "_guided_continuous_rwd_check_thread", None)
+        is not None,
+        180_000,
+    )
+    for _ in range(200):
+        qapp.processEvents()
+
+
 def _identities(combo):
     return [
         (combo.itemText(index), combo.itemData(index)["continuous_window_index"])
@@ -548,9 +570,11 @@ def test_continuous_csv_offers_the_same_windows_as_the_segment_authority(
     folder = _continuous_csv_folder(tmp_path / "csv")
     _select_csv_data(window, qapp, folder)
     window._continuous_window_sec_spin.setValue(200.0)
-    _check_recording(window, qapp)
-    _open_correction_approach(window)
+    _walk_to_correction_approach(window, qapp)
 
+    # Nothing has been previewed or refreshed by hand: this is the state the
+    # scientist sees on arriving at Correction approach.
+    assert window._guided_preview_chunk_combo.count() > 1
     # Before any correction choice exists, only whole windows are offered --
     # the same pre-plan rule the RWD path uses.
     segments = _segments(window)
@@ -581,8 +605,15 @@ def test_continuous_csv_feature_detection_uses_the_same_ordered_windows(
     folder = _continuous_csv_folder(tmp_path / "csv")
     _select_csv_data(window, qapp, folder)
     window._continuous_window_sec_spin.setValue(200.0)
-    _check_recording(window, qapp)
-    _open_correction_approach(window)
+    _walk_to_correction_approach(window, qapp)
+
+    # Both selectors already offer the windows, before any preview exists.
+    assert window._guided_preview_chunk_combo.count() > 1
+    assert window._guided_feature_preview_segment_combo.count() > 1
+    assert _identities(window._guided_feature_preview_segment_combo) == _identities(
+        window._guided_preview_chunk_combo
+    )
+
     _generate_and_confirm_corrections(window, qapp)
 
     window._on_guided_continue_to_feature_detection()
@@ -680,6 +711,75 @@ def test_continuous_csv_feature_detection_uses_the_same_ordered_windows(
     window._guided_feature_preview_roi_combo.setCurrentIndex(1)
     qapp.processEvents()
     assert feature.currentIndex() == current
+
+
+def test_auto_structure_never_reads_one_continuous_csv_as_a_session(
+    window, qapp, tmp_path, monkeypatch
+):
+    """The reported defect: Detect automatically silently chose sessions.
+
+    A whole 48-hour continuous CSV was read as one intermittent session named
+    after the file, so both preview selectors offered only that entry and every
+    preview showed the start of the recording. CSV has two structures now, and
+    one file does not say which, so this must ask instead of guessing.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        staticmethod(lambda *args, **_k: shown.append(args[2] if len(args) > 2 else "")),
+        raising=False,
+    )
+
+    folder = _continuous_csv_folder(tmp_path / "csv")
+    _select_csv_data(
+        window, qapp, folder, structure=GUIDED_STRUCTURE_CHOICE_AUTO
+    )
+
+    # No ROIs and no sessions are installed from a guessed structure.
+    assert window._guided_roi_list.count() == 0
+    assert not (getattr(window, "_discovery_cache", None) or {})
+
+    # The refusal names the choice the scientist has to make.
+    assert shown, "the scientist was told nothing"
+    reason = " ".join(str(text) for text in shown)
+    assert "one CSV file" in reason
+    assert "continuous recording" in reason
+    assert "single session" in reason
+    assert "recording structure" in reason
+
+    # Nothing is offered as a preview segment, least of all the file name.
+    assert window._guided_preview_chunk_combo.count() == 0
+    assert window._guided_feature_preview_segment_combo.count() == 0
+
+
+def test_auto_structure_still_reads_several_csv_files_as_sessions(
+    window, qapp, tmp_path
+):
+    """Several CSV files are unambiguously repeated sessions."""
+    from gui.synthetic_demo_generator import generate_guided_csv_demo
+
+    result = generate_guided_csv_demo(tmp_path / "sessions", _session_count=3)
+    assert result.success, result.message
+    folder = Path(result.input_dir)
+
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+    _select_csv_data(
+        window, qapp, folder, structure=GUIDED_STRUCTURE_CHOICE_AUTO
+    )
+
+    assert [
+        window._guided_roi_list.item(index).text()
+        for index in range(window._guided_roi_list.count())
+    ] == ["ROI1", "ROI2"]
+    assert window._guided_effective_acquisition_mode() == "intermittent"
+    assert (
+        len((getattr(window, "_discovery_cache", None) or {}).get("sessions") or [])
+        == 3
+    )
 
 
 # ---------------------------------------------------------------------------

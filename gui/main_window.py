@@ -30504,9 +30504,34 @@ class MainWindow(QMainWindow):
             return _discover_continuous_rwd_rois
         if structure_choice != GUIDED_STRUCTURE_CHOICE_AUTO:
             return run_intermittent
-        if input_format in {"npm", "custom_tabular"}:
-            # Those formats have exactly one structure; nothing to resolve.
+        if input_format == "npm":
+            # NPM has exactly one structure; nothing to resolve.
             return run_intermittent
+        if input_format == "custom_tabular":
+            # CSV no longer has only one structure. Several CSV files are
+            # repeated sessions, but a single file reads equally well as one
+            # continuous recording or as one session, and nothing inside it
+            # settles which. Guessing silently reads a whole continuous
+            # recording as one session named after the file, so this asks
+            # instead -- the same rule the RWD probe applies when both
+            # readings are valid.
+            def run_custom_tabular_auto_structure(
+                captured: dict[str, object], diag=None, phase=None
+            ) -> dict[str, object]:
+                from photometry_pipeline.io.csv_continuous_source import (
+                    candidate_csv_files,
+                )
+
+                if len(candidate_csv_files(str(captured.get("input_dir", "")))) == 1:
+                    raise GuidedContinuousRwdRoiDiscoveryError(
+                        "This folder holds one CSV file, which can be read "
+                        "either as one continuous recording or as a single "
+                        "session. Choose the recording structure, then find "
+                        "ROIs again."
+                    )
+                return run_intermittent(captured, diag, phase)
+
+            return run_custom_tabular_auto_structure
 
         def run_auto_structure(
             captured: dict[str, object], diag=None, phase=None
