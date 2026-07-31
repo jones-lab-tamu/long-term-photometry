@@ -5,13 +5,15 @@ This project uses `tools/synth_photometry_dataset.py` for both regression fixtur
 For a first GUI walkthrough, choose `Tools -> Generate Guided Demo Dataset` and
 pick one of the two fixed recording structures:
 
-- `Intermittent recording, 48 hours` generates one vendor-neutral CSV recording
-  with 96 ten-minute sessions, 2 sessions/hour, 20 Hz sampling and 2 ROIs.
-- `Continuous recording, 48 hours` generates one uninterrupted 48-hour
-  recording at 8 Hz with 2 ROIs.
+- `Intermittent recording, 48 hours` writes 96 ten-minute session files,
+  2 sessions/hour, 20 Hz sampling and 2 ROIs.
+- `Continuous recording, 48 hours` writes one uninterrupted recording file at
+  8 Hz with 2 ROIs.
 
-Both use deterministic transient events. Select the generated folder in Guided
-Mode and follow its README.
+Both demos are plain generic CSV with ordinary column headers, and both use
+deterministic transient events. The intermittent demo is a folder of session
+files; the continuous demo is a single file. Guided Mode is the intended route
+for both: select the generated folder in Guided Mode and follow its README.
 
 The bundled RWD example and configurable CLI generator remain developer,
 regression, and command-line resources; they are not visible GUI demo choices.

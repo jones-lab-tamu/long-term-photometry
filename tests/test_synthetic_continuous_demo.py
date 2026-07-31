@@ -47,12 +47,11 @@ def continuous_samples(continuous_demo):
     return np.loadtxt(
         continuous_demo.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME,
         delimiter=",",
-        skiprows=2,
-        usecols=(0, 2, 3, 4, 5),
+        skiprows=1,
     )
 
 
-_TIME, _CH1_REFERENCE, _CH1_SIGNAL, _CH2_REFERENCE, _CH2_SIGNAL = range(5)
+_TIME, _CH1_SIGNAL, _CH1_REFERENCE, _CH2_SIGNAL, _CH2_REFERENCE = range(5)
 _ROI_COLUMNS = ((_CH1_SIGNAL, _CH1_REFERENCE), (_CH2_SIGNAL, _CH2_REFERENCE))
 
 
@@ -103,10 +102,14 @@ def test_continuous_demo_writes_one_uninterrupted_recording(continuous_demo):
         ["README.md", GUIDED_CONTINUOUS_DEMO_FILE_NAME]
     )
     with source.open(encoding="utf-8") as handle:
-        metadata = handle.readline()
         header = handle.readline().rstrip("\n").rstrip("\r")
-    assert '"Fps":8.0' in metadata
+        first_row = handle.readline().strip()
+    # One header row and then numeric data: no vendor metadata row.
     assert tuple(header.split(",")) == GUIDED_CONTINUOUS_DEMO_HEADERS
+    assert header.startswith("ElapsedSeconds,")
+    assert first_row.split(",")[0] == "0.000"
+    for vendor in ("Fps", "TimeStamp", "Events", "CH1-410", "CH1-470", "CH2-410", "CH2-470"):
+        assert vendor not in header
 
 
 def test_continuous_demo_time_axis_is_regular_and_half_open(continuous_samples):
@@ -131,8 +134,10 @@ def test_continuous_demo_readme_states_the_fixed_contract():
         "continuous, one uninterrupted recording",
         "Total duration: 48 hours",
         "Sampling rate: 8 Hz",
-        "`CH1-470` with reference `CH1-410`",
-        "`CH2-470` with reference `CH2-410`",
+        "CSV files, one continuous recording",
+        "`ElapsedSeconds`",
+        "`ROI1_Signal` with `ROI1_Reference`",
+        "`ROI2_Signal` with `ROI2_Reference`",
         "Fixed daily anchor",
         "`07:00`",
         "`12:00:00`",
@@ -366,31 +371,41 @@ def test_generated_continuous_demo_passes_real_guided_continuous_authorities(
     from photometry_pipeline.guided_continuous_rwd_target_grid import (
         build_guided_continuous_rwd_target_grid,
     )
-    from photometry_pipeline.io.rwd_continuous_source import (
-        inspect_continuous_rwd_acquisition_folder,
+    from photometry_pipeline.io.csv_continuous_source import (
+        ContinuousCsvRoiSelection,
+        inspect_continuous_csv_recording,
     )
 
-    inspection = inspect_continuous_rwd_acquisition_folder(continuous_demo.input_dir)
+    inspection = inspect_continuous_csv_recording(
+        continuous_demo.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME,
+        time_column="ElapsedSeconds",
+        time_unit="seconds",
+        roi_selections=[
+            ContinuousCsvRoiSelection("ROI1", "ROI1_Signal", "ROI1_Reference"),
+            ContinuousCsvRoiSelection("ROI2", "ROI2_Signal", "ROI2_Reference"),
+        ],
+    )
     assert inspection.status == "completed", inspection.outcome_category
     assert inspection.outcome_category == "inspection_completed"
     assert inspection.source_stable
     assert inspection.parser_facts is not None
-    assert inspection.parser_facts.time_column == "TimeStamp"
+    assert inspection.parser_facts.time_column == "ElapsedSeconds"
+    assert inspection.parser_facts.header_row_index == 0
     assert inspection.parser_facts.timestamp_unit == "seconds"
 
     roi_pairs = inspection.channels.roi_pairs
-    assert [pair.roi_id for pair in roi_pairs] == ["CH1", "CH2"]
-    assert [pair.signal_column for pair in roi_pairs] == ["CH1-470", "CH2-470"]
-    assert [pair.reference_column for pair in roi_pairs] == ["CH1-410", "CH2-410"]
+    assert [pair.roi_id for pair in roi_pairs] == ["ROI1", "ROI2"]
+    assert [pair.signal_column for pair in roi_pairs] == ["ROI1_Signal", "ROI2_Signal"]
+    assert [pair.reference_column for pair in roi_pairs] == ["ROI1_Reference", "ROI2_Reference"]
     assert inspection.channels.nonfinite_selected_value_count == 0
     assert inspection.channels.malformed_row_count == 0
 
     recording = build_guided_continuous_rwd_recording_description(
-        inspection, included_roi_ids=("CH1", "CH2")
+        inspection, included_roi_ids=("ROI1", "ROI2")
     )
-    assert recording.source_format == "rwd"
+    assert recording.source_format == "custom_tabular"
     assert recording.acquisition_mode == "continuous"
-    assert tuple(recording.roi.included_roi_ids) == ("CH1", "CH2")
+    assert tuple(recording.roi.included_roi_ids) == ("ROI1", "ROI2")
 
     continuity = evaluate_continuous_rwd_timestamp_continuity(
         recording,

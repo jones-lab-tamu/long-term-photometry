@@ -340,13 +340,10 @@ def test_guided_intermittent_rwd_prefills_validated_session_clock_and_stays_edit
     assert values["recording_start_clock_source"] == "validated_metadata"
 
 
-@pytest.mark.parametrize("source_format", ["npm", "custom_tabular"])
-def test_guided_continuous_is_refused_for_non_rwd_input(window, source_format):
-    """The complete continuous production path exists only for RWD. The
-    older chunked custom_tabular continuous-output workflow must not be
-    reachable through this selection."""
+def test_guided_continuous_is_refused_for_npm_input(window):
+    """The complete continuous production path does not exist for NPM."""
     window._set_guided_workflow_mode("new_analysis")
-    window._guided_format_combo.setCurrentText(source_format)
+    window._guided_format_combo.setCurrentText("npm")
     window._guided_acquisition_mode_combo.setCurrentIndex(
         window._guided_acquisition_mode_combo.findData("continuous")
     )
@@ -358,6 +355,49 @@ def test_guided_continuous_is_refused_for_non_rwd_input(window, source_format):
     assert window._maybe_start_guided_continuous_rwd_recording_check() is False
     assert window._maybe_start_guided_continuous_rwd_preparation() is False
     assert window._guided_continuous_rwd_live_draft() is None
+
+
+def test_guided_continuous_csv_is_refused_without_exactly_one_file(window, tmp_path):
+    """One continuous CSV recording is one file. A folder of session files
+    stays intermittent, and the refusal names the concrete file count."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+
+    # No folder selected yet.
+    assert window._guided_continuous_rwd_live_draft() is None
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "README.md").write_text("not a recording", encoding="utf-8")
+    window._guided_input_dir_edit.setText(str(empty))
+    available, reason = window._guided_continuous_csv_availability()
+    assert available is False
+    assert "No CSV recording file" in reason
+    assert window._guided_continuous_rwd_live_draft() is None
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for index in range(3):
+        (sessions / f"session_{index:04d}.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    window._guided_input_dir_edit.setText(str(sessions))
+    available, reason = window._guided_continuous_csv_availability()
+    assert available is False
+    assert "3 CSV files" in reason
+    assert window._maybe_start_guided_continuous_rwd_recording_check() is False
+    assert window._maybe_start_guided_continuous_rwd_preparation() is False
+    assert window._guided_continuous_rwd_live_draft() is None
+
+    one = tmp_path / "one"
+    one.mkdir()
+    (one / "continuous_recording.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (one / "README.md").write_text("ignored", encoding="utf-8")
+    window._guided_input_dir_edit.setText(str(one))
+    available, reason = window._guided_continuous_csv_availability()
+    assert available is True
+    assert reason == ""
 
 
 def test_unsupported_guided_widget_state_fails_closed(window):

@@ -13,6 +13,10 @@ import math
 from typing import Any, Mapping
 
 from photometry_pipeline.guided_identity import encode_canonical_value
+from photometry_pipeline.io.csv_continuous_source import (
+    INSPECTION_CONTRACT_NAME as CSV_INSPECTION_CONTRACT_NAME,
+    INSPECTION_CONTRACT_VERSION as CSV_INSPECTION_CONTRACT_VERSION,
+)
 from photometry_pipeline.io.rwd_continuous_source import (
     INSPECTION_CONTRACT_NAME,
     INSPECTION_CONTRACT_VERSION,
@@ -24,6 +28,16 @@ from photometry_pipeline.io.rwd_continuous_source import (
 SCHEMA_NAME = "guided_continuous_rwd_recording_description"
 SCHEMA_VERSION = "v1"
 SOURCE_FORMAT = "rwd"
+# One continuous generic CSV file produces the same normalized description
+# through the same route, so the accepted inspection contract also selects the
+# truthful source format. Nothing downstream branches on this value.
+CSV_SOURCE_FORMAT = "custom_tabular"
+# The two source formats the continuous route admits.
+CONTINUOUS_SOURCE_FORMATS = (SOURCE_FORMAT, CSV_SOURCE_FORMAT)
+_SOURCE_FORMAT_BY_INSPECTION_CONTRACT = {
+    (INSPECTION_CONTRACT_NAME, INSPECTION_CONTRACT_VERSION): SOURCE_FORMAT,
+    (CSV_INSPECTION_CONTRACT_NAME, CSV_INSPECTION_CONTRACT_VERSION): CSV_SOURCE_FORMAT,
+}
 ACQUISITION_MODE = "continuous"
 EXECUTION_ADMISSION_STATUS = "pending_material_gap_policy"
 UNRESOLVED_ADMISSION_CHECKS = ("material_gap_policy",)
@@ -417,7 +431,14 @@ def _validate_cadence(cadence: ContinuousRwdCadenceAuthority) -> None:
 def _validate_description(description: GuidedContinuousRwdRecordingDescription) -> None:
     if not isinstance(description, GuidedContinuousRwdRecordingDescription):
         _fail("description must be a GuidedContinuousRwdRecordingDescription.")
-    expected = (SCHEMA_NAME, SCHEMA_VERSION, SOURCE_FORMAT, ACQUISITION_MODE,
+    contract = (
+        description.source.inspection_contract_name,
+        description.source.inspection_contract_version,
+    )
+    expected_source_format = _SOURCE_FORMAT_BY_INSPECTION_CONTRACT.get(contract)
+    if expected_source_format is None:
+        _fail("Unsupported CR1-A inspection contract metadata.")
+    expected = (SCHEMA_NAME, SCHEMA_VERSION, expected_source_format, ACQUISITION_MODE,
                 EXECUTION_ADMISSION_STATUS, UNRESOLVED_ADMISSION_CHECKS)
     actual = (description.schema_name, description.schema_version,
               description.source_format, description.acquisition_mode,
@@ -425,12 +446,6 @@ def _validate_description(description: GuidedContinuousRwdRecordingDescription) 
               description.unresolved_admission_checks)
     if actual != expected:
         _fail("Unsupported continuous recording-description metadata.")
-    if (
-        description.source.inspection_contract_name != INSPECTION_CONTRACT_NAME
-        or description.source.inspection_contract_version
-        != INSPECTION_CONTRACT_VERSION
-    ):
-        _fail("Unsupported CR1-A inspection contract metadata.")
     _validate_sha(description.source.sha256, "source SHA-256")
     _validate_sha(description.source.source_content_identity, "source-content identity")
     _validate_sha(description.source.parser_interpretation_identity, "parser identity")
@@ -505,9 +520,15 @@ def build_guided_continuous_rwd_recording_description(
 ) -> GuidedContinuousRwdRecordingDescription:
     if not isinstance(inspection, ContinuousRwdInspectionResult):
         _fail("inspection must be a ContinuousRwdInspectionResult.")
-    if inspection.contract_name != INSPECTION_CONTRACT_NAME:
+    source_format = _SOURCE_FORMAT_BY_INSPECTION_CONTRACT.get(
+        (inspection.contract_name, inspection.contract_version)
+    )
+    if inspection.contract_name not in {
+        INSPECTION_CONTRACT_NAME,
+        CSV_INSPECTION_CONTRACT_NAME,
+    }:
         _fail("Unsupported CR1-A inspection contract name.")
-    if inspection.contract_version != INSPECTION_CONTRACT_VERSION:
+    if source_format is None:
         _fail("Unsupported CR1-A inspection contract version.")
     if inspection.status != "completed" or inspection.outcome_category != "inspection_completed":
         _fail("CR1-A inspection must have completed successfully.")
@@ -620,7 +641,7 @@ def build_guided_continuous_rwd_recording_description(
            "cadence_evidence_identity": _digest(CADENCE_EVIDENCE_IDENTITY_DOMAIN, _cadence_payload(cadence_without_identity))}
     )
     draft = GuidedContinuousRwdRecordingDescription(
-        SCHEMA_NAME, SCHEMA_VERSION, SOURCE_FORMAT, ACQUISITION_MODE,
+        SCHEMA_NAME, SCHEMA_VERSION, source_format, ACQUISITION_MODE,
         EXECUTION_ADMISSION_STATUS, UNRESOLVED_ADMISSION_CHECKS,
         source_binding, roi, time, cadence, "",
     )

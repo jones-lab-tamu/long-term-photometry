@@ -14,6 +14,7 @@ from photometry_pipeline.guided_continuous_rwd_discontinuity_policy import (
     POLICY_VERSION,
 )
 from photometry_pipeline.guided_continuous_rwd_recording import (
+    CONTINUOUS_SOURCE_FORMATS,
     ContinuousRwdRecordingAuthorityError,
     GuidedContinuousRwdRecordingDescription,
     _validate_description,
@@ -61,8 +62,13 @@ def build_guided_continuous_rwd_review_binding(
         ) from exc
     if draft.schema_version != GUIDED_DRAFT_SCHEMA_VERSION or draft.mode != "new_analysis":
         _fail("Guided draft authority is invalid.")
-    if draft.input_format != "rwd" or draft.acquisition_mode != "continuous":
-        _fail("Guided draft must describe one continuous RWD recording.")
+    if (
+        draft.input_format not in CONTINUOUS_SOURCE_FORMATS
+        or draft.acquisition_mode != "continuous"
+    ):
+        _fail("Guided draft must describe one continuous recording.")
+    if draft.input_format != recording.source_format:
+        _fail("Guided draft source format does not match the inspected recording.")
 
     try:
         _validate_description(recording)

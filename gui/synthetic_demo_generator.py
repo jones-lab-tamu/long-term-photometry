@@ -59,7 +59,7 @@ _REFERENCE_EVENT_BLEED = 0.05  # small event leak into the reference channel
 # only source structure the Guided continuous path accepts.
 GUIDED_CONTINUOUS_DEMO_FOLDER_NAME = "long_term_photometry_continuous_demo"
 GUIDED_CONTINUOUS_DEMO_TYPE = "Synthetic Guided continuous demo"
-GUIDED_CONTINUOUS_DEMO_FORMAT = "rwd"
+GUIDED_CONTINUOUS_DEMO_FORMAT = "custom_tabular"
 # 8 Hz gives an exactly representable 0.125 s sample period, so every written
 # timestamp is the same double the continuous target grid computes for it. A
 # period such as 0.1 s is not binary-exact, and over 48 hours the final target
@@ -68,14 +68,13 @@ GUIDED_CONTINUOUS_DEMO_FORMAT = "rwd"
 GUIDED_CONTINUOUS_DEMO_FS_HZ = 8
 GUIDED_CONTINUOUS_DEMO_DURATION_SEC = 48 * 3600.0
 GUIDED_CONTINUOUS_DEMO_BLOCK_SEC = 600.0
-GUIDED_CONTINUOUS_DEMO_FILE_NAME = "Fluorescence.csv"
+GUIDED_CONTINUOUS_DEMO_FILE_NAME = "continuous_recording.csv"
 GUIDED_CONTINUOUS_DEMO_HEADERS = (
-    "TimeStamp",
-    "Events",
-    "CH1-410",
-    "CH1-470",
-    "CH2-410",
-    "CH2-470",
+    "ElapsedSeconds",
+    "ROI1_Signal",
+    "ROI1_Reference",
+    "ROI2_Signal",
+    "ROI2_Reference",
 )
 _CONTINUOUS_DAY_SEC = 86400.0
 _CONTINUOUS_EVENT_LOOKBACK_SEC = 20.0  # longest transient tail crossing a block
@@ -101,8 +100,8 @@ def guided_demo_readme_text() -> str:
 These CSV files are synthetic demonstration data, not real biological data.
 Select this containing folder in Guided Mode.
 
-- Source type: CSV files, one file per session
-- Acquisition mode: intermittent
+- Format: CSV files
+- Recording structure: Intermittent/session-based recording
 - Sessions: 96 files across 48 scheduled hours
 - Sessions per hour: 2
 - Session duration: 600 seconds
@@ -293,12 +292,17 @@ def guided_continuous_demo_readme_text() -> str:
 These data are synthetic demonstration data, not real biological data.
 Select this containing folder in Guided Mode.
 
+- Source type: CSV files, one continuous recording
 - Recording structure: continuous, one uninterrupted recording
 - Total duration: 48 hours
 - Sampling rate: 8 Hz
-- Source type: RWD acquisition folder (this folder holds `Fluorescence.csv`)
-- ROI CH1: signal `CH1-470` with reference `CH1-410`
-- ROI CH2: signal `CH2-470` with reference `CH2-410`
+- Time column: `ElapsedSeconds`
+- Time unit: seconds
+- ROI1 mapping: `ROI1_Signal` with `ROI1_Reference`
+- ROI2 mapping: `ROI2_Signal` with `ROI2_Reference`
+
+If Guided does not already establish the structure, choose the continuous
+recording option.
 
 Recommended timeline display:
 - Fixed daily anchor
@@ -445,9 +449,6 @@ def _validate_guided_continuous_demo_folder(
         raise RuntimeError("Generated continuous recording file is missing.")
     expected_step = 1.0 / float(fs_hz)
     with source.open("r", encoding="utf-8", newline="") as handle:
-        metadata = handle.readline()
-        if '"Fps"' not in metadata:
-            raise RuntimeError("Generated continuous metadata row is invalid.")
         header = handle.readline().rstrip("\r\n").split(",")
         if tuple(header) != GUIDED_CONTINUOUS_DEMO_HEADERS:
             raise RuntimeError("Generated continuous header is invalid.")
@@ -457,10 +458,7 @@ def _validate_guided_continuous_demo_folder(
             fields = line.rstrip("\r\n").split(",")
             if len(fields) != len(GUIDED_CONTINUOUS_DEMO_HEADERS):
                 raise RuntimeError("Generated continuous row is malformed.")
-            values = np.array(
-                [float(fields[0])] + [float(item) for item in fields[2:]],
-                dtype=np.float64,
-            )
+            values = np.array([float(item) for item in fields], dtype=np.float64)
             if not np.isfinite(values).all():
                 raise RuntimeError("Generated continuous values are not finite.")
             timestamp = float(fields[0])
@@ -543,20 +541,7 @@ def generate_guided_continuous_demo(
             )
 
         source_path = temporary_folder / GUIDED_CONTINUOUS_DEMO_FILE_NAME
-        metadata_blob = (
-            '{"Light":{"Led410Enable":true;"Led470Enable":true;"Led560Enable":false;'
-            '"Led410Value":15.0;"Led470Value":45.0;"Led560Value":0.0};'
-            '"Excitation":{"mode":1;"discontinuous":false;"interval_time":0;'
-            f'"continuous_time":{int(duration_sec)}}};'
-            '"Channels":[{"Name":"CH1";"ChanelColor":"#00000000";'
-            '"Roi1":"0;0;90;90";"Roi2":"0;0;90;90"};'
-            '{"Name":"CH2";"ChanelColor":"#00000000";'
-            '"Roi1":"0;0;90;90";"Roi2":"0;0;90;90"}];'
-            f'"Fps":{float(fs_hz):.1f}}}'
-        )
         with source_path.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(metadata_blob + "," * (len(GUIDED_CONTINUOUS_DEMO_HEADERS) - 1))
-            handle.write("\n")
             handle.write(",".join(GUIDED_CONTINUOUS_DEMO_HEADERS) + "\n")
             for block_index in range(block_count):
                 first = block_index * block_samples
@@ -593,7 +578,7 @@ def generate_guided_continuous_demo(
                         + np.interp(block_time, wander_times, state["signal_wander"])
                         + rng.normal(0.0, 0.22, block_time.size)
                     )
-                    columns.extend([reference, signal])
+                    columns.extend([signal, reference])
                 values = np.column_stack(columns)
                 if not np.isfinite(values).all():
                     raise RuntimeError(
@@ -602,7 +587,7 @@ def generate_guided_continuous_demo(
                 np.savetxt(
                     handle,
                     values,
-                    fmt="%.3f,,%.6f,%.6f,%.6f,%.6f",
+                    fmt="%.3f,%.6f,%.6f,%.6f,%.6f",
                     delimiter="",
                     comments="",
                 )

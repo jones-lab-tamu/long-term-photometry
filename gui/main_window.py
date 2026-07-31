@@ -69,6 +69,10 @@ from gui.validate_run_policy import (
     is_validation_current
 )
 from photometry_pipeline.config import Config
+from photometry_pipeline.guided_continuous_rwd_recording import (
+    CONTINUOUS_SOURCE_FORMATS,
+    CSV_SOURCE_FORMAT,
+)
 from photometry_pipeline.core.utils import natural_sort_key
 from photometry_pipeline.io.adapters import (
     _scan_time_column_metadata_chunked,
@@ -193,7 +197,9 @@ FORMAT_DISPLAY_LABELS = {
     "auto": "Auto",
     "rwd": "RWD",
     "npm": "NPM",
-    "custom_tabular": "CSV files (one file per session)",
+    # Not "one file per session": CSV is now also accepted as one continuous
+    # recording file. The recording-structure control states which it is.
+    "custom_tabular": "CSV files",
 }
 
 
@@ -546,6 +552,13 @@ class _GuidedContinuousRwdRecordingCheckRequestError(ValueError):
 class _GuidedContinuousRwdRecordingCheckRequest:
     selected_acquisition_folder: str
     included_roi_ids: tuple[str, ...]
+    # Generic CSV carries the scientist's existing column mapping. RWD leaves
+    # these empty and keeps its own vendor inspection unchanged.
+    source_format: str = "rwd"
+    csv_source_path: str = ""
+    csv_time_column: str = ""
+    csv_time_unit: str = ""
+    csv_roi_columns: tuple[tuple[str, str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -570,6 +583,40 @@ class _GuidedContinuousRwdRecordingCheckRequest:
             raise _GuidedContinuousRwdRecordingCheckRequestError(
                 "included_roi_ids must be unique"
             )
+        if self.source_format not in {"rwd", "custom_tabular"}:
+            raise _GuidedContinuousRwdRecordingCheckRequestError(
+                "source_format must be rwd or custom_tabular"
+            )
+        if self.source_format == "custom_tabular":
+            if not self.csv_source_path.strip():
+                raise _GuidedContinuousRwdRecordingCheckRequestError(
+                    "csv_source_path must be a nonempty string"
+                )
+            if not self.csv_time_column.strip():
+                raise _GuidedContinuousRwdRecordingCheckRequestError(
+                    "csv_time_column must be a nonempty string"
+                )
+            if self.csv_time_unit not in {"seconds", "milliseconds"}:
+                raise _GuidedContinuousRwdRecordingCheckRequestError(
+                    "csv_time_unit must be seconds or milliseconds"
+                )
+            if not self.csv_roi_columns:
+                raise _GuidedContinuousRwdRecordingCheckRequestError(
+                    "csv_roi_columns must be a nonempty tuple"
+                )
+            if tuple(item[0] for item in self.csv_roi_columns) != self.included_roi_ids:
+                raise _GuidedContinuousRwdRecordingCheckRequestError(
+                    "csv_roi_columns must match included_roi_ids in order"
+                )
+            for _roi, signal, reference in self.csv_roi_columns:
+                if not str(signal).strip() or not str(reference).strip():
+                    raise _GuidedContinuousRwdRecordingCheckRequestError(
+                        "csv_roi_columns entries must name both columns"
+                    )
+                if signal == reference:
+                    raise _GuidedContinuousRwdRecordingCheckRequestError(
+                        "signal and reference columns must differ"
+                    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -597,6 +644,7 @@ class _GuidedContinuousRwdRecordingCheckSnapshot:
     discovered_roi_ids: tuple[str, ...]
     included_roi_ids: tuple[str, ...]
     excluded_roi_ids: tuple[str, ...]
+    csv_mapping: tuple[object, ...] = ()
 
 
 class _GuidedContinuousRwdRecordingCheckWorker(QObject):
@@ -675,6 +723,10 @@ class _GuidedContinuousRwdRecordingCheckWorker(QObject):
             from photometry_pipeline.io.rwd_continuous_source import (
                 inspect_continuous_rwd_acquisition_folder,
             )
+            from photometry_pipeline.io.csv_continuous_source import (
+                ContinuousCsvRoiSelection,
+                inspect_continuous_csv_recording,
+            )
         except Exception:
             self._unexpected_failure("inspection")
             return
@@ -685,10 +737,22 @@ class _GuidedContinuousRwdRecordingCheckWorker(QObject):
 
         self.stage_changed.emit("inspecting_recording")
         try:
-            inspection = inspect_continuous_rwd_acquisition_folder(
-                self._request.selected_acquisition_folder,
-                cancellation_check=self._cancellation_requested,
-            )
+            if self._request.source_format == "custom_tabular":
+                inspection = inspect_continuous_csv_recording(
+                    self._request.csv_source_path,
+                    time_column=self._request.csv_time_column,
+                    time_unit=self._request.csv_time_unit,
+                    roi_selections=[
+                        ContinuousCsvRoiSelection(roi_id, signal, reference)
+                        for roi_id, signal, reference in self._request.csv_roi_columns
+                    ],
+                    cancellation_check=self._cancellation_requested,
+                )
+            else:
+                inspection = inspect_continuous_rwd_acquisition_folder(
+                    self._request.selected_acquisition_folder,
+                    cancellation_check=self._cancellation_requested,
+                )
         except Exception:
             self._unexpected_failure("inspection")
             return
@@ -807,41 +871,57 @@ class GuidedContinuousRwdRoiDiscoveryError(RuntimeError):
 def _discover_continuous_rwd_rois(
     snapshot: dict[str, object], diag=None, phase=None
 ) -> dict[str, object]:
-    """Identify the canonical ROIs of one continuous RWD recording (CR1-F1-A).
+    """Identify the canonical ROIs of one continuous recording (CR1-F1-A).
 
-    Reuses the accepted continuous source inspector
-    (``photometry_pipeline.io.rwd_continuous_source.
-    inspect_continuous_rwd_acquisition_folder``) -- the same reader the later
-    continuous recording check already builds its recording description from
-    -- so there is exactly one continuous parsing implementation. It
-    deliberately stops at ROI identity: no target grid, block plan, segment
-    plan, dynamic-F0 authority, or execution Config is built here.
+    Reuses the accepted continuous source inspectors -- the same readers the
+    later continuous recording check already builds its recording description
+    from -- so there is exactly one continuous parsing implementation per
+    source format. It deliberately stops at ROI identity: no target grid,
+    block plan, segment plan, dynamic-F0 authority, or execution Config is
+    built here.
+
+    Both accepted continuous sources are read here, chosen by the format the
+    scientist stated in Select data, exactly as the continuous recording check
+    chooses its inspector. An RWD acquisition folder is read by the RWD
+    inspector; one generic CSV file is read by the CSV inspector using the
+    column mapping already captured in the snapshot. Neither source is
+    sniffed, and a CSV recording is never handed to the RWD reader.
 
     Takes only plain snapshot values and touches no widget, so it is safe to
     call from the discovery worker thread. Returns the same discovery-result
     shape the intermittent path returns, with no sessions: a continuous
     recording is one recording, not a set of sessions.
     """
-    from photometry_pipeline.io.rwd_continuous_source import (
-        inspect_continuous_rwd_acquisition_folder,
-    )
-
     input_dir = str(snapshot["input_dir"])
+    input_format = str(snapshot.get("format", "") or "").strip().lower()
+
     if diag is not None:
         diag("continuous_source_inspection_start")
-    inspection = inspect_continuous_rwd_acquisition_folder(input_dir)
+    if input_format == "custom_tabular":
+        inspection = _inspect_continuous_csv_from_snapshot(snapshot)
+        resolved_format = "custom_tabular"
+        unreadable_message = (
+            "This CSV file could not be read as one continuous recording. "
+            "Check the folder you selected and the columns you chose for "
+            "time and fluorescence."
+        )
+    else:
+        from photometry_pipeline.io.rwd_continuous_source import (
+            inspect_continuous_rwd_acquisition_folder,
+        )
+
+        inspection = inspect_continuous_rwd_acquisition_folder(input_dir)
+        resolved_format = "rwd"
+        unreadable_message = (
+            "This folder could not be read as a continuous RWD "
+            "recording. Check that you selected the recording folder "
+            "containing the expected Fluorescence.csv data."
+        )
     if diag is not None:
         diag("continuous_source_inspection_end")
     if not inspection.inspection_completed:
         summary = str(getattr(inspection, "scientist_summary", "") or "").strip()
-        raise GuidedContinuousRwdRoiDiscoveryError(
-            summary
-            or (
-                "This folder could not be read as a continuous RWD "
-                "recording. Check that you selected the recording folder "
-                "containing the expected Fluorescence.csv data."
-            )
-        )
+        raise GuidedContinuousRwdRoiDiscoveryError(summary or unreadable_message)
     channels = getattr(inspection, "channels", None)
     roi_pairs = tuple(getattr(channels, "roi_pairs", ()) or ())
     if not roi_pairs:
@@ -859,7 +939,7 @@ def _discover_continuous_rwd_rois(
         getattr(identity, "selected_folder_canonical", "") or ""
     )
     return {
-        "resolved_format": "rwd",
+        "resolved_format": resolved_format,
         "acquisition_mode": "continuous",
         "rois": [{"roi_id": pair.roi_id} for pair in roi_pairs],
         "sessions": [],
@@ -867,6 +947,52 @@ def _discover_continuous_rwd_rois(
         "n_total_discovered": 0,
         "n_preview": 0,
     }
+
+
+def _inspect_continuous_csv_from_snapshot(snapshot: dict[str, object]):
+    """Read one generic CSV recording using the mapping already snapshotted.
+
+    The column mapping is not re-derived here: ``_snapshot_guided_discovery_
+    inputs`` already captured the validated interpretation the CSV controls
+    show, which is the same mapping the later recording check sends to the
+    same inspector. Refusals are stated in the scientist's terms because this
+    message is what the failed-discovery dialog shows.
+    """
+    from photometry_pipeline.io.csv_continuous_source import (
+        ContinuousCsvRoiSelection,
+        candidate_csv_files,
+        inspect_continuous_csv_recording,
+    )
+
+    interpretation = snapshot.get("custom_tabular_interpretation") or {}
+    mappings = tuple(interpretation.get("roi_mappings") or ())
+    if not mappings:
+        raise GuidedContinuousRwdRoiDiscoveryError(
+            "Choose the time column and at least one signal/reference column "
+            "pair before finding ROIs."
+        )
+
+    candidates = candidate_csv_files(str(snapshot["input_dir"]))
+    if len(candidates) != 1:
+        raise GuidedContinuousRwdRoiDiscoveryError(
+            "One continuous recording is one CSV file. This folder holds "
+            f"{len(candidates)} CSV files, so it cannot be read as one "
+            "uninterrupted recording."
+        )
+
+    return inspect_continuous_csv_recording(
+        candidates[0],
+        time_column=str(interpretation.get("time_column") or ""),
+        time_unit=str(interpretation.get("time_unit") or ""),
+        roi_selections=[
+            ContinuousCsvRoiSelection(
+                str(mapping["roi_id"]),
+                str(mapping["signal_column"]),
+                str(mapping["reference_column"]),
+            )
+            for mapping in mappings
+        ],
+    )
 
 
 _GUIDED_STRUCTURE_PROBE_HEADER_ROWS = 60
@@ -1428,7 +1554,8 @@ def _execute_guided_continuous_rwd(
     # lesson (gui/run_report_parser.is_continuous_rwd_run_mode).
     if (
         getattr(accepted_draft, "acquisition_mode", None) != "continuous"
-        or getattr(accepted_draft, "input_format", None) != "rwd"
+        or getattr(accepted_draft, "input_format", None)
+        not in CONTINUOUS_SOURCE_FORMATS
     ):
         raise ValueError(
             "The accepted Guided plan is not a continuous-RWD analysis; "
@@ -3763,8 +3890,8 @@ class MainWindow(QMainWindow):
             "Use this mode when your recording is saved as one long "
             "recording instead of repeated sessions. The app reads the whole "
             "recording and reports results in equal windows whose length you "
-            "choose in the next step. Continuous recordings are supported for "
-            "RWD data."
+            "choose in the next step. Choose this for an RWD recording folder, "
+            "or for one CSV file holding the whole recording."
         )
         self._guided_continuous_explanation_label.setProperty(
             "guidedSecondaryText", True
@@ -4847,6 +4974,21 @@ class MainWindow(QMainWindow):
                 self._guided_format_combo.currentText(),
             )
         ).strip().lower()
+        if mode == "continuous":
+            # Whether this source can be read continuously at all is settled
+            # before anything else is asked. Prompting for a recording clock
+            # first would hide the real reason the source cannot be used.
+            if resolved_format == "custom_tabular":
+                available, reason = self._guided_continuous_csv_availability()
+                if not available:
+                    return (False, reason)
+            elif resolved_format not in CONTINUOUS_SOURCE_FORMATS:
+                return (
+                    False,
+                    "Continuous recordings are supported for RWD data and for "
+                    "one CSV recording file. Choose one of those, or choose "
+                    "the intermittent recording mode.",
+                )
         timeline_ready, timeline_reason = self._guided_timeline_validation()
         if not timeline_ready:
             return False, timeline_reason
@@ -4854,12 +4996,6 @@ class MainWindow(QMainWindow):
             # A continuous recording has no sessions, so the session timing
             # questions below do not apply and are hidden. Only the window
             # length the results are reported in matters here.
-            if resolved_format != "rwd":
-                return (
-                    False,
-                    "Continuous recordings are supported for RWD data. "
-                    "Choose RWD, or choose the intermittent recording mode.",
-                )
             window_spin = getattr(
                 self, "_guided_continuous_window_sec_spin", None
             )
@@ -5834,16 +5970,20 @@ class MainWindow(QMainWindow):
             return
         normalized = str(resolved_format or "").strip().lower()
         structure_is_decidable = normalized in {"auto", "rwd", ""}
-        for data, tooltip in (
+        continuous_enabled = structure_is_decidable
+        continuous_tooltip = "Continuous recordings are supported for RWD data."
+        if normalized == "custom_tabular":
+            continuous_enabled, continuous_tooltip = (
+                self._guided_continuous_csv_availability()
+            )
+        for data, enabled, tooltip in (
             (
                 GUIDED_STRUCTURE_CHOICE_AUTO,
+                structure_is_decidable,
                 "Automatic detection applies to RWD data, which can be saved "
                 "either way.",
             ),
-            (
-                "continuous",
-                "Continuous recordings are supported for RWD data.",
-            ),
+            ("continuous", continuous_enabled, continuous_tooltip),
         ):
             index = combo.findData(data)
             if index < 0:
@@ -5851,8 +5991,66 @@ class MainWindow(QMainWindow):
             item = model.item(index)
             if item is None:
                 continue
-            item.setEnabled(structure_is_decidable)
-            item.setToolTip("" if structure_is_decidable else tooltip)
+            item.setEnabled(enabled)
+            item.setToolTip("" if enabled else tooltip)
+
+    def _guided_continuous_csv_availability(self) -> tuple[bool, str]:
+        """Whether one CSV file in the selected folder can be one recording.
+
+        One continuous CSV recording is exactly one file, so a folder of
+        session files stays an intermittent recording and is never silently
+        reinterpreted. The refusal names the concrete file count.
+        """
+        from photometry_pipeline.io.csv_continuous_source import candidate_csv_files
+
+        edit = getattr(self, "_guided_input_dir_edit", None)
+        selected = str(edit.text()).strip() if edit is not None else ""
+        if not selected:
+            return False, "Select the folder that holds your recording first."
+        candidates = candidate_csv_files(selected)
+        if not candidates:
+            return False, "No CSV recording file was found in the selected folder."
+        if len(candidates) > 1:
+            return False, (
+                "One continuous recording is one CSV file. This folder holds "
+                f"{len(candidates)} CSV files, so it is read as repeated sessions."
+            )
+        return True, ""
+
+    def _guided_continuous_csv_check_fields(self) -> dict[str, object]:
+        """The scientist's current CSV mapping, shaped for the recording check.
+
+        Reuses ``_guided_csv_interpretation`` -- the same authority the
+        intermittent CSV workflow uses -- so there is only ever one mapping.
+        Raises ``ValueError`` when the mapping is incomplete or the folder does
+        not hold exactly one recording file.
+        """
+        from photometry_pipeline.io.csv_continuous_source import candidate_csv_files
+
+        available, reason = self._guided_continuous_csv_availability()
+        if not available:
+            raise ValueError(reason)
+        interpretation = self._guided_csv_interpretation()
+        roi_columns = tuple(
+            (
+                str(item["roi_id"]),
+                str(item["signal_column"]),
+                str(item["reference_column"]),
+            )
+            for item in interpretation["roi_mappings"]
+        )
+        candidates = candidate_csv_files(self._guided_input_dir_edit.text().strip())
+        if len(candidates) != 1:
+            raise ValueError(
+                "One continuous recording is one CSV file."
+            )
+        return {
+            "source_format": "custom_tabular",
+            "csv_source_path": str(candidates[0]),
+            "csv_time_column": str(interpretation["time_column"]),
+            "csv_time_unit": str(interpretation["time_unit"]),
+            "csv_roi_columns": roi_columns,
+        }
 
     def _sync_guided_setup_from_full(self) -> None:
         """Refresh Guided setup controls from the existing Full Control widgets."""
@@ -8766,11 +8964,35 @@ class MainWindow(QMainWindow):
         if cadence_sec <= 0.0:
             raise RuntimeError("The recording cadence could not be used.")
         target_fs_hz = normalize_guided_sampling_rate_hz(1.0 / cadence_sec)
+        time_column = str(recording.source.selected_time_column)
+        channels = tuple(recording.roi.available_roi_channels)
+        if recording.source_format == CSV_SOURCE_FORMAT:
+            # A generic CSV names its columns outright instead of deriving
+            # them from a vendor suffix convention, so the reader is told the
+            # same mapping the recording check accepted.
+            return {
+                "target_fs_hz": target_fs_hz,
+                "custom_tabular_time_col": time_column,
+                "custom_tabular_time_unit": str(
+                    recording.time.raw_timestamp_unit
+                ),
+                "custom_tabular_roi_mapping_json": json.dumps(
+                    [
+                        {
+                            "roi_id": str(channel.roi_id),
+                            "signal_column": str(channel.signal_column),
+                            "reference_column": str(channel.reference_column),
+                        }
+                        for channel in channels
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
         overrides: dict[str, object] = {
             "target_fs_hz": target_fs_hz,
-            "rwd_time_col": str(recording.source.selected_time_column),
+            "rwd_time_col": time_column,
         }
-        channels = tuple(recording.roi.available_roi_channels)
         if channels:
             first = channels[0]
             roi_id = str(first.roi_id)
@@ -11852,7 +12074,12 @@ class MainWindow(QMainWindow):
             # the field empty and the scientist must supply the clock.
             return True
         if continuous:
-            return False
+            # Continuous RWD returned True above because it prefills this from
+            # its own recording timestamp. Any other continuous source -- a
+            # generic CSV holds elapsed seconds and nothing else -- has no
+            # chronology to read, so the scientist must state when the
+            # recording started.
+            return True
         # NPM session chronology is authoritative once discovery has supplied a
         # validated first session. Other current Guided formats remain
         # elapsed-only until an existing normalized datetime contract is
@@ -14010,7 +14237,7 @@ class MainWindow(QMainWindow):
             self._guided_timeline_review_lines(plan)
         )
         display_format = (
-            "CSV files (one file per session)"
+            "CSV files"
             if plan.input_format == "custom_tabular"
             else plan.input_format or "not set"
         )
@@ -14556,7 +14783,8 @@ class MainWindow(QMainWindow):
             if acq != "intermittent":
                 status = "unsupported"
                 validation_issues.append(
-                    "CSV files (one file per session) requires intermittent recording structure"
+                    "the CSV dataset contract applies to session-based "
+                    "recordings only"
                 )
             else:
                 try:
@@ -15031,18 +15259,31 @@ class MainWindow(QMainWindow):
 
         try:
             draft = self._build_guided_new_analysis_draft_plan()
-            if draft.input_format != "rwd" or draft.acquisition_mode != "continuous":
-                raise ValueError("current draft is not continuous RWD")
+            if (
+                draft.input_format not in CONTINUOUS_SOURCE_FORMATS
+                or draft.acquisition_mode != "continuous"
+            ):
+                raise ValueError("current draft is not a continuous recording")
             selected_folder = (
                 draft.resolved_input_source_path or draft.input_source_path
             )
+            csv_fields: dict[str, object] = {}
+            if draft.input_format == "custom_tabular":
+                csv_fields = self._guided_continuous_csv_check_fields()
+                # The check runs on exactly the mapping the scientist can see.
+                included = tuple(
+                    str(item[0]) for item in csv_fields["csv_roi_columns"]
+                )
+                if included != tuple(draft.included_roi_ids):
+                    raise ValueError("CSV ROI mapping does not match included ROIs")
             request = _GuidedContinuousRwdRecordingCheckRequest(
                 selected_acquisition_folder=selected_folder,
                 included_roi_ids=tuple(draft.included_roi_ids),
+                **csv_fields,
             )
         except (AttributeError, TypeError, ValueError):
             self._set_guided_continuous_rwd_check_status(
-                "The current setup cannot be checked as a continuous RWD recording.",
+                "The current setup cannot be checked as a continuous recording.",
                 active=False,
             )
             return False
@@ -15058,6 +15299,12 @@ class MainWindow(QMainWindow):
             discovered_roi_ids=tuple(draft.discovered_roi_ids),
             included_roi_ids=tuple(draft.included_roi_ids),
             excluded_roi_ids=tuple(draft.excluded_roi_ids),
+            csv_mapping=(
+                request.csv_source_path,
+                request.csv_time_column,
+                request.csv_time_unit,
+                request.csv_roi_columns,
+            ),
         )
         thread = QThread(self)
         worker = _GuidedContinuousRwdRecordingCheckWorker(request)
@@ -15243,8 +15490,22 @@ class MainWindow(QMainWindow):
             )
             if current_source_facts != captured_source_facts:
                 raise ValueError("recording-check source authority changed")
-            if draft.input_format != "rwd" or draft.acquisition_mode != "continuous":
-                raise ValueError("current draft is not continuous RWD")
+            # A CSV mapping edit while the check was running invalidates it:
+            # the inspected columns are no longer the selected columns.
+            if draft.input_format == "custom_tabular":
+                current_mapping = self._guided_continuous_csv_check_fields()
+                if (
+                    current_mapping["csv_source_path"],
+                    current_mapping["csv_time_column"],
+                    current_mapping["csv_time_unit"],
+                    current_mapping["csv_roi_columns"],
+                ) != tuple(snapshot.csv_mapping):
+                    raise ValueError("recording-check CSV mapping changed")
+            if (
+                draft.input_format not in CONTINUOUS_SOURCE_FORMATS
+                or draft.acquisition_mode != "continuous"
+            ):
+                raise ValueError("current draft is not a continuous recording")
             self._set_guided_continuous_rwd_check_status(
                 "Preparing Review…", active=True
             )
@@ -15444,10 +15705,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
         if (
-            getattr(draft, "input_format", None) != "rwd"
+            getattr(draft, "input_format", None)
+            not in CONTINUOUS_SOURCE_FORMATS
             or getattr(draft, "acquisition_mode", None) != "continuous"
         ):
             return None
+        # One continuous CSV recording is exactly one file.
+        if getattr(draft, "input_format", None) == "custom_tabular":
+            available, _reason = self._guided_continuous_csv_availability()
+            if not available:
+                return None
         return draft
 
     def _guided_continuous_rwd_accepted_plan(self):
@@ -15511,10 +15778,6 @@ class MainWindow(QMainWindow):
             "_guided_run_readiness_label"
             if analysis
             else "_guided_backend_validation_status_label"
-        )
-        is_custom_tabular = (
-            str(getattr(snapshot, "input_format", "") or "").lower()
-            == "custom_tabular"
         )
         label = getattr(self, label_name, None)
         if label is not None:
@@ -33545,8 +33808,8 @@ class MainWindow(QMainWindow):
         self._format_combo = _FormatComboBox()
         self._format_combo.setToolTip(
             "Input format hint. Use auto to detect RWD/NPM from the selected input directory. "
-            "Choose CSV files (one file per session) for strict tabular imports "
-            "with explicit time, signal, and reference columns."
+            "Choose CSV files for strict tabular imports with explicit time, "
+            "signal, and reference columns."
         )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)

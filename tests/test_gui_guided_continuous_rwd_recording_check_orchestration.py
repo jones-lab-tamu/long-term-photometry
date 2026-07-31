@@ -148,10 +148,22 @@ def test_start_captures_minimal_request_snapshot_and_launches_one_worker(check_c
     assert isinstance(request, _GuidedContinuousRwdRecordingCheckRequest)
     assert request.selected_acquisition_folder == draft.resolved_input_source_path
     assert request.included_roi_ids == tuple(draft.included_roi_ids)
+    # Still only plain source-selection values: the CSV fields name the file
+    # and columns to read, and are inert for an RWD check.
     assert set(dataclasses.asdict(request)) == {
         "selected_acquisition_folder",
         "included_roi_ids",
+        "source_format",
+        "csv_source_path",
+        "csv_time_column",
+        "csv_time_unit",
+        "csv_roi_columns",
     }
+    assert request.source_format == "rwd"
+    assert request.csv_source_path == ""
+    assert request.csv_time_column == ""
+    assert request.csv_time_unit == ""
+    assert request.csv_roi_columns == ()
     assert worker.parent() is None
     owner_snapshot = thread.parent()._guided_continuous_rwd_check_snapshot
     assert owner_snapshot.input_source_path == draft.input_source_path

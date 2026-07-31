@@ -484,8 +484,8 @@ def test_guided_demo_readme_contains_required_setup_instructions():
     for required in (
         "synthetic demonstration data",
         "not real biological data",
-        "CSV files, one file per session",
-        "intermittent",
+        "Format: CSV files",
+        "Intermittent/session-based recording",
         "96 files across 48 scheduled hours",
         "Sessions per hour: 2",
         "Session duration: 600 seconds",
@@ -555,7 +555,11 @@ def test_docs_present_guided_demo_as_normal_gui_path():
     assert "Set as Current Input" not in quickstart
     assert "Intermittent recording, 48 hours" in demo_docs
     assert "Continuous recording, 48 hours" in demo_docs
-    assert "one vendor-neutral CSV recording" in demo_docs
+    # Both demos are generic CSV; the docs must say so and must distinguish
+    # the folder of session files from the single continuous file.
+    assert "plain generic CSV" in demo_docs
+    assert "folder of session" in demo_docs
+    assert "single file" in demo_docs
     assert "not visible GUI demo choices" in demo_docs
     assert "long_term_photometry_continuous_demo" in quickstart
 

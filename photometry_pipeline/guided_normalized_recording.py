@@ -1397,7 +1397,7 @@ def build_custom_tabular_normalized_recording_description(
     if acquisition_mode != "intermittent":
         raise NormalizedRecordingError(
             "unsupported_acquisition_mode",
-            "CSV files (one file per session) require intermittent acquisition.",
+            "This CSV route reads session-based recordings only.",
         )
     if session_duration_sec <= 0 or sessions_per_hour <= 0 or target_fs_hz <= 0:
         raise NormalizedRecordingError(

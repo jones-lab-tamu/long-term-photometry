@@ -38,6 +38,9 @@ from photometry_pipeline.guided_continuous_rwd_review_binding import (
 from photometry_pipeline.guided_continuous_rwd_target_grid import (
     GuidedContinuousRwdTargetGridDescription,
 )
+from photometry_pipeline.guided_continuous_rwd_recording import (
+    CONTINUOUS_SOURCE_FORMATS,
+)
 from photometry_pipeline.guided_correction_payload import correction_payload_identity
 from photometry_pipeline.guided_execution_payloads import (
     GUIDED_CONFIG_DEFAULT_OVERRIDES,
@@ -466,10 +469,13 @@ def _resolve_accepted_correction_context(
             actual=actual_plan_identity,
             reason="draft_plan_identity_mismatch",
         )
-    if accepted_draft.input_format != "rwd" or accepted_draft.acquisition_mode != "continuous":
+    if (
+        accepted_draft.input_format not in CONTINUOUS_SOURCE_FORMATS
+        or accepted_draft.acquisition_mode != "continuous"
+    ):
         _binding_mismatch(
             "acquisition",
-            expected="continuous_rwd",
+            expected="continuous_source",
             actual=f"{accepted_draft.acquisition_mode}_{accepted_draft.input_format}",
             reason="unsupported_accepted_draft",
         )

@@ -293,9 +293,7 @@ def test_guided_csv_controls_show_label_order_and_require_confirmation(
         window._guided_input_dir_edit.setText(str(tmp_path))
         qapp.processEvents()
 
-        assert window._guided_format_combo.itemText(index) == (
-            "CSV files (one file per session)"
-        )
+        assert window._guided_format_combo.itemText(index) == "CSV files"
         assert window._guided_format_combo.currentText() == "custom_tabular"
         assert not window._guided_csv_interpretation_group.isHidden()
         assert [

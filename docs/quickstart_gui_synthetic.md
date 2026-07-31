@@ -39,8 +39,10 @@ python gui/main.py
 The intermittent demo creates `long_term_photometry_guided_demo`: 96 CSV files,
 one per session, spanning 48 scheduled hours at 20 Hz with two mapped ROIs.
 
-The continuous demo creates `long_term_photometry_continuous_demo`: one
-uninterrupted 48-hour recording at 8 Hz with two ROIs.
+The continuous demo creates `long_term_photometry_continuous_demo`: one generic
+CSV file holding an uninterrupted 48-hour recording at 8 Hz with two ROIs.
+On Select data choose the CSV format and `Continuous/one long recording`, then
+map the time and fluorescence columns as the generated README lists them.
 
 Neither demo requires a custom config or any Full Control setup.
 
@@ -121,7 +123,8 @@ See `docs/batch_processing.md`.
 
 - App cannot find input files: select the generated
   `long_term_photometry_guided_demo` folder, not its parent.
-- Wrong format selected: choose CSV files (one file per session), or use automatic detection.
+- Wrong format selected: choose CSV files, or use automatic detection. Then set
+  the recording structure to match the demo you generated.
 - Column mapping wrong: use the signal/reference names listed above and in the generated README.
 - Validation fails: re-check Input Directory, Config, Format, and Sessions per hour.
 - Only part of a continuous trace is visible: this is expected for long recordings; use continuous summary and overview outputs.

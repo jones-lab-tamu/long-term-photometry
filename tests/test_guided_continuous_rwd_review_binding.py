@@ -111,11 +111,14 @@ def test_valid_authorities_build_one_frozen_deterministic_binding(valid_case):
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"acquisition_mode": "intermittent"}, "continuous RWD"),
-        ({"input_format": "npm"}, "continuous RWD"),
+        ({"acquisition_mode": "intermittent"}, "one continuous recording"),
+        ({"input_format": "npm"}, "one continuous recording"),
+        # Continuous now admits generic CSV as well as RWD, so the draft's
+        # stated source format must still be the one that was inspected.
+        ({"input_format": "custom_tabular"}, "source format does not match"),
     ],
 )
-def test_non_continuous_rwd_draft_is_refused(valid_case, changes, message):
+def test_non_continuous_draft_is_refused(valid_case, changes, message):
     draft = replace(valid_case[0], **changes)
     with pytest.raises(GuidedContinuousRwdReviewBindingError, match=message):
         build_guided_continuous_rwd_review_binding(
