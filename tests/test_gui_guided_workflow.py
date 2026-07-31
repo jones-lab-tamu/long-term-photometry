@@ -2675,15 +2675,15 @@ def test_guided_roi_discovery_restores_busy_state_after_failure(
     assert window._guided_roi_discovery_progress.isHidden() is True
     assert window._guided_discover_rois_btn.isEnabled() is True
     assert window._guided_discover_rois_btn.text() == "Select ROIs..."
-    assert window._guided_discovery_summary_label.text() == (
-        "ROI discovery failed. Check the selected input and try again."
-    )
     assert critical[0] == (
         "The selected input could not be read as one consistent recording. "
         "Check the selected folder and its Fluorescence.csv files, then try "
         "Select ROIs again."
     )
     assert "simulated discovery failure" not in critical[0]
+    # The dialog is dismissed; the reason it gave must remain on the page
+    # rather than reverting to a generic "discovery failed" sentence.
+    assert window._guided_discovery_summary_label.text() == critical[0]
     for _ in range(100):
         QApplication.processEvents()
         if window._guided_roi_discovery_thread is None:

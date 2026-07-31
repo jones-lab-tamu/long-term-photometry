@@ -161,6 +161,19 @@ def _output_base_creatability(output_base: Path) -> tuple[bool, bool]:
     return writable, writable
 
 
+def guided_output_base_creatability(
+    output_base: str | os.PathLike[str],
+) -> tuple[bool, bool]:
+    """Public alias for the output-base creatability rule above.
+
+    Public so GUI-side Select-data readiness can gate on the same
+    authoritative contract this builder later enforces, instead of
+    duplicating it -- mirroring `is_successful_completed_run_root` below.
+    Creates nothing.
+    """
+    return _output_base_creatability(Path(output_base))
+
+
 def is_successful_completed_run_root(path: Path) -> bool:
     """Return True only if `path` is itself a directory that carries this
     app's own successful-completion evidence (status.json / run_report.json

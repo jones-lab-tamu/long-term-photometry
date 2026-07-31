@@ -520,6 +520,86 @@ GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
 ))
 
 
+class GuidedCsvSetupError(ValueError):
+    """One CSV interpretation problem the scientist can fix in Select data.
+
+    Subclasses ``ValueError`` so every existing caller of
+    ``_guided_csv_interpretation`` that catches ``ValueError`` and shows
+    ``str(exc)`` keeps working with the identical message. ``code`` is a
+    stable identifier from the closed set raised in that one validator, so
+    the discovery failure translator classifies on it instead of matching
+    message text.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code)
+
+
+def _guided_auto_custom_tabular_structure(input_dir: str) -> str:
+    """What "Detect automatically" resolves a CSV folder to.
+
+    How many files the folder holds is what tells the two structures apart: a
+    session-based dataset is a file per session, so one file is one continuous
+    recording. Nothing inside the file is consulted -- not its duration, name,
+    header, or values. One rule, shared by discovery routing and by the CSV
+    interpretation's session-order question, so the two cannot disagree.
+    """
+    from photometry_pipeline.io.csv_continuous_source import candidate_csv_files
+
+    try:
+        candidates = candidate_csv_files(str(input_dir or "").strip())
+    except Exception:
+        return "intermittent"
+    return "continuous" if len(candidates) == 1 else "intermittent"
+
+
+# What the scientist must change, and where, for each CSV setup problem the
+# one CSV validator (_guided_csv_interpretation) can report.
+GUIDED_CSV_SETUP_FAILURE_MESSAGES = {
+    "no_csv_files": (
+        "No CSV files were found directly inside the selected folder. "
+        "Choose the folder that holds your recording CSV files."
+    ),
+    "order_not_confirmed": (
+        "Confirm the displayed session-file order, then select ROIs again."
+    ),
+    "time_column_missing": (
+        "Choose the CSV time column, then select ROIs again."
+    ),
+    "time_unit_missing": (
+        "Choose whether the time values are seconds or milliseconds, then "
+        "select ROIs again."
+    ),
+    "roi_mapping_incomplete": (
+        "Map both the signal and reference columns for each ROI, then "
+        "select ROIs again."
+    ),
+    "roi_names_not_unique": (
+        "Give each ROI a different name, then select ROIs again."
+    ),
+    # The rule is uniqueness across every signal and reference assignment in
+    # the whole mapping, not just within one ROI row.
+    "column_assigned_twice": (
+        "Each CSV column can be assigned only once. Choose a different "
+        "signal or reference column for the repeated assignment, then "
+        "select ROIs again."
+    ),
+}
+GUIDED_CSV_DISCOVERY_GENERIC_FAILURE_MESSAGE = (
+    "The selected CSV files could not be read with the current column "
+    "mapping. Check the time and ROI column choices, then select ROIs again."
+)
+GUIDED_OUTPUT_DESTINATION_MISSING_MESSAGE = (
+    "Choose an output folder to continue."
+)
+GUIDED_PREVIEW_OUTPUT_DESTINATION_FAILURE_MESSAGE = (
+    "The correction preview could not be saved in the selected output "
+    "folder. Check that the folder is still available and writable, then "
+    "try again."
+)
+
+
 def _generate_run_id():
     """Generate a run_id: run_YYYYMMDD_HHMMSS_<8hex>."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -4612,20 +4692,58 @@ class MainWindow(QMainWindow):
         if tuple(names) != previous_files:
             self._invalidate_guided_csv_interpretation("CSV file set or order changed")
 
+    def _guided_csv_recording_structure_in_effect(self) -> str:
+        """The recording structure this CSV source will actually be read with.
+
+        An explicit choice is authoritative. "Detect automatically" is
+        answered by whatever discovery already resolved, and before that by
+        the same rule discovery itself will apply
+        (``_guided_auto_custom_tabular_structure``), so Select data and
+        discovery cannot disagree about whether there is a session order.
+        """
+        choice = self._guided_selected_acquisition_mode()
+        if choice != GUIDED_STRUCTURE_CHOICE_AUTO:
+            return choice
+        resolved = str(
+            getattr(self, "_guided_resolved_acquisition_mode", "") or ""
+        ).strip().lower()
+        if resolved in {"intermittent", "continuous"}:
+            return resolved
+        return _guided_auto_custom_tabular_structure(
+            self._guided_input_dir_edit.text().strip()
+        )
+
     def _guided_csv_interpretation(self) -> dict[str, object]:
+        # Every refusal below is a GuidedCsvSetupError: same message text and
+        # same ValueError type as before, plus the stable code the discovery
+        # failure translator needs to name the control the scientist must fix.
         if not self._guided_csv_files:
-            raise ValueError("No top-level CSV files were found in this folder.")
-        if not self._guided_csv_order_confirm_cb.isChecked():
-            raise ValueError(
-                "Confirm that the displayed filename order is the intended session order."
+            raise GuidedCsvSetupError(
+                "no_csv_files",
+                "No top-level CSV files were found in this folder.",
+            )
+        # One continuous recording is one file, so there is no order to
+        # confirm and the question is not asked. Repeated sessions still must
+        # confirm the order their chronology is taken from.
+        if (
+            self._guided_csv_recording_structure_in_effect() != "continuous"
+            and not self._guided_csv_order_confirm_cb.isChecked()
+        ):
+            raise GuidedCsvSetupError(
+                "order_not_confirmed",
+                "Confirm that the displayed filename order is the intended session order.",
             )
         time_column = str(self._guided_csv_time_column_combo.currentData() or "").strip()
         if not time_column:
-            raise ValueError("Select the column containing elapsed time.")
+            raise GuidedCsvSetupError(
+                "time_column_missing",
+                "Select the column containing elapsed time.",
+            )
         time_unit = str(self._guided_csv_time_units_combo.currentData() or "").strip()
         if time_unit not in {"seconds", "milliseconds"}:
-            raise ValueError(
-                "Choose whether the time values are seconds or milliseconds."
+            raise GuidedCsvSetupError(
+                "time_unit_missing",
+                "Choose whether the time values are seconds or milliseconds.",
             )
         mappings: list[dict[str, str]] = []
         for row in self._guided_csv_mapping_rows:
@@ -4633,8 +4751,9 @@ class MainWindow(QMainWindow):
             signal = str(row["signal"].currentData() or "").strip()
             reference = str(row["reference"].currentData() or "").strip()
             if not roi_id or not signal or not reference:
-                raise ValueError(
-                    "Add at least one ROI with a signal and reference column."
+                raise GuidedCsvSetupError(
+                    "roi_mapping_incomplete",
+                    "Add at least one ROI with a signal and reference column.",
                 )
             mappings.append(
                 {
@@ -4644,18 +4763,24 @@ class MainWindow(QMainWindow):
                 }
             )
         if not mappings:
-            raise ValueError("Add at least one ROI with a signal and reference column.")
+            raise GuidedCsvSetupError(
+                "roi_mapping_incomplete",
+                "Add at least one ROI with a signal and reference column.",
+            )
         roi_ids = [item["roi_id"] for item in mappings]
         if len(set(roi_ids)) != len(roi_ids):
-            raise ValueError("ROI names must be unique.")
+            raise GuidedCsvSetupError(
+                "roi_names_not_unique", "ROI names must be unique."
+            )
         assigned = [
             item[key]
             for item in mappings
             for key in ("signal_column", "reference_column")
         ]
         if len(set(assigned)) != len(assigned):
-            raise ValueError(
-                "Each signal or reference column may be assigned only once."
+            raise GuidedCsvSetupError(
+                "column_assigned_twice",
+                "Each signal or reference column may be assigned only once.",
             )
         required = (time_column, *assigned)
         folder = self._guided_input_dir_edit.text().strip()
@@ -4663,8 +4788,9 @@ class MainWindow(QMainWindow):
             headers = inspect_custom_tabular_header(os.path.join(folder, filename))
             for column in required:
                 if column not in headers:
-                    raise ValueError(
-                        f"The selected column {column!r} is missing from {filename}."
+                    raise GuidedCsvSetupError(
+                        "column_missing_from_file",
+                        f"The selected column {column!r} is missing from {filename}.",
                     )
         return {
             "ordered_source_files": list(self._guided_csv_files),
@@ -4928,6 +5054,69 @@ class MainWindow(QMainWindow):
         self._refresh_guided_confirm_strategy_panel()
         self._refresh_guided_navigation_state()
 
+    def _guided_output_destination_issue(self) -> str | None:
+        """Why the chosen output folder cannot be used, or None if it can.
+
+        Whether the destination can be *created* is decided by
+        ``guided_output_base_creatability`` -- the same rule the execution
+        request builder enforces later -- so Select data and Run never
+        disagree about that. Whether an already-existing folder can be
+        *written to* is a separate question that rule deliberately does not
+        ask (it is about a not-yet-created path), so it is asked here: an
+        existing but unwritable folder is unusable for exactly the same
+        scientist-facing reason and must say so rather than pass.
+
+        Nothing is created or written by this check.
+        """
+        from photometry_pipeline.guided_execution_request_builder import (
+            guided_output_base_creatability,
+        )
+
+        text = self._guided_output_dir_edit.text().strip()
+        if not text:
+            return GUIDED_OUTPUT_DESTINATION_MISSING_MESSAGE
+        try:
+            base = Path(text).expanduser()
+            exists_or_creatable, is_dir_or_creatable = (
+                guided_output_base_creatability(base)
+            )
+            base_exists = base.exists()
+            base_is_dir = base.is_dir()
+            parent_is_dir = base.parent.is_dir()
+            existing_dir_writable = (
+                os.access(str(base), os.W_OK)
+                if base_exists and base_is_dir
+                else True
+            )
+        except Exception:
+            return (
+                "The selected output folder cannot be used because the path "
+                "is not valid. Choose another folder or correct the path."
+            )
+        if exists_or_creatable and is_dir_or_creatable and existing_dir_writable:
+            return None
+        if base_exists and not base_is_dir:
+            return (
+                "The selected output folder cannot be used because that path "
+                "is a file, not a folder. Choose another folder."
+            )
+        if base_exists and not existing_dir_writable:
+            return (
+                "The selected output folder cannot be used because the app "
+                "cannot write to it. Choose a folder you can write to."
+            )
+        if not parent_is_dir:
+            return (
+                "The selected output folder cannot be used because it does "
+                "not exist and its parent folder could not be reached. "
+                "Choose another folder or correct the path."
+            )
+        return (
+            "The selected output folder cannot be used because it does not "
+            "exist and cannot be created in that parent folder. Choose "
+            "another folder you can write to."
+        )
+
     def _guided_select_data_readiness(self) -> tuple[bool, str]:
         default_reason = "Select data and include at least one ROI to continue."
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
@@ -4935,8 +5124,13 @@ class MainWindow(QMainWindow):
         if not self._guided_input_dir_edit.text().strip():
             return False, default_reason
         output_text = self._guided_output_dir_edit.text().strip()
-        if not output_text:
-            return False, default_reason
+        # The output destination is required for this workflow, so it is
+        # answered here rather than at correction preview, which is the first
+        # place an unusable destination used to surface -- as a source-data
+        # failure.
+        output_issue = self._guided_output_destination_issue()
+        if output_issue is not None:
+            return False, output_issue
         if self._guided_output_destination_is_completed_run_root(output_text):
             return False, GUIDED_OUTPUT_COMPLETED_RUN_GUIDANCE
         if getattr(self, "_discovery_cache", None) is None:
@@ -6399,8 +6593,13 @@ class MainWindow(QMainWindow):
                 exception_type=type(exc).__name__,
                 message=str(exc),
             )
+            # A classified CSV setup problem already knows which control the
+            # scientist must change; everything else stays an unclassified
+            # failure for the translator to handle by format.
             self._on_guided_roi_discovery_failed(
-                f"{type(exc).__name__}: {exc}"
+                self._guided_csv_setup_failure_reason(exc)
+                if isinstance(exc, GuidedCsvSetupError)
+                else f"{type(exc).__name__}: {exc}"
             )
             return
 
@@ -6583,9 +6782,17 @@ class MainWindow(QMainWindow):
         self._rep_session_combo.clear()
         self._rep_session_combo.addItem("(auto)")
         self._append_log(f"Discovery error: {message}")
+        scientist_reason = self._guided_roi_discovery_failure_message(
+            message,
+            input_format=str(
+                getattr(self, "_guided_discovery_requested_format", "") or ""
+            ),
+        )
         self._set_guided_roi_discovery_running(
             False, succeeded=False
         )
+        # The modal is dismissed; the reason must not be dismissed with it.
+        self._guided_discovery_summary_label.setText(scientist_reason)
         self._refresh_guided_navigation_state()
         self._guided_roi_discovery_diag(
             "complete",
@@ -6598,26 +6805,59 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(
             self,
             "ROI Selection Failed",
-            self._guided_roi_discovery_failure_message(message),
+            scientist_reason,
         )
         if self._guided_roi_discovery_thread is None:
             self._guided_roi_discovery_diag_start = None
 
+    def _guided_csv_setup_failure_reason(self, exc: GuidedCsvSetupError) -> str:
+        """Name the CSV control to change, in the established ``reason:`` form.
+
+        Composed here rather than in the validator so the validator keeps
+        raising one stable code per problem. ``order_not_confirmed`` is only
+        ever raised for repeated sessions, so its message is unconditionally
+        session-oriented.
+        """
+        code = str(getattr(exc, "code", "") or "")
+        if code == "column_missing_from_file":
+            # Already names the exact column and file; only the next action
+            # is missing.
+            return (
+                f"reason: {exc} Choose a column present in every file, then "
+                "select ROIs again."
+            )
+        text = GUIDED_CSV_SETUP_FAILURE_MESSAGES.get(code)
+        if text is None:
+            return f"reason: {GUIDED_CSV_DISCOVERY_GENERIC_FAILURE_MESSAGE}"
+        return f"reason: {text}"
+
     @staticmethod
-    def _guided_roi_discovery_failure_message(message: str) -> str:
+    def _guided_roi_discovery_failure_message(
+        message: str, input_format: str = ""
+    ) -> str:
         """Return an actionable scientist-facing discovery failure.
 
         The full parser error remains in the application log for support,
         but it is not useful as the primary instruction in a blocking dialog.
 
         A ``reason:``-prefixed message was already written for a scientist by
-        the accepted continuous source inspector (CR1-F1-A) and is shown as
-        it stands -- the session-oriented guidance below would be actively
-        misleading for one continuous recording.
+        the accepted continuous source inspector (CR1-F1-A), or by
+        ``_guided_csv_setup_failure_reason`` for a CSV setup problem, and is
+        shown as it stands -- the session-oriented guidance below would be
+        actively misleading for one continuous recording.
+
+        ``input_format`` is the format discovery was actually asked for. The
+        remaining branches all describe RWD acquisition folders and their
+        Fluorescence.csv files, so they are reachable only for an RWD source;
+        a CSV source whose failure carried no classified reason gets the CSV
+        fallback instead of advice about files it does not have. Any other
+        format keeps the previous behaviour.
         """
         text = str(message or "")
         if text.startswith("reason:"):
             return text[len("reason:"):].strip()
+        if str(input_format or "").strip().lower() == "custom_tabular":
+            return GUIDED_CSV_DISCOVERY_GENERIC_FAILURE_MESSAGE
         lowered = text.lower()
         if "no recognizable rwd header" in lowered or "header row" in lowered:
             return (
@@ -10854,12 +11094,25 @@ class MainWindow(QMainWindow):
                     else "Preview ready, but the plot could not be generated."
                 )
             else:
-                self._guided_preview_status_label.setText(
-                    "Could not load the selected preview segment. Try another "
-                    "segment or check that the source file is still available."
-                    if source_type == "local_raw_segment"
-                    else "Correction preview: failed."
+                # A preview is written under the chosen output folder, so a
+                # destination that became unusable fails here too. Only a
+                # positive check of that destination redirects the message;
+                # a genuinely missing or unreadable source keeps its own.
+                destination_unusable = (
+                    source_type == "local_raw_segment"
+                    and self._guided_output_destination_issue() is not None
                 )
+                if destination_unusable:
+                    text = GUIDED_PREVIEW_OUTPUT_DESTINATION_FAILURE_MESSAGE
+                elif source_type == "local_raw_segment":
+                    text = (
+                        "Could not load the selected preview segment. Try "
+                        "another segment or check that the source file is "
+                        "still available."
+                    )
+                else:
+                    text = "Correction preview: failed."
+                self._guided_preview_status_label.setText(text)
         self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
         self._refresh_guided_confirm_strategy_panel()
@@ -30556,19 +30809,16 @@ class MainWindow(QMainWindow):
             return run_intermittent
         if input_format == "custom_tabular":
             # CSV has two structures, and how many files the folder holds is
-            # what tells them apart: a session-based dataset is a file per
-            # session, so one file is one continuous recording. Nothing inside
-            # the file is consulted -- not its duration, name, header, or
-            # values. The scientist can still state either structure outright,
-            # which never reaches this branch.
+            # what tells them apart (see
+            # _guided_auto_custom_tabular_structure). The scientist can still
+            # state either structure outright, which never reaches this branch.
             def run_custom_tabular_auto_structure(
                 captured: dict[str, object], diag=None, phase=None
             ) -> dict[str, object]:
-                from photometry_pipeline.io.csv_continuous_source import (
-                    candidate_csv_files,
+                structure = _guided_auto_custom_tabular_structure(
+                    str(captured.get("input_dir", ""))
                 )
-
-                if len(candidate_csv_files(str(captured.get("input_dir", "")))) == 1:
+                if structure == "continuous":
                     return _discover_continuous_rwd_rois(captured, diag, phase)
                 return run_intermittent(captured, diag, phase)
 
