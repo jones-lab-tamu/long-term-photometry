@@ -50,6 +50,7 @@ from photometry_pipeline.guided_completed_applied_dff_reload import (
     format_guided_completed_applied_dff_summary,
     format_guided_completed_applied_dff_technical_details,
 )
+from photometry_pipeline.guided_display_labels import format_display_label
 from photometry_pipeline.guided_completed_feature_event_reload import (
     load_guided_completed_feature_event_state,
     GuidedCompletedFeatureEventState,
@@ -830,9 +831,14 @@ class RunReportViewer(QWidget):
         self._refresh_correction_summary()
         title = "Results workspace"
         if self._completed_review_overview:
-            overview_format = str(
-                self._completed_review_overview.get("format") or "analysis"
-            ).upper()
+            # Use the scientist-facing format name (CSV files, RWD, NPM), not
+            # the upper-cased internal token.
+            raw_format = str(
+                self._completed_review_overview.get("format") or ""
+            ).strip()
+            overview_format = (
+                format_display_label(raw_format) if raw_format else "analysis"
+            )
             overview_rois = self._completed_review_overview.get(
                 "included_rois", ()
             )

@@ -193,65 +193,21 @@ import dataclasses
 from typing import Callable, get_args
 
 
-FORMAT_DISPLAY_LABELS = {
-    "auto": "Auto",
-    "rwd": "RWD",
-    "npm": "NPM",
-    # Not "one file per session": CSV is now also accepted as one continuous
-    # recording file. The recording-structure control states which it is.
-    "custom_tabular": "CSV files",
-}
-
-# One scientist-facing name per recording structure, so Select data, Recording
-# structure, and Review Plan all say the same thing. The stored values stay
-# "intermittent"/"continuous".
-ACQUISITION_MODE_DISPLAY_LABELS = {
-    "intermittent": "Repeated sessions",
-    "continuous": "Continuous recording",
-}
-
-# Feature Detection settings named as a scientist would read them. Stored
-# values, serialized configuration, and the technical-details panels keep the
-# internal tokens; only these displays change.
-FEATURE_EVENT_SIGNAL_DISPLAY_LABELS = {
-    "dff": "dF/F",
-}
-FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS = {
-    "mean_std": "mean + standard-deviation",
-    "median_mad": "median + MAD",
-    "percentile": "percentile",
-    "absolute": "absolute",
-}
-FEATURE_AUC_BASELINE_DISPLAY_LABELS = {
-    "zero": "zero line",
-}
-
-
-def format_display_label(value: str) -> str:
-    """The scientist-facing name for an input format."""
-    text = str(value or "").strip()
-    return FORMAT_DISPLAY_LABELS.get(text.lower(), text or "not set")
-
-
-def acquisition_mode_display_label(value: str) -> str:
-    """The scientist-facing name for a recording structure."""
-    text = str(value or "").strip()
-    return ACQUISITION_MODE_DISPLAY_LABELS.get(text.lower(), text or "not set")
-
-
-def feature_event_signal_display_label(value: str) -> str:
-    text = str(value or "").strip()
-    return FEATURE_EVENT_SIGNAL_DISPLAY_LABELS.get(text.lower(), text)
-
-
-def feature_threshold_method_display_label(value: str) -> str:
-    text = str(value or "").strip()
-    return FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS.get(text.lower(), text)
-
-
-def feature_auc_baseline_display_label(value: str) -> str:
-    text = str(value or "").strip()
-    return FEATURE_AUC_BASELINE_DISPLAY_LABELS.get(text.lower(), text)
+# Display names live in photometry_pipeline so the completed-run Review
+# formatters can use the same ones (the pipeline package must not import the
+# GUI). Re-exported here because this module is where they are consumed.
+from photometry_pipeline.guided_display_labels import (  # noqa: E402
+    ACQUISITION_MODE_DISPLAY_LABELS,
+    FEATURE_AUC_BASELINE_DISPLAY_LABELS,
+    FEATURE_EVENT_SIGNAL_DISPLAY_LABELS,
+    FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS,
+    FORMAT_DISPLAY_LABELS,
+    acquisition_mode_display_label,
+    feature_auc_baseline_display_label,
+    feature_event_signal_display_label,
+    feature_threshold_method_display_label,
+    format_display_label,
+)
 
 
 class _FormatComboBox(QComboBox):
@@ -440,9 +396,10 @@ GUIDED_WORKFLOW_STEPS = (
     "Run",
     "Review",
 )
+# Sentence case, matching every other stepper entry. Internal step keys are
+# unchanged; only the visible label differs.
 GUIDED_WORKFLOW_STEP_DISPLAY_LABELS = {
-    "Feature detection": "Feature Detection",
-    "Draft plan": "Review Plan",
+    "Draft plan": "Review plan",
 }
 # Real Pipeline session-processing phases (photometry_pipeline/pipeline.py
 # _iter_entry_chunks_for_pass call sites) eligible for missing-session
@@ -4089,12 +4046,13 @@ class MainWindow(QMainWindow):
         )
         self._guided_intermittent_explanation_label.setWordWrap(True)
         form.addRow("", self._guided_intermittent_explanation_label)
+        # Source-neutral: this describes how the recording is organized, not
+        # which vendor wrote it.
         self._guided_continuous_explanation_label = QLabel(
-            "Use this mode when your recording is saved as one long "
-            "recording instead of repeated sessions. The app reads the whole "
+            "Choose this when your data is saved as one continuous recording "
+            "rather than as repeated sessions. The app reads the whole "
             "recording and reports results in equal windows whose length you "
-            "choose in the next step. Choose this for an RWD recording folder, "
-            "or for one CSV file holding the whole recording."
+            "choose in the next step."
         )
         self._guided_continuous_explanation_label.setProperty(
             "guidedSecondaryText", True
@@ -4821,19 +4779,45 @@ class MainWindow(QMainWindow):
 
         self._guided_csv_files = tuple(names)
         self._guided_csv_headers = tuple(headers_by_file[0][1])
-        self._guided_csv_session_count_label.setText(
-            f"CSV session order: {len(names)} sessions"
-        )
         self._guided_csv_session_order_list.addItems(names)
         for header in self._guided_csv_headers:
             self._guided_csv_time_column_combo.addItem(header, header)
-        self._guided_csv_status_label.setText(
-            "Choose one shared time interpretation and ROI mapping for all sessions. "
-            "If this order is wrong, rename the files and select the folder again."
-        )
+        self._refresh_guided_csv_structure_presentation()
         self._add_guided_csv_mapping_row()
         if tuple(names) != previous_files:
             self._invalidate_guided_csv_interpretation("CSV file set or order changed")
+
+    def _refresh_guided_csv_structure_presentation(self) -> None:
+        """Word the CSV panel for the structure this source is read with.
+
+        Called both when the source is re-inspected and when the recording
+        structure changes, so the panel cannot keep describing a session order
+        after the scientist switches to one continuous recording.
+        """
+        if not getattr(self, "_guided_csv_files", ()):
+            return
+        # One continuous CSV recording has no session order: nothing to
+        # describe, and nothing to confirm. The multi-file session-order
+        # wording and its confirmation are unchanged.
+        one_recording_file = (
+            self._guided_csv_recording_structure_in_effect() == "continuous"
+        )
+        self._guided_csv_session_count_label.setText(
+            "Selected recording file"
+            if one_recording_file
+            else f"CSV session order: {len(self._guided_csv_files)} sessions"
+        )
+        self._guided_csv_status_label.setText(
+            "Choose the elapsed-time column and map the signal and reference "
+            "columns for each ROI."
+            if one_recording_file
+            else (
+                "Choose one shared time interpretation and ROI mapping for all "
+                "sessions. If this order is wrong, rename the files and select "
+                "the folder again."
+            )
+        )
+        self._guided_csv_order_confirm_cb.setVisible(not one_recording_file)
 
     def _guided_csv_recording_structure_in_effect(self) -> str:
         """The recording structure this CSV source will actually be read with.
@@ -5021,6 +5005,11 @@ class MainWindow(QMainWindow):
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._refresh_guided_navigation_state()
+        )
+        # The CSV panel describes a session order only for repeated sessions,
+        # so its wording and its confirmation follow the structure choice.
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._refresh_guided_csv_structure_presentation()
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             self._clear_guided_missing_session_approvals_for_source_change
@@ -6534,6 +6523,11 @@ class MainWindow(QMainWindow):
         if intermittent_explanation is not None:
             intermittent_explanation.setVisible(not continuous and not automatic)
         self._refresh_guided_auto_structure_explanation()
+        # The CSV panel's session-order wording and its confirmation depend on
+        # the same structure, so they are re-worded here rather than only when
+        # the source folder is re-inspected.
+        if hasattr(self, "_guided_csv_order_confirm_cb"):
+            self._refresh_guided_csv_structure_presentation()
         for widget in (
             getattr(self, "_guided_continuous_window_label", None),
             getattr(self, "_guided_continuous_window_sec_spin", None),
@@ -6598,12 +6592,18 @@ class MainWindow(QMainWindow):
             self._guided_session_duration_edit.setToolTip(
                 GUIDED_SESSION_DURATION_TOOLTIP
             )
-            self._guided_recording_structure_help_label.setText(
-                "Intermittent NPM is supported. "
-                f"{GUIDED_SESSION_TIMING_ENTER_MESSAGE}"
-                if input_format == "npm"
-                else GUIDED_SESSION_TIMING_ENTER_MESSAGE
-            )
+            # Once both values are present and usable there is nothing left to
+            # enter, so the instruction is cleared rather than left standing
+            # over completed fields -- matching the RWD branch below.
+            if self._guided_session_timing_values_are_complete():
+                self._guided_recording_structure_help_label.setText("")
+            else:
+                self._guided_recording_structure_help_label.setText(
+                    "Intermittent NPM is supported. "
+                    f"{GUIDED_SESSION_TIMING_ENTER_MESSAGE}"
+                    if input_format == "npm"
+                    else GUIDED_SESSION_TIMING_ENTER_MESSAGE
+                )
             self._refresh_guided_navigation_state()
             return
 
@@ -6620,20 +6620,9 @@ class MainWindow(QMainWindow):
             if self._guided_detected_timing_available()
             else GUIDED_SESSION_DURATION_TOOLTIP
         )
-        sessions_per_hour = None
-        try:
-            sessions_per_hour = int(
-                self._guided_sessions_per_hour_edit.text().strip()
-            )
-        except (AttributeError, ValueError):
-            pass
-        session_duration = None
-        try:
-            session_duration = float(
-                self._guided_session_duration_edit.text().strip()
-            )
-        except (AttributeError, ValueError):
-            pass
+        sessions_per_hour, session_duration = (
+            self._guided_session_timing_values()
+        )
         if (
             sessions_per_hour is not None
             and sessions_per_hour > 0
@@ -7185,6 +7174,61 @@ class MainWindow(QMainWindow):
             "Using manually entered session timing."
         )
         self._refresh_guided_use_detected_timing_action()
+
+    def _guided_review_per_roi_feature_detection_lines(self) -> str:
+        """Say which ROIs use the Default settings and what the others use.
+
+        The Feature Detection summary above describes only the shared Default
+        settings, so a customized ROI's actual settings never reached Review
+        Plan. Display only: both the Default/Custom marking and the settings
+        text come from the same values the Feature Detection step already
+        stores and shows in its per-ROI table.
+        """
+        included = self._guided_included_roi_ids_for_feature_detection()
+        if not included:
+            return ""
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", {}) or {}
+        lines = ["", "Settings used by each ROI:"]
+        for roi_id in included:
+            effective = self._guided_effective_feature_event_config_fields_for_roi(
+                roi_id
+            )
+            summary = self._guided_per_roi_feature_event_summary_text(effective)
+            marking = "Custom" if roi_id in overrides else "Default"
+            lines.append(f"  {roi_id}: {marking} - {summary}")
+        return "\n".join(lines)
+
+    def _guided_session_timing_values(self) -> tuple[int | None, float | None]:
+        """The two session-timing fields as numbers, or None where unusable."""
+        sessions_per_hour = None
+        try:
+            sessions_per_hour = int(
+                self._guided_sessions_per_hour_edit.text().strip()
+            )
+        except (AttributeError, ValueError):
+            pass
+        session_duration = None
+        try:
+            session_duration = float(
+                self._guided_session_duration_edit.text().strip()
+            )
+        except (AttributeError, ValueError):
+            pass
+        return sessions_per_hour, session_duration
+
+    def _guided_session_timing_values_are_complete(self) -> bool:
+        """Whether both session-timing values are present and usable.
+
+        Used only to stop asking for values the scientist has already
+        supplied; the Continue gate keeps its own separate validation.
+        """
+        sessions_per_hour, session_duration = self._guided_session_timing_values()
+        return bool(
+            sessions_per_hour is not None
+            and sessions_per_hour > 0
+            and session_duration is not None
+            and session_duration > 0
+        )
 
     def _guided_detected_timing_available(self) -> bool:
         inference = self._guided_recording_timing_inference
@@ -7816,10 +7860,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Choose how events will be detected in each ROI. Most ROIs can "
-            "use the Default settings; use Custom settings only for ROIs that "
-            "need different detection rules. Nothing here runs analysis or "
-            "writes any files."
+            "Choose how events will be detected in each ROI. The Default "
+            "settings are applied to every ROI marked Default; give an ROI "
+            "Custom settings when its signal needs different detection "
+            "settings. Nothing here runs analysis or writes any files."
         )
         intro.setObjectName("guidedFeatureDetectionStepExplanation")
         intro.setWordWrap(True)
@@ -12612,8 +12656,19 @@ class MainWindow(QMainWindow):
             help_label.setText(help_text)
             help_label.setVisible(bool(help_text))
         ok, message = self._guided_timeline_validation()
+        # The help label under the field already carries this instruction when
+        # the recording-start time is missing; showing the identical sentence
+        # again a few rows below reads as two separate requirements.
+        duplicate_of_help = bool(
+            message
+            and help_label is not None
+            and not help_label.isHidden()
+            and help_label.text() == message
+        )
         self._guided_timeline_validation_label.setText(message)
-        self._guided_timeline_validation_label.setVisible(not ok)
+        self._guided_timeline_validation_label.setVisible(
+            not ok and not duplicate_of_help
+        )
 
     def _on_guided_timeline_settings_changed(self, *_args) -> None:
         self._refresh_guided_timeline_controls()
@@ -14742,6 +14797,7 @@ class MainWindow(QMainWindow):
 
         self._guided_review_feature_detection_summary_label.setText(
             self._guided_feature_detection_summary_text(plan)
+            + self._guided_review_per_roi_feature_detection_lines()
         )
 
         correction_layout = self._guided_review_correction_plan_layout
@@ -21014,7 +21070,7 @@ class MainWindow(QMainWindow):
         note = QLabel(
             "Preview one ROI at a time to see how its feature detection "
             "behaves before continuing. Each ROI is previewed with the exact "
-            "settings it will use during Run — its Custom settings if you "
+            "settings it will use during Run: its Custom settings if you "
             "customized it, otherwise the Default settings."
         )
         note.setObjectName("guidedFeatureDetectionPreviewNote")
@@ -22578,11 +22634,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
+        # States what the settings do and asks for review, without implying
+        # that the shared defaults are usually scientifically sufficient.
         note = QLabel(
-            "These settings are used by ROIs marked Default in the table "
-            "below. Most users can leave the values unchanged. Expand this "
-            "section and use “Use these as Default settings” only if the "
-            "Default settings need to be adjusted."
+            "These starting settings are applied to every ROI marked Default "
+            "in the table below. Review the preview for each ROI and adjust "
+            "these values if the shared settings do not suit your recording. "
+            "Expand this section and use “Use these as Default settings” to "
+            "apply a change to every Default ROI."
         )
         note.setObjectName("guidedFeatureEventProfileEditorNote")
         note.setProperty("guidedSecondaryText", True)
@@ -22763,8 +22822,8 @@ class MainWindow(QMainWindow):
 
         note = QLabel(
             "The Default settings above are used for every ROI. Give one ROI "
-            "its own settings only if its signal needs different feature "
-            "detection — this changes that ROI alone and leaves the Default "
+            "its own settings when its signal needs different feature "
+            "detection; this changes that ROI alone and leaves the Default "
             "settings and every other ROI unchanged. Use “Reset to "
             "default” to remove an ROI's Custom settings. The table below "
             "shows the settings each ROI will actually use during Run."
@@ -23887,7 +23946,6 @@ class MainWindow(QMainWindow):
             "Review",
             [
                 "Review summarizes completed-run outputs when results are loaded.",
-                "Additional downstream reanalysis and applied-dF/F routing remain future guided stages.",
             ],
             self._guided_report_viewer,
         )

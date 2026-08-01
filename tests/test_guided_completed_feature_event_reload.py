@@ -250,7 +250,9 @@ def test_sparse_override_fields_do_not_cause_blank_display():
 
     summary = format_guided_completed_feature_event_summary(state)
     assert "percentile threshold (80.0)" in summary
-    assert "dff signal" in summary
+    # The summary uses the scientist-facing signal name; the stored value is
+    # still "dff", which the technical details below continue to show.
+    assert "dF/F signal" in summary
 
     details = format_guided_completed_feature_event_technical_details(state)
     assert "peak_threshold_percentile: 80.0" in details

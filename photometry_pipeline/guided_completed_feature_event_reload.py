@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from photometry_pipeline.guided_display_labels import (
+    feature_event_signal_display_label,
+    feature_threshold_method_display_label,
+)
+
 
 FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION = "guided_feature_event_provenance.v2"
 # 4J16k39b: current runs record the settings actually consumed for every ROI.
@@ -163,7 +168,10 @@ def _effective_settings_summary_text(effective_config_fields: dict) -> str:
     else:
         threshold = effective_config_fields.get("peak_threshold_k", "")
     signal = effective_config_fields.get("event_signal", "dff")
-    return f"{method} threshold ({threshold}) · {signal} signal"
+    return (
+        f"{feature_threshold_method_display_label(method)} threshold "
+        f"({threshold}) · {feature_event_signal_display_label(signal)} signal"
+    )
 
 
 def format_guided_completed_feature_event_summary(
