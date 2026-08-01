@@ -1966,8 +1966,10 @@ def test_guided_rwd_intermittent_duration_is_visibly_required(window):
     assert window._guided_session_duration_label.text() == (
         "Session duration (s):"
     )
-    assert "required, seconds > 0" in (
-        window._guided_session_duration_edit.placeholderText()
+    # The placeholder names the field and its unit; requiredness is stated by
+    # the status text below rather than by a parenthetical.
+    assert window._guided_session_duration_edit.placeholderText() == (
+        "Session duration in seconds"
     )
     status = window._guided_recording_structure_help_label.text()
     assert "needs attention" in status
@@ -2279,9 +2281,10 @@ def test_guided_ambiguous_or_unsupported_timing_does_not_overwrite_values(
     assert window._guided_sessions_per_hour_edit.text() == ""
     assert window._guided_session_duration_edit.text() == ""
     # An unsupported format now tells the scientist what to do rather than
-    # describing a missing app capability (reworded in 69c5240).
+    # describing a missing app capability (reworded in 69c5240). Nothing was
+    # detected, so there is nothing to confirm -- the values are entered.
     assert window._guided_recording_timing_inference_label.text() == (
-        "Confirm sessions per hour and session duration for this recording."
+        "Enter the sessions per hour and session duration for this recording."
     )
     assert window._guided_use_detected_timing_btn.isHidden() is True
 
@@ -2364,7 +2367,8 @@ def test_guided_recording_requiredness_updates_with_format_and_mode(window):
     )
 
     window._guided_format_combo.setCurrentText("custom_tabular")
-    assert "Confirm sessions per hour and session duration" in (
+    # CSV timing is never detected, so the scientist enters both values.
+    assert "Enter the sessions per hour and session duration" in (
         window._guided_recording_structure_help_label.text()
     )
     assert "required for RWD intermittent input" not in (
@@ -3627,9 +3631,11 @@ def test_guided_confirm_strategy_progress_all_confirmed(
     assert window._guided_confirm_strategy_progress_label.text() == (
         "3 of 3 ROIs confirmed."
     )
+    # Names the step the Continue button actually reaches; "Draft plan" is the
+    # internal key for the screen the stepper calls Review Plan.
     assert window._guided_correction_next_action_label.text() == (
-        "Correction method confirmed for 3 of 3 ROIs. Next step: "
-        "Draft plan."
+        "Correction method confirmed for 3 of 3 ROIs. Continue to Feature "
+        "Detection."
     )
 
 
@@ -5921,7 +5927,10 @@ def test_recording_structure_page_avoids_developer_facing_wording(window, qapp):
     found = [term for term in forbidden if term in lowered]
     assert found == []
 
-    assert "align sessions correctly" in visible_text
+    # Source-neutral: this screen also serves one continuous recording, which
+    # has no sessions to align.
+    assert "interpret the timeline correctly" in visible_text
+    assert "align sessions correctly" not in visible_text
     assert "Final recording session" in visible_text
     assert "Sessions per hour:" in visible_text
     # QCheckBox text isn't covered by the generic label/button/group scan

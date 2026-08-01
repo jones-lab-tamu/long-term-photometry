@@ -202,6 +202,57 @@ FORMAT_DISPLAY_LABELS = {
     "custom_tabular": "CSV files",
 }
 
+# One scientist-facing name per recording structure, so Select data, Recording
+# structure, and Review Plan all say the same thing. The stored values stay
+# "intermittent"/"continuous".
+ACQUISITION_MODE_DISPLAY_LABELS = {
+    "intermittent": "Repeated sessions",
+    "continuous": "Continuous recording",
+}
+
+# Feature Detection settings named as a scientist would read them. Stored
+# values, serialized configuration, and the technical-details panels keep the
+# internal tokens; only these displays change.
+FEATURE_EVENT_SIGNAL_DISPLAY_LABELS = {
+    "dff": "dF/F",
+}
+FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS = {
+    "mean_std": "mean + standard-deviation",
+    "median_mad": "median + MAD",
+    "percentile": "percentile",
+    "absolute": "absolute",
+}
+FEATURE_AUC_BASELINE_DISPLAY_LABELS = {
+    "zero": "zero line",
+}
+
+
+def format_display_label(value: str) -> str:
+    """The scientist-facing name for an input format."""
+    text = str(value or "").strip()
+    return FORMAT_DISPLAY_LABELS.get(text.lower(), text or "not set")
+
+
+def acquisition_mode_display_label(value: str) -> str:
+    """The scientist-facing name for a recording structure."""
+    text = str(value or "").strip()
+    return ACQUISITION_MODE_DISPLAY_LABELS.get(text.lower(), text or "not set")
+
+
+def feature_event_signal_display_label(value: str) -> str:
+    text = str(value or "").strip()
+    return FEATURE_EVENT_SIGNAL_DISPLAY_LABELS.get(text.lower(), text)
+
+
+def feature_threshold_method_display_label(value: str) -> str:
+    text = str(value or "").strip()
+    return FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS.get(text.lower(), text)
+
+
+def feature_auc_baseline_display_label(value: str) -> str:
+    text = str(value or "").strip()
+    return FEATURE_AUC_BASELINE_DISPLAY_LABELS.get(text.lower(), text)
+
 
 class _FormatComboBox(QComboBox):
     """Show scientist-facing labels while preserving internal format values."""
@@ -518,6 +569,62 @@ GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
     "missing_custom_tabular_column_mapping",
     "missing_custom_tabular_dataset_contract",
 ))
+
+# Guided's own session-timing wording. Full Control keeps its separate
+# "(optional)" / duty-cycled text, because only Guided requires both values
+# before Continue.
+GUIDED_SESSIONS_PER_HOUR_PLACEHOLDER = "Sessions per hour"
+GUIDED_SESSIONS_PER_HOUR_TOOLTIP = (
+    "How many recording sessions occur in each hour. Enter this when the "
+    "timing cannot be determined from the source files."
+)
+GUIDED_SESSION_DURATION_PLACEHOLDER = "Session duration in seconds"
+GUIDED_SESSION_DURATION_TOOLTIP = (
+    "Length of each recording session in seconds. Enter this when the app "
+    "cannot determine it from the source files."
+)
+GUIDED_SESSION_DURATION_DETECTED_TOOLTIP = (
+    "Length of each recording session in seconds. The app read this from the "
+    "recording; review it and correct it if it is wrong."
+)
+GUIDED_SESSION_TIMING_ENTER_MESSAGE = (
+    "Enter the sessions per hour and session duration for this recording."
+)
+# Shown under "Detect automatically" so the scientist knows what the app will
+# decide, instead of being shown one structure's explanation before anything
+# is resolved. Each line states only what the app actually does.
+GUIDED_AUTO_STRUCTURE_EXPLANATIONS = {
+    "custom_tabular": (
+        "Detect automatically: one CSV file is read as one continuous "
+        "recording, and several CSV files are read as repeated sessions. "
+        "Choose a structure yourself if that is not how your data is saved."
+    ),
+    "npm": (
+        "Detect automatically: NPM recordings are read as repeated sessions."
+    ),
+    "rwd": (
+        "Detect automatically: the app reads the selected folder to work out "
+        "whether it holds repeated sessions or one continuous recording. "
+        "Choose a structure yourself if you already know which it is."
+    ),
+}
+# Review Plan headings and lines, in the scientist's vocabulary. "Execution
+# availability" and "backend validation" described what an internal validator
+# does; these describe what the scientist is looking at.
+GUIDED_REVIEW_RUN_READINESS_HEADING = "Run readiness"
+GUIDED_REVIEW_DATASET_CONFIRMATION_MESSAGE = (
+    "Confirm that the detected files, timing, and included data match your "
+    "recording. This does not create files or run analysis."
+)
+GUIDED_REVIEW_FINAL_OUTPUTS_PENDING = "Final analysis outputs: not created yet."
+GUIDED_REVIEW_CONTINUOUS_SESSIONS_LINE = (
+    "Recording sessions: not applicable - this is one continuous recording."
+)
+GUIDED_AUTO_STRUCTURE_EXPLANATION_DEFAULT = (
+    "Detect automatically: the app works the recording structure out from the "
+    "folder you select. Choose a structure yourself if you already know which "
+    "it is."
+)
 
 
 class GuidedCsvSetupError(ValueError):
@@ -3986,6 +4093,20 @@ class MainWindow(QMainWindow):
         self._guided_continuous_explanation_label.setWordWrap(True)
         self._guided_continuous_explanation_label.setVisible(False)
         form.addRow("", self._guided_continuous_explanation_label)
+        # "Detect automatically" has its own explanation. Without it the
+        # intermittent text above was shown while nothing was resolved yet,
+        # which read as a decision the app had already made.
+        self._guided_auto_structure_explanation_label = QLabel(
+            GUIDED_AUTO_STRUCTURE_EXPLANATION_DEFAULT
+        )
+        self._guided_auto_structure_explanation_label.setObjectName(
+            "guidedAutoStructureExplanation"
+        )
+        self._guided_auto_structure_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_auto_structure_explanation_label.setWordWrap(True)
+        form.addRow("", self._guided_auto_structure_explanation_label)
 
         self._guided_input_dir_edit = QLineEdit()
         self._guided_input_dir_edit.setObjectName("guidedInputDirectory")
@@ -4224,8 +4345,15 @@ class MainWindow(QMainWindow):
 
         self._guided_sessions_per_hour_edit = QLineEdit()
         self._guided_sessions_per_hour_edit.setObjectName("guidedSessionsPerHour")
-        self._guided_sessions_per_hour_edit.setPlaceholderText(self._sph_edit.placeholderText())
-        self._guided_sessions_per_hour_edit.setToolTip(self._sph_edit.toolTip())
+        # Guided's own wording: Full Control's "(optional)" placeholder and
+        # duty-cycled tooltip contradict the Guided gate, which requires both
+        # timing values before Continue.
+        self._guided_sessions_per_hour_edit.setPlaceholderText(
+            GUIDED_SESSIONS_PER_HOUR_PLACEHOLDER
+        )
+        self._guided_sessions_per_hour_edit.setToolTip(
+            GUIDED_SESSIONS_PER_HOUR_TOOLTIP
+        )
         self._make_guided_widget_shrinkable(self._guided_sessions_per_hour_edit)
         self._guided_sessions_per_hour_label = QLabel(
             "Sessions per hour:"
@@ -4237,8 +4365,12 @@ class MainWindow(QMainWindow):
 
         self._guided_session_duration_edit = QLineEdit()
         self._guided_session_duration_edit.setObjectName("guidedSessionDuration")
-        self._guided_session_duration_edit.setPlaceholderText(self._duration_edit.placeholderText())
-        self._guided_session_duration_edit.setToolTip(self._duration_edit.toolTip())
+        self._guided_session_duration_edit.setPlaceholderText(
+            GUIDED_SESSION_DURATION_PLACEHOLDER
+        )
+        self._guided_session_duration_edit.setToolTip(
+            GUIDED_SESSION_DURATION_TOOLTIP
+        )
         self._make_guided_widget_shrinkable(self._guided_session_duration_edit)
         self._guided_session_duration_label = QLabel(
             "Session duration (s):"
@@ -4498,8 +4630,10 @@ class MainWindow(QMainWindow):
             "guidedStepRecordingStructure",
             "Recording structure",
             [
+                # Source-neutral: one continuous recording has no sessions to
+                # align, and this screen serves both structures.
                 "Tell the app how your recording is organized so it can "
-                "align sessions correctly.",
+                "interpret the timeline correctly.",
             ],
             wrapper,
         )
@@ -5458,17 +5592,23 @@ class MainWindow(QMainWindow):
             threshold_value = self._guided_feature_event_peak_abs_edit.text()
         else:
             threshold_value = self._guided_feature_event_peak_k_edit.text()
+        # Display names only; the combos keep their stored values, and the
+        # technical-details panels keep the internal tokens.
         return (
             f"Status: {display}\n"
-            f"Event signal: {self._guided_feature_event_signal_combo.currentText()}\n"
+            "Event signal: "
+            f"{feature_event_signal_display_label(self._guided_feature_event_signal_combo.currentText())}\n"
             f"Polarity: {self._guided_feature_event_polarity_combo.currentText()}\n"
-            f"Threshold: {threshold_method} ({threshold_value})\n"
+            "Threshold: "
+            f"{feature_threshold_method_display_label(threshold_method)} "
+            f"({threshold_value})\n"
             "Minimum distance: "
             f"{self._guided_feature_event_peak_distance_edit.text()} s; "
             "minimum prominence: "
             f"{self._guided_feature_event_peak_prominence_edit.text()}; "
             f"minimum width: {self._guided_feature_event_peak_width_edit.text()} s\n"
-            f"AUC baseline: {self._guided_feature_event_auc_baseline_combo.currentText()}\n"
+            "AUC baseline: "
+            f"{feature_auc_baseline_display_label(self._guided_feature_event_auc_baseline_combo.currentText())}\n"
             f"{action}"
         )
 
@@ -6312,12 +6452,41 @@ class MainWindow(QMainWindow):
         self._refresh_guided_setup_summary()
         self._refresh_guided_navigation_state()
 
+    def _refresh_guided_auto_structure_explanation(self) -> None:
+        """Say what "Detect automatically" will decide, for this format.
+
+        Only shown while the choice is still automatic. Once the scientist
+        states a structure, that structure's own explanation applies.
+        """
+        label = getattr(self, "_guided_auto_structure_explanation_label", None)
+        if label is None:
+            return
+        automatic = (
+            self._guided_selected_acquisition_mode()
+            == GUIDED_STRUCTURE_CHOICE_AUTO
+        )
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText(),
+            )
+        ).strip().lower()
+        label.setText(
+            GUIDED_AUTO_STRUCTURE_EXPLANATIONS.get(
+                resolved_format, GUIDED_AUTO_STRUCTURE_EXPLANATION_DEFAULT
+            )
+        )
+        label.setVisible(automatic)
+
     def _sync_guided_recording_visibility(self) -> None:
         if not hasattr(self, "_guided_recording_structure_help_label"):
             return
         continuous = self._guided_effective_acquisition_mode() == "continuous"
+        automatic = (
+            self._guided_selected_acquisition_mode()
+            == GUIDED_STRUCTURE_CHOICE_AUTO
+        )
         for widget in (
-            getattr(self, "_guided_intermittent_explanation_label", None),
             getattr(
                 self, "_guided_recording_timing_inference_label", None
             ),
@@ -6333,8 +6502,16 @@ class MainWindow(QMainWindow):
         ):
             if widget is not None:
                 widget.setVisible(not continuous)
+        # The intermittent explanation describes a structure the scientist
+        # stated. While the choice is still automatic the auto explanation
+        # answers instead, so this one is not shown as though it were decided.
+        intermittent_explanation = getattr(
+            self, "_guided_intermittent_explanation_label", None
+        )
+        if intermittent_explanation is not None:
+            intermittent_explanation.setVisible(not continuous and not automatic)
+        self._refresh_guided_auto_structure_explanation()
         for widget in (
-            getattr(self, "_guided_continuous_explanation_label", None),
             getattr(self, "_guided_continuous_window_label", None),
             getattr(self, "_guided_continuous_window_sec_spin", None),
             getattr(
@@ -6344,6 +6521,14 @@ class MainWindow(QMainWindow):
         ):
             if widget is not None:
                 widget.setVisible(continuous)
+        # Same reasoning as the intermittent explanation above: one
+        # explanation at a time, and while the choice is automatic that is the
+        # automatic one.
+        continuous_explanation = getattr(
+            self, "_guided_continuous_explanation_label", None
+        )
+        if continuous_explanation is not None:
+            continuous_explanation.setVisible(continuous and not automatic)
         resolved_format = str(
             (getattr(self, "_discovery_cache", None) or {}).get(
                 "resolved_format",
@@ -6382,18 +6567,19 @@ class MainWindow(QMainWindow):
             self._guided_session_duration_label.setText(
                 "Session duration (s):"
             )
+            # Nothing is detected for these formats, so the scientist is asked
+            # to enter the values rather than confirm ones the app supplied.
             self._guided_session_duration_edit.setPlaceholderText(
-                "(required, seconds > 0)"
+                GUIDED_SESSION_DURATION_PLACEHOLDER
             )
             self._guided_session_duration_edit.setToolTip(
-                self._duration_edit.toolTip()
+                GUIDED_SESSION_DURATION_TOOLTIP
             )
             self._guided_recording_structure_help_label.setText(
-                "Intermittent NPM is supported. Confirm sessions per hour and "
-                "session duration before continuing."
+                "Intermittent NPM is supported. "
+                f"{GUIDED_SESSION_TIMING_ENTER_MESSAGE}"
                 if input_format == "npm"
-                else "Confirm sessions per hour and session duration before "
-                "continuing."
+                else GUIDED_SESSION_TIMING_ENTER_MESSAGE
             )
             self._refresh_guided_navigation_state()
             return
@@ -6402,11 +6588,14 @@ class MainWindow(QMainWindow):
             "Session duration (s):"
         )
         self._guided_session_duration_edit.setPlaceholderText(
-            "(required, seconds > 0)"
+            GUIDED_SESSION_DURATION_PLACEHOLDER
         )
+        # RWD is the one format whose timing the app reads from the recording,
+        # so here the value can genuinely be reviewed rather than entered.
         self._guided_session_duration_edit.setToolTip(
-            "Required for RWD intermittent recordings. Enter the positive "
-            "recording duration for each session, in seconds."
+            GUIDED_SESSION_DURATION_DETECTED_TOOLTIP
+            if self._guided_detected_timing_available()
+            else GUIDED_SESSION_DURATION_TOOLTIP
         )
         sessions_per_hour = None
         try:
@@ -13588,9 +13777,12 @@ class MainWindow(QMainWindow):
                     )
                 }
                 if included and confirmed == included:
+                    # Names the step the Continue button actually goes to.
+                    # "Draft plan" is the internal step key; the stepper shows
+                    # Feature Detection next and Review Plan after it.
                     label.setText(
-                        "Correction strategies are confirmed from local "
-                        "preview for all included ROIs. Next step: Draft plan."
+                        "Correction strategies are confirmed from the preview "
+                        "for all included ROIs. Continue to Feature Detection."
                     )
                 else:
                     label.setText(
@@ -13698,7 +13890,7 @@ class MainWindow(QMainWindow):
         if total and count == total:
             label.setText(
                 f"Correction method confirmed for {count} of {total} ROIs. "
-                "Next step: Draft plan."
+                "Continue to Feature Detection."
             )
         else:
             if count:
@@ -14400,7 +14592,7 @@ class MainWindow(QMainWindow):
                 in execution_categories
             ):
                 availability = (
-                    "Execution availability: Guided Run supports one shared "
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: Guided Run supports one shared "
                     "dynamic-fit correction strategy across included ROIs, "
                     "and this plan currently has multiple dynamic-fit "
                     "modes. Choose the same dynamic-fit strategy for all "
@@ -14412,13 +14604,13 @@ class MainWindow(QMainWindow):
                 in execution_categories
             ):
                 availability = (
-                    "Execution availability: Guided Run does not yet "
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: Guided Run does not yet "
                     "support an all-Signal-Only F0 analysis. Use Full "
                     "Control for this configuration."
                 )
             elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
                 availability = (
-                    "Execution availability: This plan is complete, but "
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: This plan is complete, but "
                     "the detected dataset settings have not been "
                     "confirmed yet. Confirm the detected settings below "
                     "before validation. This does not create files or "
@@ -14426,13 +14618,13 @@ class MainWindow(QMainWindow):
                 )
             elif subset_readiness.first_subset_executable:
                 availability = (
-                    "Execution availability: This plan is ready. Go to "
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: This plan is ready. Go to "
                     "the Run step to validate the request. If validation "
                     "passes, Guided Run can start the supported analysis."
                 )
             else:
                 availability = (
-                    "Execution availability: This plan is complete, but "
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: This plan is complete, but "
                     "Guided Run does not yet support this configuration. "
                     "Review the readiness details below, or use Full "
                     "Control for this analysis."
@@ -14440,7 +14632,7 @@ class MainWindow(QMainWindow):
         else:
             completeness = "Plan completeness: Needs attention"
             availability = (
-                "Execution availability: This plan needs attention before "
+                f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: This plan needs attention before "
                 "validation. Return to the indicated step and update the "
                 "highlighted choices."
             )
@@ -14496,17 +14688,28 @@ class MainWindow(QMainWindow):
         timeline_summary = "\n" + "\n".join(
             self._guided_timeline_review_lines(plan)
         )
-        display_format = (
-            "CSV files"
-            if plan.input_format == "custom_tabular"
-            else plan.input_format or "not set"
+        display_format = format_display_label(plan.input_format)
+        # One "Recording structure" line carrying both the structure and its
+        # timing, so the screen does not use that heading for two things and
+        # never shows the internal "intermittent"/"continuous" values.
+        structure_line = (
+            "Recording structure: "
+            f"{acquisition_mode_display_label(plan.acquisition_mode)}"
+            f" ({timing})"
+        )
+        # A continuous recording has no sessions to discover; "not available"
+        # read as a failed detection.
+        sessions_line = (
+            GUIDED_REVIEW_CONTINUOUS_SESSIONS_LINE
+            if plan.acquisition_mode == "continuous"
+            else "Sessions discovered: "
+            f"{len(sessions) if sessions else 'not available'}"
         )
         self._guided_review_analysis_summary_label.setText(
             f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
             f"Input format: {display_format}\n"
-            f"Acquisition mode: {plan.acquisition_mode or 'not set'}\n"
-            f"Recording structure: {timing}\n"
-            f"Sessions discovered: {len(sessions) if sessions else 'not available'}\n"
+            f"{structure_line}\n"
+            f"{sessions_line}\n"
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
             f"{final_session_policy}"
@@ -14581,9 +14784,11 @@ class MainWindow(QMainWindow):
                 correction_layout.addWidget(label, row, column)
 
         output_path = plan.output_policy_path or plan.output_base_path
+        # Correction previews have already written support files under this
+        # destination, so this speaks only for the final analysis outputs.
         self._guided_review_output_status_label.setText(
             f"Output destination: {output_path or 'not set'}\n"
-            "Files written so far: none"
+            f"{GUIDED_REVIEW_FINAL_OUTPUTS_PENDING}"
         )
 
         if not readiness.plan_complete_for_handoff:
@@ -14628,12 +14833,7 @@ class MainWindow(QMainWindow):
                 "analysis. Use Full Control for this configuration."
             )
         elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
-            next_text = (
-                "Confirm the detected dataset settings so backend "
-                "validation and Guided Run use the same sessions, timing, "
-                "and included data shown in this plan. This does not "
-                "create files or run analysis."
-            )
+            next_text = GUIDED_REVIEW_DATASET_CONFIRMATION_MESSAGE
         elif subset_readiness.first_subset_executable:
             next_text = (
                 "This plan is ready. Go to the Run step to validate the "
@@ -20449,7 +20649,10 @@ class MainWindow(QMainWindow):
         else:
             threshold = config_fields.get("peak_threshold_k", "")
         signal = config_fields.get("event_signal", "dff")
-        return f"{method} threshold ({threshold}) · {signal} signal"
+        return (
+            f"{feature_threshold_method_display_label(method)} threshold "
+            f"({threshold}) · {feature_event_signal_display_label(signal)} signal"
+        )
 
     def _refresh_guided_per_roi_feature_event_table(self) -> None:
         table = getattr(self, "_guided_feature_event_per_roi_table", None)

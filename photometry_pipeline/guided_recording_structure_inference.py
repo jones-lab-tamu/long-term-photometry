@@ -60,8 +60,10 @@ def infer_guided_recording_structure(
             supported=False,
             status="unsupported",
             evidence={"resolved_format": resolved, "source_path": source_path},
+            # Nothing was detected for this format, so there is nothing to
+            # confirm; the scientist supplies both values.
             message=(
-                "Confirm sessions per hour and session duration for this "
+                "Enter the sessions per hour and session duration for this "
                 "recording."
             ),
         )

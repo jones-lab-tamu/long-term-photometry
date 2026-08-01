@@ -734,7 +734,9 @@ def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
         window._guided_review_plan_status_label.text()
     )
     assert "CH1" in window._guided_review_analysis_summary_label.text()
-    assert "Files written so far: none" in (
+    # Correction previews may already have written support files under this
+    # destination, so this line speaks only for the final analysis outputs.
+    assert "Final analysis outputs: not created yet." in (
         window._guided_review_output_status_label.text()
     )
 
@@ -1360,7 +1362,10 @@ def test_review_plan_uniform_robust_without_confirmed_settings_names_the_blocker
     assert "detected dataset settings have not been confirmed yet" in status
     assert "does not yet support this configuration" not in status
     assert "RWD" not in status
-    assert "Confirm the detected dataset settings" in next_step
+    # Says what the scientist is confirming, not what an internal validator
+    # will do with it.
+    assert "Confirm that the detected files, timing, and included data" in next_step
+    assert "backend validation" not in next_step
     assert "RWD" not in next_step
     assert window._guided_review_dataset_contract_action_btn.isHidden() is False
     assert window._guided_review_dataset_contract_action_btn.text() == (
