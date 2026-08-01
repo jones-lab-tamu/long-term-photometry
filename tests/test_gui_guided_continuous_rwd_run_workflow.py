@@ -1819,8 +1819,10 @@ def test_live_workflow_produces_a_completed_run_that_opens_in_results(
     assert traversals == {"count": 1}
     run_dir = window._guided_continuous_rwd_completed_run_dir
     assert run_dir, window._guided_continuous_rwd_status_message
+    # One completion message shared with the intermittent path, so the Run
+    # page cannot say the analysis both finished and is still running.
     assert window._guided_continuous_rwd_status_message == (
-        "Continuous analysis completed."
+        "Guided analysis completed successfully."
     )
 
     classification = classify_run_terminal_state(run_dir)

@@ -608,6 +608,15 @@ GUIDED_AUTO_STRUCTURE_EXPLANATIONS = {
         "Choose a structure yourself if you already know which it is."
     ),
 }
+# One coherent completion state for the Run page. The analysis is finished,
+# the setup that produced it was checked, and the one remaining action is to
+# load the run so the Review step opens.
+GUIDED_RUN_COMPLETED_MESSAGE = "Guided analysis completed successfully."
+GUIDED_SETUP_CHECK_PASSED_FOR_COMPLETED_RUN = (
+    "The setup check passed for the setup this run used."
+)
+GUIDED_LOAD_COMPLETED_RUN_HINT = "Load the completed run to open Review."
+
 # Review Plan headings and lines, in the scientist's vocabulary. "Execution
 # availability" and "backend validation" described what an internal validator
 # does; these describe what the scientist is looking at.
@@ -5670,13 +5679,27 @@ class MainWindow(QMainWindow):
         if hasattr(widget, "setMinimumWidth"):
             widget.setMinimumWidth(0)
 
+    @staticmethod
+    def _guided_real_run_path(candidate: object) -> str:
+        """Canonicalize a stored run path, treating "unset" as unset.
+
+        ``os.path.realpath("")`` returns the current working directory, so
+        normalizing before checking made an unset run path look like a real
+        completed run rooted at wherever the app happens to be launched --
+        and made two unset paths compare equal to each other.
+        """
+        text = str(candidate or "").strip()
+        if not text:
+            return ""
+        return os.path.realpath(text)
+
     def _refresh_guided_mode_display(self) -> None:
         mode = getattr(self, "_guided_workflow_mode", "start")
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
-        run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        run_dir = self._guided_real_run_path(self._current_run_dir)
         accepted_overview = self._accepted_completed_review_for(run_dir)
-        retained_continuous_run = os.path.realpath(
-            str(getattr(self, "_guided_continuous_rwd_completed_run_dir", "") or "")
+        retained_continuous_run = self._guided_real_run_path(
+            getattr(self, "_guided_continuous_rwd_completed_run_dir", "")
         )
         has_loaded_results = (
             bool(run_dir)
@@ -5752,10 +5775,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_guided_start_status_label"):
             return
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
-        run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        run_dir = self._guided_real_run_path(self._current_run_dir)
         accepted_overview = self._accepted_completed_review_for(run_dir)
-        retained_continuous_run = os.path.realpath(
-            str(getattr(self, "_guided_continuous_rwd_completed_run_dir", "") or "")
+        retained_continuous_run = self._guided_real_run_path(
+            getattr(self, "_guided_continuous_rwd_completed_run_dir", "")
         )
         has_loaded_results = (
             bool(run_dir)
@@ -16653,11 +16676,18 @@ class MainWindow(QMainWindow):
         """Whether continuous readiness owns the Run control and setup check.
 
         One predicate so the Run affordance and the setup-check text cannot
-        end up answering to different authorities (CR1-F1-G).
+        end up answering to different authorities (CR1-F1-G). A retained
+        completed continuous run counts too: without it the intermittent
+        wording reclaimed the setup-check line after a successful continuous
+        run and announced that the setup had never been checked.
         """
         return bool(
             self._guided_continuous_rwd_live_draft() is not None
             or getattr(self, "_guided_continuous_rwd_execution_active", False)
+            or str(
+                getattr(self, "_guided_continuous_rwd_completed_run_dir", "")
+                or ""
+            ).strip()
         )
 
     def _refresh_guided_continuous_rwd_run_readiness_display(self) -> bool:
@@ -16729,8 +16759,20 @@ class MainWindow(QMainWindow):
                     self, "_guided_continuous_rwd_execution_active", False
                 )
             ):
+                # After a run actually completed, "never checked" contradicts
+                # the success stated beside it. The check did pass -- for the
+                # setup that run used; another run needs another check.
                 status_label.setText(
-                    "Your Guided setup has not been checked yet."
+                    GUIDED_SETUP_CHECK_PASSED_FOR_COMPLETED_RUN
+                    if str(
+                        getattr(
+                            self,
+                            "_guided_continuous_rwd_completed_run_dir",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    else "Your Guided setup has not been checked yet."
                 )
             if details_label is not None:
                 details_label.setText("")
@@ -16925,9 +16967,15 @@ class MainWindow(QMainWindow):
         # allocated and its results are written. Require a fresh preparation
         # before another run rather than reusing consumed authorities.
         self._guided_continuous_rwd_prepared_run = None
+        # Stays the stored continuous status: the Run readiness summary and
+        # the button tooltip both echo it once the prepared run is consumed.
         self._set_guided_continuous_rwd_status(
-            "Continuous analysis completed.", analysis=True
+            GUIDED_RUN_COMPLETED_MESSAGE, analysis=True
         )
+        # The setup-check line is written by the continuous readiness display
+        # below, which now reads the retained completed run rather than
+        # announcing that the setup was never checked.
+        self._show_guided_completed_results_folder(run_dir)
         self._refresh_guided_review_handoff_display()
         self._refresh_guided_run_readiness_display()
 
@@ -17398,6 +17446,12 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_active = True
         self._guided_backend_validate_btn.setEnabled(False)
         self._refresh_guided_backend_validation_display()
+        # The check below runs on this thread and can take several seconds on
+        # a long recording. Paint the in-progress state first, or the window
+        # simply freezes on the previous text with no sign anything started.
+        # User input stays excluded so the disabled controls cannot be
+        # re-triggered while the check runs.
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         context = None
         try:
             try:
@@ -17477,9 +17531,11 @@ class MainWindow(QMainWindow):
         self._set_guided_backend_validation_technical_details("")
         if getattr(self, "_guided_backend_validation_active", False):
             status_label.setText(
-                "Checking your Guided setup. No run is being started."
+                "Checking your Guided setup… No run is being started."
             )
-            details_label.setText("")
+            details_label.setText(
+                "This can take a moment for a recording with many sessions."
+            )
             return
 
         outcome = getattr(self, "_guided_backend_validation_outcome", None)
@@ -17706,6 +17762,29 @@ class MainWindow(QMainWindow):
         )
         return str(current_format or "").strip().lower() == "npm"
 
+    def _show_guided_completed_results_folder(self, run_dir: str) -> None:
+        """Name the completed run's folder and offer to open it.
+
+        Reuses the completed-output handoff the intermittent path already
+        uses -- the same stored directory, the same Open-results-folder
+        button, and the same details line -- so there is one folder-opening
+        implementation bound to the actual completed run directory rather
+        than to the selected output base.
+        """
+        path = str(run_dir or "").strip()
+        if not path:
+            return
+        self._guided_npm_completed_output_dir = path
+        details = getattr(self, "_guided_run_execution_details_label", None)
+        if details is not None:
+            details.setText(
+                f"Results folder: {path}\n{GUIDED_LOAD_COMPLETED_RUN_HINT}"
+            )
+        open_btn = getattr(self, "_guided_npm_open_output_btn", None)
+        if open_btn is not None:
+            open_btn.setVisible(True)
+            open_btn.setEnabled(True)
+
     def _clear_guided_npm_completed_output_handoff(
         self, *, clear_details: bool
     ) -> None:
@@ -17745,7 +17824,17 @@ class MainWindow(QMainWindow):
         repair, or from a prior bespoke-path run) must still never remain
         visible while a different/new setup is being prepared.
         """
-        if (
+        # A completed continuous run has no intermittent execution result, so
+        # this cleanup would otherwise discard the results-folder handoff that
+        # run just published. Its own invalidation hook still clears it when
+        # the setup changes.
+        continuous_completed = bool(
+            str(
+                getattr(self, "_guided_continuous_rwd_completed_run_dir", "")
+                or ""
+            ).strip()
+        )
+        if not continuous_completed and (
             getattr(self, "_guided_completed_output_format", None) == "npm"
             or getattr(self, "_guided_backend_execution_result", None) is None
         ):
@@ -18500,7 +18589,8 @@ class MainWindow(QMainWindow):
                         open_btn.setVisible(True)
                         open_btn.setEnabled(True)
                 details_label.setText(
-                    f"Results folder: {output_dir}"
+                    f"Results folder: {output_dir}\n"
+                    f"{GUIDED_LOAD_COMPLETED_RUN_HINT}"
                 )
             else:
                 details_label.setText("")
@@ -19013,6 +19103,10 @@ class MainWindow(QMainWindow):
             return
         self._current_run_dir = candidate
         self._set_guided_workflow_mode("open_results")
+        # Mark Review reached, exactly as the Start -> Open Results path
+        # does. Without this the app navigated to Review while the stepper
+        # still showed it disabled, so the scientist could not return to it.
+        self._reach_guided_step("Review")
         review_index = self._guided_step_index("Review")
         self._guided_workflow_stepper.setCurrentRow(review_index)
         if label is not None:

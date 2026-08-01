@@ -835,8 +835,10 @@ def test_rwd_completion_shows_exact_output_and_clears_it_after_edit(
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
 
+    # The completion line also states what loading the run does, so the
+    # scientist is not left to discover the disabled Review step alone.
     assert window._guided_run_execution_details_label.text() == (
-        f"Results folder: {run_dir}"
+        f"Results folder: {run_dir}\nLoad the completed run to open Review."
     )
     assert window._guided_npm_completed_output_dir == str(run_dir)
     assert window._guided_completed_output_format == "rwd"
