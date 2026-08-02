@@ -4086,13 +4086,13 @@ class MainWindow(QMainWindow):
         self._guided_input_dir_edit.setToolTip(self._input_dir.toolTip())
         self._make_guided_widget_shrinkable(self._guided_input_dir_edit)
         input_row = QHBoxLayout()
-        input_row.addWidget(self._guided_input_dir_edit)
+        input_row.addWidget(self._guided_input_dir_edit, 1)
         self._guided_input_browse_btn = QPushButton("Browse...")
         self._guided_input_browse_btn.setObjectName("guidedInputDirectoryBrowse")
         self._guided_input_browse_btn.clicked.connect(
             lambda: self._browse_dir(self._guided_input_dir_edit, "Select Input Directory")
         )
-        input_row.addWidget(self._guided_input_browse_btn)
+        input_row.addWidget(self._guided_input_browse_btn, 0, Qt.AlignLeft)
         form.addRow("Input folder:", input_row)
 
         self._guided_output_dir_edit = QLineEdit()
@@ -4100,13 +4100,13 @@ class MainWindow(QMainWindow):
         self._guided_output_dir_edit.setToolTip(self._output_dir.toolTip())
         self._make_guided_widget_shrinkable(self._guided_output_dir_edit)
         output_row = QHBoxLayout()
-        output_row.addWidget(self._guided_output_dir_edit)
+        output_row.addWidget(self._guided_output_dir_edit, 1)
         self._guided_output_browse_btn = QPushButton("Browse...")
         self._guided_output_browse_btn.setObjectName("guidedOutputDirectoryBrowse")
         self._guided_output_browse_btn.clicked.connect(
             lambda: self._browse_dir(self._guided_output_dir_edit, "Select Output Base Directory")
         )
-        output_row.addWidget(self._guided_output_browse_btn)
+        output_row.addWidget(self._guided_output_browse_btn, 0, Qt.AlignLeft)
         form.addRow("Output folder:", output_row)
 
         output_help_label = QLabel(
@@ -7782,7 +7782,9 @@ class MainWindow(QMainWindow):
             self._on_guided_continue_to_feature_detection
         )
         self._guided_correction_continue_btn.setEnabled(False)
-        wrapper_layout.addWidget(self._guided_correction_continue_btn)
+        wrapper_layout.addWidget(
+            self._guided_correction_continue_btn, alignment=Qt.AlignLeft
+        )
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
@@ -7898,7 +7900,9 @@ class MainWindow(QMainWindow):
         self._guided_feature_detection_continue_btn.clicked.connect(
             self._on_guided_continue_to_review_plan
         )
-        layout.addWidget(self._guided_feature_detection_continue_btn)
+        layout.addWidget(
+            self._guided_feature_detection_continue_btn, alignment=Qt.AlignLeft
+        )
 
         return self._build_guided_step_scroll(
             "guidedStepFeatureDetection",

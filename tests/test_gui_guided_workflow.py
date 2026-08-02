@@ -9,7 +9,16 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFormLayout,
+    QGroupBox,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 import gui.main_window as main_window_module
 import photometry_pipeline.preview.correction_preview as correction_preview_module
@@ -63,6 +72,115 @@ def _make_window(qapp) -> MainWindow:
 def _close_window(window: MainWindow) -> None:
     window.close()
     window.deleteLater()
+
+
+def _guided_row_layout(widget):
+    form = widget.parentWidget().layout()
+    assert isinstance(form, QFormLayout)
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.FieldRole)
+        row_layout = item.layout() if item is not None else None
+        if row_layout is not None and row_layout.indexOf(widget) >= 0:
+            return row_layout
+    raise AssertionError(f"No Guided form row found for {widget.objectName()!r}")
+
+
+@pytest.mark.parametrize("window_size", [(1024, 640), (1280, 720), (1440, 900)])
+def test_guided_select_data_browse_rows_preserve_native_buttons_and_path_width(
+    window, qapp, window_size
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window.show()
+    window.resize(*window_size)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    )
+    qapp.processEvents()
+
+    for edit, browse, object_name in (
+        (
+            window._guided_input_dir_edit,
+            window._guided_input_browse_btn,
+            "guidedInputDirectoryBrowse",
+        ),
+        (
+            window._guided_output_dir_edit,
+            window._guided_output_browse_btn,
+            "guidedOutputDirectoryBrowse",
+        ),
+    ):
+        row_layout = _guided_row_layout(edit)
+        edit_index = row_layout.indexOf(edit)
+        browse_index = row_layout.indexOf(browse)
+        assert row_layout.stretch(edit_index) > row_layout.stretch(browse_index)
+        assert row_layout.itemAt(browse_index).alignment() & Qt.AlignLeft
+
+        size_hint = browse.sizeHint().width()
+        assert abs(browse.width() - size_hint) <= max(8, size_hint // 10)
+        assert edit.width() > browse.width()
+        assert edit.width() >= 200
+        assert browse.width() >= browse.minimumSizeHint().width()
+        assert browse.isVisibleTo(window)
+        assert browse.isEnabled()
+        assert browse.geometry().right() <= row_layout.geometry().right() + 1
+        assert browse.objectName() == object_name
+        assert browse.text() == "Browse..."
+        assert browse.focusPolicy() & Qt.TabFocus
+
+
+def test_guided_select_data_browse_buttons_keep_existing_directory_picker_route(
+    window, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        window,
+        "_browse_dir",
+        lambda edit, title: calls.append((edit, title)),
+    )
+
+    window._guided_input_browse_btn.click()
+    window._guided_output_browse_btn.click()
+
+    assert calls == [
+        (window._guided_input_dir_edit, "Select Input Directory"),
+        (window._guided_output_dir_edit, "Select Output Base Directory"),
+    ]
+
+
+@pytest.mark.parametrize("window_size", [(1024, 640), (1280, 720), (1440, 900)])
+def test_guided_continuation_buttons_are_native_left_aligned_and_focusable(
+    window, qapp, window_size
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window.show()
+    window.resize(*window_size)
+
+    for step_name, button, expected_text in (
+        (
+            "Correction approach",
+            window._guided_correction_continue_btn,
+            "Continue to Feature Detection",
+        ),
+        (
+            "Feature detection",
+            window._guided_feature_detection_continue_btn,
+            "Continue to Review Plan",
+        ),
+    ):
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index(step_name)
+        )
+        qapp.processEvents()
+        layout = button.parentWidget().layout()
+        item = layout.itemAt(layout.indexOf(button))
+
+        assert item.alignment() & Qt.AlignLeft
+        size_hint = button.sizeHint().width()
+        assert abs(button.width() - size_hint) <= max(8, size_hint // 10)
+        assert button.isVisibleTo(window)
+        assert button.text() == expected_text
+        assert button.isEnabled() is False
+        assert button.focusPolicy() & Qt.TabFocus
 
 
 def _populate_fake_discovery(window: MainWindow) -> None:
