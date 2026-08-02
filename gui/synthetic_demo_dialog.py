@@ -32,12 +32,22 @@ from gui.synthetic_demo_generator import (
 INTERMITTENT_CHOICE = "intermittent"
 CONTINUOUS_CHOICE = "continuous"
 DEMO_CHOICES = (
-    ("Intermittent recording, 48 hours", INTERMITTENT_CHOICE),
-    ("Continuous recording, 48 hours", CONTINUOUS_CHOICE),
+    ("Intermittent CSV demo", INTERMITTENT_CHOICE),
+    ("Continuous CSV demo", CONTINUOUS_CHOICE),
 )
 _DEMO_FOLDER_NAMES = {
     INTERMITTENT_CHOICE: GUIDED_DEMO_FOLDER_NAME,
     CONTINUOUS_CHOICE: GUIDED_CONTINUOUS_DEMO_FOLDER_NAME,
+}
+_DEMO_DESCRIPTIONS = {
+    INTERMITTENT_CHOICE: (
+        "Creates repeated CSV session files for the Guided repeated-sessions "
+        "workflow."
+    ),
+    CONTINUOUS_CHOICE: (
+        "Creates one continuous CSV recording for the Guided continuous-recording "
+        "workflow."
+    ),
 }
 
 
@@ -137,7 +147,11 @@ class GenerateSyntheticDemoDatasetDialog(QDialog):
 
     def _destination_hint(self) -> str:
         folder = _DEMO_FOLDER_NAMES[self.selected_recording_structure()]
-        return f"Select a destination. A folder named {folder} will be created inside it."
+        description = _DEMO_DESCRIPTIONS[self.selected_recording_structure()]
+        return (
+            f"{description}\n\n"
+            f"Select a destination. A folder named {folder} will be created inside it."
+        )
 
     def _on_structure_changed(self, _index: int) -> None:
         self._status_text.setPlainText(self._destination_hint())

@@ -188,6 +188,94 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         assert "Phasic Raw" not in tab_map
 
 
+def test_day_plot_captions_are_one_based_and_keep_filename_tooltips(qapp, tmp_path):
+    day_plots = tmp_path / "day_plots"
+    day_plots.mkdir()
+    paths = []
+    for filename in ("phasic_sig_iso_day_000.png", "phasic_sig_iso_day_001.png"):
+        path = day_plots / filename
+        pixmap = QPixmap(4, 4)
+        pixmap.fill(Qt.red)
+        assert pixmap.save(str(path), "PNG")
+        paths.append(str(path))
+
+    viewer = RunReportViewer()
+    try:
+        viewer._region_tab_images = {"Region0": {"Phasic Sig/Iso": paths}}
+        viewer._region_combo.addItem("Region0")
+        viewer._rebuild_tabs_for_selected_region()
+
+        assert viewer._image_title_label.text() == "Plotted day 1"
+        assert viewer._image_title_label.toolTip() == "phasic_sig_iso_day_000.png"
+
+        viewer._on_next_image()
+        assert viewer._image_title_label.text() == "Plotted day 2"
+        assert viewer._image_title_label.toolTip() == "phasic_sig_iso_day_001.png"
+    finally:
+        viewer.close()
+
+
+def test_unrecognized_day_plot_filename_falls_back_to_filename(qapp, tmp_path):
+    path = tmp_path / "phasic_sig_iso_unknown.png"
+    pixmap = QPixmap(4, 4)
+    pixmap.fill(Qt.blue)
+    assert pixmap.save(str(path), "PNG")
+
+    viewer = RunReportViewer()
+    try:
+        viewer._region_tab_images = {"Region0": {"Phasic Sig/Iso": [str(path)]}}
+        viewer._region_combo.addItem("Region0")
+        viewer._rebuild_tabs_for_selected_region()
+
+        assert viewer._image_title_label.text() == "phasic_sig_iso_unknown.png"
+        assert viewer._image_title_label.toolTip() == "phasic_sig_iso_unknown.png"
+    finally:
+        viewer.close()
+
+
+def test_ambiguous_results_tabs_have_concise_tooltips_and_report_action_is_unchanged(
+    qapp, monkeypatch, tmp_path
+):
+    viewer = RunReportViewer()
+    try:
+        viewer._region_tab_images = {
+            "Region0": {
+                "Phasic Sig/Iso": ["missing_raw.png"],
+                "Dynamic Fit": ["missing_fit.png"],
+                "Phasic dFF": ["missing_dff.png"],
+                "Phasic Stacked": ["missing_stacked.png"],
+                "Phasic Summary": ["missing_summary.png"],
+            }
+        }
+        viewer._region_combo.addItem("Region0")
+        viewer._rebuild_tabs_for_selected_region()
+
+        expected = {
+            "Phasic Sig/Iso": "Raw signal and reference traces for each plotted day.",
+            "Dynamic Fit": "Dynamic fitted reference used for phasic correction.",
+            "Phasic dFF": "Reference-corrected phasic dF/F trace for each plotted day.",
+            "Phasic Stacked": "Stacked phasic traces comparing the plotted days.",
+            "Phasic Summary": "Summary plots of phasic event activity across plotted days.",
+        }
+        for index in range(viewer._tabs.count()):
+            label = viewer._tabs.tabText(index)
+            assert viewer._tabs.tabToolTip(index) == expected[label]
+
+        assert viewer._open_run_report_btn.toolTip() == (
+            "Open the saved analysis report for this run."
+        )
+        report_path = tmp_path / "run_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+        opened = []
+        viewer._run_summary_path = str(report_path)
+        viewer._refresh_inline_actions()
+        monkeypatch.setattr(viewer, "_open_path", opened.append)
+        viewer._open_run_report_btn.click()
+        assert opened == [str(report_path)]
+    finally:
+        viewer.close()
+
+
 def test_run_report_viewer_status_labels_tuning_prep(qapp):
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "run_report.json"), "w", encoding="utf-8") as f:

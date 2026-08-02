@@ -193,6 +193,12 @@ import dataclasses
 from typing import Callable, get_args
 
 
+GUIDED_INTERMITTENT_RUN_WARNING = (
+    "Guided intermittent analysis cannot be stopped from the GUI once it "
+    "starts. Do not close this window."
+)
+
+
 # Display names live in photometry_pipeline so the completed-run Review
 # formatters can use the same ones (the pipeline package must not import the
 # GUI). Re-exported here because this module is where they are consumed.
@@ -5388,6 +5394,7 @@ class MainWindow(QMainWindow):
     def _refresh_guided_navigation_state(self) -> None:
         if not hasattr(self, "_guided_workflow_stepper"):
             return
+        self._refresh_guided_intermittent_run_warning()
         reached = getattr(self, "_guided_reached_step_indices", {0})
         for index in range(self._guided_workflow_stepper.count()):
             item = self._guided_workflow_stepper.item(index)
@@ -17880,6 +17887,7 @@ class MainWindow(QMainWindow):
         repair, or from a prior bespoke-path run) must still never remain
         visible while a different/new setup is being prepared.
         """
+        self._refresh_guided_intermittent_run_warning()
         # A completed continuous run has no intermittent execution result, so
         # this cleanup would otherwise discard the results-folder handoff that
         # run just published. Its own invalidation hook still clears it when
@@ -17958,6 +17966,12 @@ class MainWindow(QMainWindow):
             )
         if label is not None:
             label.setText(summary)
+
+    def _refresh_guided_intermittent_run_warning(self) -> None:
+        label = getattr(self, "_guided_intermittent_run_warning_label", None)
+        if label is None:
+            return
+        label.setVisible(self._guided_effective_acquisition_mode() != "continuous")
 
     def _current_guided_startup_transaction_request(self):
         """Return only a retained request bound to the current ready state."""
@@ -23800,6 +23814,20 @@ class MainWindow(QMainWindow):
             self._on_guided_run_clicked_backend_guarded
         )
         run_layout.addWidget(self._guided_run_btn, alignment=Qt.AlignLeft)
+        self._guided_intermittent_run_warning_label = QLabel(
+            GUIDED_INTERMITTENT_RUN_WARNING
+        )
+        self._guided_intermittent_run_warning_label.setObjectName(
+            "guidedIntermittentRunWarning"
+        )
+        self._guided_intermittent_run_warning_label.setWordWrap(True)
+        self._guided_intermittent_run_warning_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_intermittent_run_warning_label.setVisible(
+            self._guided_effective_acquisition_mode() != "continuous"
+        )
+        run_layout.addWidget(self._guided_intermittent_run_warning_label)
         # CR1-E3: shown only while a continuous recording is being prepared
         # or run, both of which can take minutes. Cooperative stop only: it
         # asks the accepted builders/backends to stop at their own next

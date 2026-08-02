@@ -50,7 +50,11 @@ from photometry_pipeline.guided_completed_applied_dff_reload import (
     format_guided_completed_applied_dff_summary,
     format_guided_completed_applied_dff_technical_details,
 )
-from photometry_pipeline.guided_display_labels import format_display_label
+from photometry_pipeline.guided_display_labels import (
+    feature_event_signal_display_label,
+    feature_threshold_method_display_label,
+    format_display_label,
+)
 from photometry_pipeline.guided_completed_feature_event_reload import (
     load_guided_completed_feature_event_state,
     GuidedCompletedFeatureEventState,
@@ -85,6 +89,15 @@ TAB_PHASIC_DFF = "Phasic dFF"
 TAB_PHASIC_STACKED = "Phasic Stacked"
 TAB_PHASIC_SUMMARY = "Phasic Summary"
 TAB_CONTINUOUS_TRACE = "Continuous Trace"
+
+_RESULT_TAB_TOOLTIPS = {
+    TAB_PHASIC_RAW: "Raw signal and reference traces for each plotted day.",
+    TAB_PHASIC_DYNAMIC_FIT: "Dynamic fitted reference used for phasic correction.",
+    TAB_PHASIC_CORRECTION_REFERENCE: "Reference trace used for phasic correction.",
+    TAB_PHASIC_DFF: "Reference-corrected phasic dF/F trace for each plotted day.",
+    TAB_PHASIC_STACKED: "Stacked phasic traces comparing the plotted days.",
+    TAB_PHASIC_SUMMARY: "Summary plots of phasic event activity across plotted days.",
+}
 
 TAB_ORDER = [
     TAB_VERIFICATION,
@@ -306,7 +319,7 @@ class RunReportViewer(QWidget):
         selector_row.addWidget(self._region_combo, 1)
         self._open_run_report_btn = QPushButton("Run Report")
         self._open_run_report_btn.setToolTip(
-            "Open run_report.json (or MANIFEST.json fallback) for this run."
+            "Open the saved analysis report for this run."
         )
         self._open_run_report_btn.clicked.connect(
             lambda _checked=False: self._open_path(self._run_summary_path)
@@ -1555,6 +1568,15 @@ class RunReportViewer(QWidget):
                     matches.append(p)
         return self._dedupe_sorted_existing(matches)
 
+    @staticmethod
+    def _day_plot_caption(filename: str) -> str:
+        """Return a one-based plotted-day caption when the filename supports it."""
+        name = os.path.basename(str(filename or ""))
+        match = re.search(r"_day_(\d+)\.png$", name, re.IGNORECASE)
+        if match is None:
+            return name
+        return f"Plotted day {int(match.group(1)) + 1}"
+
     def _on_region_changed(self, _index: int):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
@@ -1621,10 +1643,15 @@ class RunReportViewer(QWidget):
             method = str(fields.get("peak_threshold_method") or "")
             source = str(row.get("source") or "default").lower()
             source_label = "Custom" if source == "override" else "Default"
-            self._selected_feature_settings_label.setText(
-                f"{source_label} feature settings"
-                + (f": {method} threshold." if method else ".")
-            )
+            summary = f"{source_label} feature settings"
+            if method:
+                summary += (
+                    f": {feature_threshold_method_display_label(method)} threshold"
+                )
+            signal = str(fields.get("event_signal") or "").strip().lower()
+            if signal:
+                summary += f"; event signal {feature_event_signal_display_label(signal)}"
+            self._selected_feature_settings_label.setText(summary + ".")
             self._selected_feature_settings_label.setVisible(True)
             return
         if model is None or not roi:
@@ -1837,7 +1864,10 @@ class RunReportViewer(QWidget):
         while self._tabs.count() > 0:
             self._tabs.removeTab(0)
         for tab_name in available_tabs:
-            self._tabs.addTab(QWidget(), tab_name)
+            tab_index = self._tabs.addTab(QWidget(), tab_name)
+            tooltip = _RESULT_TAB_TOOLTIPS.get(tab_name)
+            if tooltip:
+                self._tabs.setTabToolTip(tab_index, tooltip)
         self._tabs.blockSignals(False)
 
         if not available_tabs:
@@ -1877,7 +1907,10 @@ class RunReportViewer(QWidget):
         while self._tabs.count() > 0:
             self._tabs.removeTab(0)
         for label in labels:
-            self._tabs.addTab(QWidget(), label)
+            tab_index = self._tabs.addTab(QWidget(), label)
+            tooltip = _RESULT_TAB_TOOLTIPS.get(label)
+            if tooltip:
+                self._tabs.setTabToolTip(tab_index, tooltip)
         self._tabs.blockSignals(False)
         if not labels:
             self._show_no_image("No saved artifacts are available for the selected region.")
@@ -1930,7 +1963,9 @@ class RunReportViewer(QWidget):
 
         path = images[idx]
         self._active_image_path = path
-        self._image_title_label.setText(os.path.basename(path))
+        filename = os.path.basename(path)
+        self._image_title_label.setText(self._day_plot_caption(filename))
+        self._image_title_label.setToolTip(filename)
         self._set_zoom_mode(False)
         self._set_image(path)
 
@@ -1970,6 +2005,7 @@ class RunReportViewer(QWidget):
                 else label
             )
             self._image_title_label.setText(title)
+            self._image_title_label.setToolTip(os.path.basename(path))
             self._set_zoom_mode(False)
             self._set_image(path)
             return
@@ -1981,6 +2017,7 @@ class RunReportViewer(QWidget):
             self._image_scroll.setVisible(False)
             self._artifact_table_scroll.setVisible(True)
             self._image_title_label.setText(str(record.get("label") or "Saved table"))
+            self._image_title_label.setToolTip(os.path.basename(path))
             try:
                 rows, total_rows = self._read_saved_csv_table(path)
             except (OSError, csv.Error, ValueError) as exc:
@@ -2179,6 +2216,7 @@ class RunReportViewer(QWidget):
         self._active_pixmap = QPixmap()
         self._artifact_metadata_label.setText("")
         self._artifact_metadata_label.setVisible(False)
+        self._image_title_label.setToolTip("")
         self._artifact_table_scroll.setVisible(False)
         self._image_scroll.setVisible(True)
         self._artifact_table.setRowCount(0)
@@ -2219,6 +2257,9 @@ class RunReportViewer(QWidget):
 
     def _refresh_inline_actions(self) -> None:
         self._set_open_button_state(self._open_run_report_btn, self._run_summary_path)
+        self._open_run_report_btn.setToolTip(
+            "Open the saved analysis report for this run."
+        )
         region = self._selected_region()
         region_path = self._region_paths.get(region, "")
         self._set_open_button_state(

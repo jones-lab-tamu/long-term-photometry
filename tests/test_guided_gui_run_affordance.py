@@ -13,7 +13,7 @@ import photometry_pipeline.guided_startup_materialization as materialization
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import photometry_pipeline.pipeline as pipeline
 import tools.run_full_pipeline_deliverables as wrapper
-from gui.main_window import MainWindow
+from gui.main_window import GUIDED_INTERMITTENT_RUN_WARNING, MainWindow
 from gui.run_report_parser import classify_completed_run_candidate
 from tests.test_gui_guided_backend_validation_context import _accepted_outcome
 from tests.test_guided_startup_transaction import startup_request
@@ -137,6 +137,27 @@ def test_ready_hidden_enables_guarded_button(window, startup_request):
     assert window._guided_run_readiness_label.text() == (
         "Guided Run is ready to start."
     )
+
+
+def test_intermittent_run_warning_is_visible_before_run(window):
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    window._refresh_guided_run_readiness_display()
+
+    assert window._guided_intermittent_run_warning_label.isHidden() is False
+    assert window._guided_intermittent_run_warning_label.text() == (
+        GUIDED_INTERMITTENT_RUN_WARNING
+    )
+
+
+def test_continuous_run_does_not_show_intermittent_warning(window):
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("continuous")
+    )
+    window._refresh_guided_run_readiness_display()
+
+    assert window._guided_intermittent_run_warning_label.isHidden() is True
 
 
 def test_enabled_click_without_retained_request_calls_no_execution_path(

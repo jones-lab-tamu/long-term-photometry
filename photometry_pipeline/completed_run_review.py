@@ -35,6 +35,10 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 from photometry_pipeline.guided_completed_feature_event_reload import (
     load_guided_completed_feature_event_state,
 )
+from photometry_pipeline.guided_display_labels import (
+    feature_event_signal_display_label,
+    feature_threshold_method_display_label,
+)
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingDescription,
     NormalizedRecordingError,
@@ -468,12 +472,9 @@ class CompletedRunReviewModel:
         source = str(row.get("source", "")).strip().lower()
         source_label = "Custom feature settings" if source == "override" else "Default feature settings"
         method = str(fields.get("peak_threshold_method", "mean_std")).strip().lower()
-        method_labels = {
-            "mean_std": "mean ± SD threshold",
-            "percentile": "percentile threshold",
-            "absolute": "absolute threshold",
-        }
-        method_label = method_labels.get(method, "configured threshold")
+        method_label = feature_threshold_method_display_label(method)
+        if not method_label:
+            method_label = "configured threshold"
         threshold_key = {
             "mean_std": "peak_threshold_k",
             "percentile": "peak_threshold_percentile",
@@ -481,9 +482,9 @@ class CompletedRunReviewModel:
         }.get(method)
         threshold = fields.get(threshold_key, "") if threshold_key else ""
         signal = str(fields.get("event_signal", "dff")).strip().lower()
-        signal_label = {"dff": "dF/F", "delta_f": "delta F"}.get(signal, signal or "selected trace")
+        signal_label = feature_event_signal_display_label(signal) or "selected trace"
         threshold_text = f" ({threshold:g})" if isinstance(threshold, (int, float)) else (f" ({threshold})" if threshold else "")
-        return f"{source_label}: {method_label}{threshold_text}; event signal {signal_label}."
+        return f"{source_label}: {method_label} threshold{threshold_text}; event signal {signal_label}."
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

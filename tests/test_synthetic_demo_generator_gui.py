@@ -512,6 +512,17 @@ def test_dialog_has_one_fixed_guided_flow_and_no_rwd_presets(qapp):
         assert [combo.objectName() for combo in combos] == [
             "recording_structure_combo"
         ]
+        structure_combo = combos[0]
+        assert [
+            structure_combo.itemText(index)
+            for index in range(structure_combo.count())
+        ] == ["Intermittent CSV demo", "Continuous CSV demo"]
+        assert "repeated CSV session files" in dialog._status_text.toPlainText()
+        assert "Guided repeated-sessions workflow" in dialog._status_text.toPlainText()
+        structure_combo.setCurrentIndex(1)
+        assert "one continuous CSV recording" in dialog._status_text.toPlainText()
+        assert "Guided continuous-recording workflow" in dialog._status_text.toPlainText()
+        assert "will be created inside it" in dialog._status_text.toPlainText()
         assert [
             widget.objectName() for widget in dialog.findChildren(QLineEdit)
         ] == ["output_folder_edit"]

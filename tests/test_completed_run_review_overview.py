@@ -169,6 +169,7 @@ def test_viewer_orients_first_then_loads_one_selected_review_image(
                 "CH1": {
                     "source": "default",
                     "effective_config_fields": {
+                        "event_signal": "dff",
                         "peak_threshold_method": "mean_std"
                     },
                 }
@@ -194,6 +195,14 @@ def test_viewer_orients_first_then_loads_one_selected_review_image(
         assert "Default feature settings" in (
             viewer._selected_feature_settings_label.text()
         )
+        assert "mean + standard-deviation threshold" in (
+            viewer._selected_feature_settings_label.text()
+        )
+        assert "dF/F" in viewer._selected_feature_settings_label.text()
+        assert "mean_std" not in viewer._selected_feature_settings_label.text()
+        assert overview["feature_settings_by_roi"]["CH1"][
+            "effective_config_fields"
+        ]["peak_threshold_method"] == "mean_std"
     finally:
         viewer.close()
         viewer.deleteLater()
