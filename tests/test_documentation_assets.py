@@ -20,17 +20,10 @@ DOC_PATHS = [
 ]
 
 README_LINKS = [
-    "docs/quickstart_gui_synthetic.md",
-    "examples/data/synthetic_photometry_basic/",
-    "docs/synthetic_dataset_generator_cli.md",
-    "docs/synthetic_demo_datasets.md",
     "docs/input_formats.md",
-    "docs/custom_tabular_conversion_guide.md",
     "docs/correction_and_dynamic_fit.md",
     "docs/event_detection.md",
     "docs/continuous_recordings.md",
-    "docs/batch_processing.md",
-    "examples/standalone_dynamic_fit_slope_constraint.py",
 ]
 
 
@@ -81,9 +74,47 @@ def test_nonnegative_slope_constraint_docs_are_diagnostic_not_correction_fix():
 
 def test_readme_documentation_links_point_to_existing_local_paths():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    lower = readme.lower()
+
     for rel in README_LINKS:
         assert rel in readme
         assert (REPO_ROOT / rel).exists(), rel
+
+    assert "guided is the recommended workflow" in lower
+    assert re.search(r"full control.*expert.*backward-compatible", lower, re.DOTALL)
+
+    assert "| RWD | Supported | Supported |" in readme
+    assert "| Neurophotometrics | Supported | Not currently supported |" in readme
+    assert "| CSV files | Supported | Supported |" in readme
+    assert re.search(
+        r"continuous\s+neurophotometrics\s+input\s+is\s+not\s+currently\s+supported",
+        lower,
+    )
+
+    assert "requirements_gui.txt" in readme
+    assert "python -m gui.app" in readme
+    assert "Tools -> Generate Guided Demo Dataset" in readme
+
+    guided_steps = (
+        "Start",
+        "Select data",
+        "Recording structure",
+        "Correction approach",
+        "Feature detection",
+        "Review plan",
+        "Run",
+        "Review",
+    )
+    for index, step in enumerate(guided_steps, start=1):
+        assert f"{index}. **{step}**" in readme
+
+    assert "custom_tabular" not in lower
+    assert "tuning_prep" not in lower
+    assert "run_full_pipeline_deliverables.py" not in lower
+    assert "--validate-only" not in lower
+    assert "--sessions-per-hour" not in lower
+    assert "manifest.json" not in lower
+    assert not re.search(r"one\s+csv(?:\s+file)?\s*=\s*one\s+session", lower)
 
 
 def test_synthetic_generator_cli_docs_clarify_long_demo_wrapper_and_config_contract():
