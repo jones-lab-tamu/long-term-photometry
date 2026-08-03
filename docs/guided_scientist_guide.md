@@ -110,6 +110,10 @@ step gives two entry points:
 - Set up a new analysis from raw or input data.
 - Open results from a completed run for review.
 
+![Guided Start step](images/guided/guided-start.png)
+
+*Start shows the two Guided entry points.*
+
 Choose the new-analysis path to configure or run analysis. Choose the
 completed-results path to inspect a finished run. Opening completed results
 does not configure a new analysis, validate a new request, or launch another
@@ -160,6 +164,10 @@ In Guided, you identify the time, signal, and reference columns for each ROI.
 When CSV files are selected or detected, Guided shows the Interpret CSV columns
 area. Map the fields that the application needs:
 
+![Guided Select data step showing CSV mapping controls](images/guided/guided-select-data.png)
+
+*Select data shows the source, structure, output, and CSV mapping controls.*
+
 - Time column: the column containing elapsed time.
 - Time units: seconds or milliseconds.
 - ROI name: the label you want to see in the workflow and results.
@@ -200,6 +208,10 @@ layout is compatible.
 Select ROIs lists the ROIs found in the recording. Choose the ROIs you want
 included in the analysis.
 
+![Guided ROI selection after discovery](images/guided/guided-roi-selection.png)
+
+*ROI selection shows the discovered channel and the recording-order confirmation.*
+
 Continue when the source, structure, ROI list, and required CSV order
 confirmation match the intended dataset.
 
@@ -208,6 +220,10 @@ confirmation match the intended dataset.
 Recording Structure keeps settings that depend on the organization chosen in
 Select data. Detected timing and Use detected timing are starting points; check
 them against the acquisition schedule.
+
+![Guided Recording structure step](images/guided/guided-recording-structure.png)
+
+*Recording structure exposes session timing and timeline placement choices.*
 
 ### For repeated sessions
 
@@ -345,6 +361,14 @@ different correction strategies. If the signal/reference mapping appears wrong
 or the corrected trace remains scientifically implausible, fix the mapping or
 reconsider the correction choice before continuing.
 
+![Guided correction preview evidence](images/guided/guided-correction-preview.png)
+
+*Review the reference-based correction evidence before choosing a method.*
+
+![Guided correction strategy confirmation](images/guided/guided-correction-confirmation.png)
+
+*Confirm the selected correction strategy separately for each included ROI.*
+
 ## 8. Review Feature Detection
 
 ### What a detected feature means
@@ -439,6 +463,10 @@ Review plan can report that the setup is complete while your scientific review
 is still incomplete. Software readiness and scientific readiness are separate.
 Choose Go to Run after the visible plan and your review agree.
 
+![Guided Review plan step](images/guided/guided-review-plan.png)
+
+*Review plan gathers the selected source, timing, correction, and output choices.*
+
 ## 10. Run the analysis
 
 Run begins with Check my setup. This check uses the current setup and the
@@ -456,6 +484,10 @@ For intermittent analysis, the GUI warns that the analysis cannot be stopped
 from the GUI once it starts. Do not close the window while it is running. Plan
 enough uninterrupted time for the run.
 
+![Guided intermittent run in progress](images/guided/guided-run-active.png)
+
+*An intermittent run reports its current phase while the window remains open.*
+
 For continuous analysis, the Stop button appears while preparation or analysis
 is active. Stop requests a stop at the next safe point, so it can take a
 moment. It is a cooperative stop, not an immediate termination. Wait for the
@@ -470,6 +502,14 @@ not load as a completed run.
 
 Review summarizes completed-run outputs when results are loaded. Use the ROI
 selector to inspect each included ROI. The normal result views can include:
+
+![Guided Results workspace with Phasic Summary selected](images/guided/guided-results-summary.png)
+
+*The selected ROI's Summary view shows event activity across the recording.*
+
+![Guided Results workspace with Verification selected](images/guided/guided-results-verification.png)
+
+*Results provides the ROI selector and the Verification view for the completed run.*
 
 - Verification provides a visual review of the completed correction result. It
   shows representative signal, reference or correction baseline, and dF/F
