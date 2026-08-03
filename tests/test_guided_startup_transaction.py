@@ -18,6 +18,9 @@ from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from photometry_pipeline.guided_manifest_verification import (
     load_guided_candidate_manifest,
 )
+from photometry_pipeline.guided_production_mapping import (
+    GuidedProductionConfirmedMark,
+)
 from tests.test_guided_execution_payloads import (
     _accepted_candidate,
     _accepted_roi,
@@ -116,6 +119,51 @@ def test_valid_request_produces_pure_non_effectful_plan(startup_request):
             result.no_gui_mutation,
         )
     )
+
+
+def test_confirmed_signal_only_without_native_map_is_refused(startup_request):
+    authority = startup_request.startup_authority
+    intent = authority.rwd.production_intent
+    correction = replace(
+        intent.correction,
+        production_strategy_map_version="",
+        per_roi_production_strategy_map=(),
+        confirmed_marks=(
+            GuidedProductionConfirmedMark(
+                roi_id="Region0",
+                selected_dynamic_fit_mode="signal_only_f0",
+                diagnostic_cache_id="cache",
+                source_setup_signature="setup",
+                diagnostic_scope_signature="scope",
+                build_request_signature="build",
+                evidence_reference_id="evidence",
+                evidence_chunk=0,
+                explicit_user_mark=True,
+                current=True,
+            ),
+        ),
+    )
+    mutated_intent = replace(intent, correction=correction)
+    mutated_authority = GuidedStartupAuthority(
+        rwd=replace(authority.rwd, production_intent=mutated_intent)
+    )
+    with pytest.raises(ValueError, match="per-ROI"):
+        startup.resolve_guided_correction_contract(mutated_authority)
+
+
+def test_unsupported_native_correction_map_version_is_refused(startup_request):
+    authority = startup_request.startup_authority
+    intent = authority.rwd.production_intent
+    correction = replace(
+        intent.correction,
+        production_strategy_map_version="guided_per_roi_correction.unsupported.v2",
+    )
+    mutated_intent = replace(intent, correction=correction)
+    mutated_authority = GuidedStartupAuthority(
+        rwd=replace(authority.rwd, production_intent=mutated_intent)
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        startup.resolve_guided_correction_contract(mutated_authority)
 
 
 def test_startup_command_and_provenance_carry_timeline_authority(startup_request):

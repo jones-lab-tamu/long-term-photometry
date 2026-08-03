@@ -2049,6 +2049,12 @@ class Pipeline:
                      "roi_id": roi_name,
                      "strategy_family": str(spec.strategy_family),
                      "selected_strategy": str(spec.selected_strategy),
+                     "applied_strategy": str(spec.selected_strategy),
+                     "applied_correction_source": (
+                         "signal_only_f0_baseline"
+                         if spec.strategy_family == "signal_only_f0"
+                         else "fitted_reference"
+                     ),
                      "dynamic_fit_mode": (
                          str(spec.dynamic_fit_mode)
                          if spec.dynamic_fit_mode is not None

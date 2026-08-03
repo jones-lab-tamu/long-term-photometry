@@ -390,6 +390,21 @@ def test_valid_equal_provenance_pair_classifies_current_success(native_run, tmp_
     assert classification.state == TERMINAL_SUCCESS_CURRENT
 
 
+def test_completion_refuses_applied_strategy_mismatch(native_run, tmp_path):
+    analysis, mode = native_run
+    root = _root_for_case(tmp_path, analysis, "applied_strategy_mismatch")
+    _write_terminal_set(root, mode)
+    with h5py.File(
+        root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5", "r+"
+    ) as cache:
+        cache["roi/Region1/chunk_0"].attrs["correction_applied_strategy"] = (
+            "global_linear_regression"
+        )
+    error = correction_completion_error(str(root), mode)
+    assert "applied strategy" in error.lower()
+    assert classify_run_terminal_state(str(root)).state != TERMINAL_SUCCESS_CURRENT
+
+
 def test_analysis_without_native_provenance_or_terminal_files_is_standalone(tmp_path):
     analysis = tmp_path / "historical_analysis"
     analysis.mkdir()

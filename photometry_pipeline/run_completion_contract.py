@@ -1172,6 +1172,15 @@ def _correction_completion_error_for_analysis(
                         return f"ROI {roi!r} session {cache_id} strategy family mismatches the request"
                     if _text_value(group.attrs.get("correction_selected_strategy", "")) != selected:
                         return f"ROI {roi!r} session {cache_id} selected strategy mismatches the request"
+                    if _text_value(group.attrs.get("correction_applied_strategy", "")) != selected:
+                        return f"ROI {roi!r} session {cache_id} applied strategy is missing or mismatches the request"
+                    expected_applied_source = (
+                        "signal_only_f0_baseline"
+                        if family == "signal_only_f0"
+                        else "fitted_reference"
+                    )
+                    if _text_value(group.attrs.get("correction_applied_source", "")) != expected_applied_source:
+                        return f"ROI {roi!r} session {cache_id} applied correction source is missing or mismatches the request"
                     for identity_key, attr_name in (
                         ("parameter_identity", "correction_parameter_identity"),
                         ("evidence_identity", "correction_evidence_identity"),

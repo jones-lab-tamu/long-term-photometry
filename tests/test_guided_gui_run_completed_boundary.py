@@ -1159,6 +1159,12 @@ def test_real_guided_native_correction_lifecycle_matrix(
                     for chunk_id in chunk_ids:
                         group = cache[f"roi/{roi}/chunk_{chunk_id}"]
                         assert group.attrs["correction_selected_strategy"] == selected
+                        assert group.attrs["correction_applied_strategy"] == selected
+                        assert group.attrs["correction_applied_source"] == (
+                            "signal_only_f0_baseline"
+                            if selected == "signal_only_f0"
+                            else "fitted_reference"
+                        )
                         assert "dff" in group
                         if selected == "signal_only_f0":
                             assert "signal_only_f0_baseline" in group

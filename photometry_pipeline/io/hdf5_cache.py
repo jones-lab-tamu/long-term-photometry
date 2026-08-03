@@ -444,6 +444,8 @@ class Hdf5TraceCacheWriter:
                             ('correction_execution_status', 'execution_status'),
                             ('correction_production_baseline_dataset', 'production_baseline_dataset'),
                             ('correction_production_baseline_source', 'production_baseline_source'),
+                            ('correction_applied_strategy', 'applied_strategy'),
+                            ('correction_applied_source', 'applied_correction_source'),
                             # Narrow addition for CR1-D1: the accepted
                             # continuous-RWD segment-correction kernel (C4b)
                             # carries a fallback chain (requested strategy may
@@ -452,7 +454,6 @@ class Hdf5TraceCacheWriter:
                             # no equivalent for. Both are optional (only
                             # present when consumed_meta supplies them), so
                             # existing intermittent producers are unaffected.
-                            ('correction_applied_strategy', 'applied_strategy'),
                             ('correction_fallback_path', 'fallback_path'),
                             ('correction_qc_json', 'qc_json'),
                         ):

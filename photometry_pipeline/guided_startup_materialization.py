@@ -19,7 +19,6 @@ from photometry_pipeline.guided_production_mapping import (
 from photometry_pipeline.guided_correction_payload import (
     GUIDED_PER_ROI_CORRECTION_FILENAME,
     load_guided_correction_payload,
-    serialize_guided_correction_payload,
 )
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
@@ -39,6 +38,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GuidedStartupPlanResult,
     GuidedStartupTransactionRequest,
     plan_guided_startup_transaction,
+    resolve_guided_correction_contract,
 )
 
 
@@ -480,35 +480,19 @@ def materialize_guided_startup_artifacts(
 
     authority = request.startup_authority
     included_roi_ids = authority.included_roi_ids
-    per_roi_correction_strategy_map = authority.per_roi_correction_strategy_map
-    # NPM was never part of the RWD legacy (pre-native-correction) era: it
-    # always resolves per-ROI, so it is always native_current -- a
-    # truthful fixed condition, not an invented strategy-map version (see
-    # guided_npm_startup_bridge and plan_guided_startup_transaction's
-    # identical rule).
-    native_current = (
-        True
-        if authority.is_npm
-        else bool(authority.rwd.production_intent.correction.production_strategy_map_version)
-    )
     try:
-        native_correction_bytes = (
-            serialize_guided_correction_payload(
-                included_roi_ids, per_roi_correction_strategy_map
-            )
-            if native_current else None
+        native_current, _positive_legacy, native_correction_bytes = (
+            resolve_guided_correction_contract(authority)
         )
-        if native_correction_bytes is None:
-            raise StopIteration
-        native_path = run_dir / GUIDED_PER_ROI_CORRECTION_FILENAME
-        native_hash = _write_exclusive(native_path, native_correction_bytes)
-        resolved = load_guided_correction_payload(native_path, included_roi_ids)
-        if set(resolved) != set(included_roi_ids):
-            raise ValueError("Native correction payload round-trip coverage mismatch.")
-        written.append(GUIDED_PER_ROI_CORRECTION_FILENAME)
-        hashes.append((GUIDED_PER_ROI_CORRECTION_FILENAME, native_hash))
-    except StopIteration:
-        pass
+        if native_current:
+            assert native_correction_bytes is not None
+            native_path = run_dir / GUIDED_PER_ROI_CORRECTION_FILENAME
+            native_hash = _write_exclusive(native_path, native_correction_bytes)
+            resolved = load_guided_correction_payload(native_path, included_roi_ids)
+            if set(resolved) != set(included_roi_ids):
+                raise ValueError("Native correction payload round-trip coverage mismatch.")
+            written.append(GUIDED_PER_ROI_CORRECTION_FILENAME)
+            hashes.append((GUIDED_PER_ROI_CORRECTION_FILENAME, native_hash))
     except Exception as exc:
         return _result(
             status="materialization_failed_partial", ok=False, materialized=False,
@@ -528,9 +512,9 @@ def materialize_guided_startup_artifacts(
     # retained on the dataclass only as inert deprecated input (see
     # guided_production_mapping.py) and no longer changes materialization
     # output. `positive_legacy` transactions (genuinely empty per-ROI map)
-    # still complete normally and fall back to historical global
-    # correction at Pipeline execution time; they no longer receive an
-    # applied-dF/F orchestration trigger file.
+    # still use the historical global correction at Pipeline execution time;
+    # a confirmed choice that differs from that global mode cannot enter this
+    # legacy shape.
 
     feature_event = authority.feature_event
     if feature_event.per_roi_feature_event_map:

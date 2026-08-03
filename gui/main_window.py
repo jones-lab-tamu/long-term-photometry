@@ -7725,10 +7725,10 @@ class MainWindow(QMainWindow):
             ),
             (
                 "Signal-Only F0",
-                "Diagnostic only",
+                "Preview evidence; production option by route",
                 "Additional evidence for cases where reference-based correction "
-                "may be inappropriate. It is not a current Guided Run "
-                "production route.",
+                "may be inappropriate. Signal-Only F0 can be confirmed per ROI "
+                "for production on supported Guided routes.",
                 "standard",
             ),
             (
@@ -7816,8 +7816,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(helper_label)
         if title == GUIDED_SIGNAL_ONLY_F0_CARD:
             stage_text = (
-                "Diagnostic only. Not used to produce the final analysis "
-                "output."
+                "Preview evidence for this method. A confirmed per-ROI choice "
+                "can be applied in production when the selected Guided route "
+                "supports it."
             )
         elif title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
             stage_text = (
@@ -7853,8 +7854,8 @@ class MainWindow(QMainWindow):
             select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
             select_btn.setToolTip(
                 "Includes Signal-Only F0 in the local correction preview "
-                "below. It is diagnostic-only and is not used to produce "
-                "the final analysis output."
+                "below. It can also be confirmed as an explicit per-ROI "
+                "production strategy on supported Guided routes."
             )
             select_btn.clicked.connect(self._select_guided_signal_only_f0_intent)
             self._guided_correction_select_buttons[title] = select_btn
@@ -7930,7 +7931,7 @@ class MainWindow(QMainWindow):
         self._refresh_guided_setup_summary()
 
     def _select_guided_signal_only_f0_intent(self) -> None:
-        """Signal-Only F0 is explicit future intent, not a Dynamic Fit Mode fallback."""
+        """Signal-Only F0 is explicit per-ROI intent, not a Dynamic Fit fallback."""
         previous_intent = self._guided_correction_intent
         self._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
         self._guided_diagnostics_status = "not_generated"
@@ -8409,8 +8410,9 @@ class MainWindow(QMainWindow):
 
         signal_intro = QLabel(
             "Use when the reference/control channel is not appropriate for "
-            "correction. You can review Signal-Only F0 here, but Guided Run "
-            "cannot execute it yet."
+            "correction. This local preview is diagnostic evidence. After "
+            "confirmation, supported Guided routes can apply Signal-Only F0 "
+            "per ROI in production."
         )
         signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
         signal_intro.setProperty("guidedSecondaryText", True)
@@ -10313,8 +10315,9 @@ class MainWindow(QMainWindow):
             f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
             f"<p><strong>Preview segment:</strong> "
             f"{html.escape(str(result.get('chunk_index', '')))}</p>"
-            "<p>You can review Signal-Only F0 here, but Guided Run cannot "
-            "execute it yet.</p>"
+            "<p>This local Signal-Only F0 preview is diagnostic evidence. "
+            "After confirmation, supported Guided routes can apply it per "
+            "ROI in production.</p>"
             f"<p>Status: {html.escape(str(result.get('status', '')))}</p>"
             f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
             "</body></html>"
@@ -14143,8 +14146,9 @@ class MainWindow(QMainWindow):
             f"Mode: {mode}\n"
             f"{source_label}: {source_identity or 'none'}\n"
             f"{reason}\n"
-            "Signal-Only F0 diagnostic review is evidence only; selecting Signal-Only F0 "
-            "remains manual strategy intent at this stage.\n"
+            "Signal-Only F0 preview is diagnostic evidence. A confirmed "
+            "Signal-Only F0 selection is an explicit per-ROI production "
+            "strategy when the selected Guided route supports it.\n"
             "Planning only: no manifest, applied-dF/F output, feature extraction, validation, or pipeline run."
         )
         visible_context = (
@@ -14693,9 +14697,10 @@ class MainWindow(QMainWindow):
                 in execution_categories
             ):
                 availability = (
-                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: Guided Run does not yet "
-                    "support an all-Signal-Only F0 analysis. Use Full "
-                    "Control for this configuration."
+                    f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: Signal-Only F0 is "
+                    "available as an explicit per-ROI production strategy on "
+                    "supported Guided routes. Review the route-specific "
+                    "readiness details before validation."
                 )
             elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
                 availability = (
@@ -14919,8 +14924,9 @@ class MainWindow(QMainWindow):
             in execution_categories
         ):
             next_text = (
-                "Guided Run does not yet support an all-Signal-Only F0 "
-                "analysis. Use Full Control for this configuration."
+                "Signal-Only F0 is available as an explicit per-ROI production "
+                "strategy on supported Guided routes. Review the route-specific "
+                "readiness details before validation."
             )
         elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
             next_text = GUIDED_REVIEW_DATASET_CONFIRMATION_MESSAGE
@@ -20010,7 +20016,7 @@ class MainWindow(QMainWindow):
                     )
                 elif issue.category == "signal_only_f0_execution_not_supported":
                     lines.append(
-                        "    Note: Signal-Only F0 remains planning/diagnostic only until applied-dF/F routing is designed."
+                        "    Note: Signal-Only F0 production requires explicit per-ROI confirmation on a supported Guided route."
                     )
         else:
             lines.append("Execution-subset blockers: none")

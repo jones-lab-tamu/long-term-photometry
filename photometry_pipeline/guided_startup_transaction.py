@@ -59,6 +59,9 @@ from photometry_pipeline.guided_npm_startup_bridge import GuidedStartupAuthority
 from photometry_pipeline.guided_production_mapping import (
     compute_guided_npm_production_execution_intent_identity,
 )
+from photometry_pipeline.guided_new_analysis_plan import (
+    PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
+)
 
 
 GUIDED_STARTUP_TRANSACTION_SCHEMA_NAME = "guided_startup_transaction"
@@ -92,6 +95,64 @@ GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME = (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def resolve_guided_correction_contract(
+    authority: GuidedStartupAuthority,
+) -> tuple[bool, bool, bytes | None]:
+    """Resolve and validate the correction contract used by startup.
+
+    A current native request must carry the canonical version and a complete
+    map.  The only remaining legacy shape is an empty map with no version and
+    either no confirmed choices or legacy marks that all explicitly select the
+    same global dynamic-fit mode; a different confirmed choice cannot safely
+    fall back to that global setting.
+    """
+    included_roi_ids = authority.included_roi_ids
+    entries = authority.per_roi_correction_strategy_map
+    if authority.is_npm:
+        try:
+            payload = serialize_guided_correction_payload(
+                included_roi_ids,
+                entries,
+            )
+        except Exception as exc:
+            raise ValueError(f"Native correction payload is invalid: {exc}") from exc
+        return True, False, payload
+
+    correction = authority.rwd.production_intent.correction
+    version = str(correction.production_strategy_map_version or "")
+    if not version and not entries:
+        confirmed_modes = tuple(
+            str(getattr(mark, "selected_dynamic_fit_mode", ""))
+            for mark in correction.confirmed_marks
+        )
+        global_mode = str(correction.global_dynamic_fit_mode or "")
+        if confirmed_modes and (
+            not global_mode or any(mode != global_mode for mode in confirmed_modes)
+        ):
+            raise ValueError(
+                "Confirmed per-ROI correction choices require a complete "
+                "native per-ROI correction map."
+            )
+        return False, True, None
+    if not version:
+        raise ValueError(
+            "Per-ROI correction entries are present without a map version."
+        )
+    if version != PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION:
+        raise ValueError(
+            "Per-ROI correction map version is unsupported: "
+            f"{version!r}."
+        )
+    try:
+        payload = serialize_guided_correction_payload(
+            included_roi_ids,
+            entries,
+        )
+    except Exception as exc:
+        raise ValueError(f"Native correction payload is invalid: {exc}") from exc
+    return True, False, payload
 
 
 @dataclass(frozen=True)
@@ -892,19 +953,15 @@ def plan_guided_startup_transaction(
     authority = request.startup_authority
     payload = request.payload_result
     intent = authority.npm_intent if authority.is_npm else authority.rwd.production_intent
-    per_roi_correction_strategy_map = authority.per_roi_correction_strategy_map
-    if authority.is_npm:
-        # NPM was never part of the RWD legacy (pre-native-correction)
-        # era: it always resolves per-ROI, so this is a truthful fixed
-        # condition, not an invented strategy-map version.
-        native_current = True
-        positive_legacy = False
-    else:
-        correction = authority.rwd.production_intent.correction
-        native_current = bool(correction.production_strategy_map_version)
-        positive_legacy = bool(
-            not correction.production_strategy_map_version
-            and not correction.per_roi_production_strategy_map
+    try:
+        native_current, positive_legacy, native_correction_bytes = (
+            resolve_guided_correction_contract(authority)
+        )
+    except ValueError as exc:
+        return _refused(
+            "native_correction_payload_invalid",
+            "correction",
+            str(exc),
         )
     effective_startup_contract_version = (
         GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
@@ -913,15 +970,11 @@ def plan_guided_startup_transaction(
         if positive_legacy
         else GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
     )
-    native_correction_bytes = None
     native_correction_sha256 = None
     native_correction_identity = None
     if native_current:
         try:
-            native_correction_bytes = serialize_guided_correction_payload(
-                authority.included_roi_ids,
-                per_roi_correction_strategy_map,
-            )
+            assert native_correction_bytes is not None
             native_correction_sha256 = _sha256_bytes(native_correction_bytes)
             native_correction_identity = json.loads(native_correction_bytes)[
                 "canonical_correction_payload_identity"
