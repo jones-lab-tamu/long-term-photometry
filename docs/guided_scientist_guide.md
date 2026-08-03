@@ -219,12 +219,22 @@ For repeated-session recording, review:
 These positive values place sessions on the timeline and must agree with the
 recording protocol.
 
-### Incomplete final recording session
+### If a repeated session is unusable
 
-The **Exclude one incomplete final recording session** option applies only to
-repeated-session RWD. It is intended for a final recording file that is shorter
-than expected. An earlier incomplete session still stops validation. Guided
-records the exclusion, and raw files are not modified.
+For repeated-session RWD, Neurophotometrics, and CSV recordings, Guided can
+continue when one already identified recording session cannot be used and the
+remaining sessions are usable. The unusable session is recorded as missing or
+corrupted. Its original time position is preserved, so the corresponding
+interval remains blank in summary plots and day plots, and later sessions do
+not shift earlier in time. The completed analysis reports that it was
+completed with missing sessions. No advance approval is required.
+
+Guided can also recognize some readable RWD sessions that are shorter than the
+expected recording interval.
+
+Guided stops instead of guessing when it cannot confidently determine which
+session failed, the correct session order, or the failed session's timeline
+position.
 
 ### For continuous recordings
 
@@ -270,7 +280,8 @@ duration, and session count or continuous duration against the experimental
 record.
 
 Continue when required timing fields and timeline choice are valid. If you use
-the repeated-session RWD exclusion, confirm that decision is intentional.
+the repeated-session structure, confirm that the session order and timing
+match the experimental record.
 
 ## 7. Review the correction approach
 
@@ -494,7 +505,7 @@ view. Inspect both the overview and the per-window summaries when judging long
 recordings.
 
 Relate outputs to the experiment. Check timeline placement, correction,
-event summaries, and missing or excluded sessions against the protocol.
+event summaries, and missing sessions against the protocol.
 Preserve the output location and settings summary with the experiment record.
 
 ## 12. Common verified problems
