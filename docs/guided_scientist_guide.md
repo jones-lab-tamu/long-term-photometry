@@ -2,9 +2,8 @@
 
 This is the canonical, scientist-facing guide to the Guided workflow in Long-Term
 Photometry Analysis. It describes the controls that are visible in the current
-application and the decisions that remain with the scientist. It is written for
-someone who wants to analyze long-duration fiber photometry recordings without
-learning the application's internal implementation.
+application and the decisions that remain with the scientist. This guide
+explains how to use Guided to analyze long-duration fiber photometry recordings.
 
 Guided is the recommended workflow for a new analysis. Full Control remains
 available for expert users and backward-compatible workflows, but it is outside
@@ -49,9 +48,9 @@ then select the generated folder in Select data. Its choices are Intermittent
 CSV demo for repeated sessions and Continuous CSV demo for one continuous
 recording.
 
-A passed setup check means that the current request is software-ready for the
-selected Guided route. It does not make the data scientifically valid and does
-not replace inspection of the recording or the results.
+A passed setup check means that the selected analysis is software-ready in
+Guided. It does not make the data scientifically valid and does not replace
+inspection of the recording or the results.
 
 ## 2. Supported data and key terms
 
@@ -73,9 +72,8 @@ Do not force a continuous recording through the repeated-session option.
 
 RWD can be used for either repeated sessions or one continuous recording when
 the selected folder follows the source organization recognized by the
-application. CSV files can also be used for either structure, but they are
-mapped explicitly in Guided rather than interpreted as an arbitrary vendor
-export.
+application. CSV files can also be used for either structure. In Guided, you
+identify the time, signal, and reference columns for each ROI.
 
 An ROI is one signal/reference pair analyzed separately. Depending on the
 system, it may correspond to a fiber, recording site, region label, or channel.
@@ -137,10 +135,11 @@ The visible controls are:
 
 ### Choose the input folder
 
-Choose the RWD folder organized as supported recording/session data, the
-Neurophotometrics folder containing supported repeated session exports, or the
-CSV folder containing candidate files. The application inspects the folder for
-source information and ROIs; it does not make arbitrary exports native.
+Select the folder containing the recordings you want to analyze. For RWD, choose
+the folder organized as supported recording/session data. For Neurophotometrics,
+choose the folder containing supported repeated-session exports. For CSV, choose
+the folder containing the CSV recordings. The application inspects the selected
+folder to identify the recording source and available ROIs.
 
 Use Detect automatically when you want the application to inspect the selected
 folder. If you already know the organization, choose repeated sessions or one
@@ -154,6 +153,9 @@ for verification. If it is wrong, return to Select data and change it. Input
 files are not overwritten.
 
 ### CSV column mapping
+
+CSV input can represent either repeated sessions or one continuous recording.
+In Guided, you identify the time, signal, and reference columns for each ROI.
 
 When CSV files are selected or detected, Guided shows the Interpret CSV columns
 area. Map the fields that the application needs:
@@ -179,8 +181,8 @@ For example, real column names can differ, but the conceptual mapping is:
 | ROI 2 reference | Isosbestic_2 |
 
 Automatic CSV structure has a specific current behavior. With format and
-structure left automatic, one candidate CSV file defaults to a continuous
-recording and multiple candidate CSV files default to repeated sessions. You
+structure left automatic, one CSV recording file defaults to a continuous
+recording and multiple CSV recording files default to repeated sessions. You
 can choose the recording structure yourself when the files do not match that
 convention. A continuous CSV selection should identify one recording CSV. A
 folder containing multiple CSV session files should normally be treated as
@@ -195,9 +197,8 @@ layout is compatible.
 
 ### ROIs
 
-Select ROIs scans the input folder and lists channels found in the data. Include
-only the intended ROIs and confirm their signal/reference pairing, especially
-when different files use similar names.
+Select ROIs lists the ROIs found in the recording. Choose the ROIs you want
+included in the analysis.
 
 Continue when the source, structure, ROI list, and required CSV order
 confirmation match the intended dataset.
@@ -210,7 +211,7 @@ them against the acquisition schedule.
 
 ### For repeated sessions
 
-For intermittent/session-based recording, review:
+For repeated-session recording, review:
 
 - Sessions per hour
 - Session duration (s)
@@ -218,10 +219,12 @@ For intermittent/session-based recording, review:
 These positive values place sessions on the timeline and must agree with the
 recording protocol.
 
-If the final RWD recording session is shorter than expected, Final recording
-session can explicitly exclude that one incomplete session. Use it only for
-the last file; earlier incomplete sessions still stop validation. Raw files are
-not modified.
+### Incomplete final recording session
+
+The **Exclude one incomplete final recording session** option applies only to
+repeated-session RWD. It is intended for a final recording file that is shorter
+than expected. An earlier incomplete session still stops validation. Guided
+records the exclusion, and raw files are not modified.
 
 ### For continuous recordings
 
@@ -237,57 +240,72 @@ treats the source as one continuous trace, not separate acquisition sessions.
 
 ### Timeline placement
 
-Timeline placement controls how repeated recordings are displayed in time. The
-Time display choices are:
+Timeline placement controls how recordings are displayed in time. The Time
+display choices are:
 
 - Fixed daily anchor: place each day relative to the selected circadian-day
   start.
 - Civil clock: use actual clock time with midnight as the day boundary.
 - Elapsed from first recording: start the plot at the first recording.
 
-When needed, enter Start of plotted day as HH:MM. For RWD, Guided can prefill
-Clock time at recording start from a validated timestamp. Check or edit it
-when metadata or displayed time disagree with the experiment. Gaps, day
-boundaries, and session placement should agree with the schedule.
+When needed, enter Start of plotted day as HH:MM. Gaps, day boundaries, and
+session placement should agree with the schedule.
+
+### Clock time at recording start
+
+Repeated-session and continuous RWD can prefill the visible Clock time at
+recording start field from a validated recording timestamp. The field remains
+editable.
+
+For repeated Neurophotometrics, Guided uses its validated first recording
+timestamp in the analysis plan when Civil clock or Fixed daily anchor placement
+is used. It does not use the same visible RWD prefill control. CSV does not
+provide an absolute recording-start timestamp that Guided can use in the
+supported workflow, so Civil clock or Fixed daily anchor placement requires
+manual clock entry. Elapsed from first recording does not require an absolute
+recording-start clock.
 
 Before continuing, verify the structure, order, recording start, plausible total
 duration, and session count or continuous duration against the experimental
 record.
 
-Continue when required timing fields and timeline choice are valid and any
-incomplete-final-session decision is intentional.
+Continue when required timing fields and timeline choice are valid. If you use
+the repeated-session RWD exclusion, confirm that decision is intentional.
 
 ## 7. Review the correction approach
 
 ### What correction means
 
 Correction reduces shared signal/reference structure before phasic
-interpretation. This step presents cards, a local preview, and per-ROI strategy
-confirmation; it does not start final analysis.
+interpretation. This step presents the available correction approaches, a local
+preview, and per-ROI strategy confirmation; it does not start final analysis.
 
-The current cards communicate different levels of readiness:
+The available approaches are:
 
 - Robust Global Event-Reject Fit carries the Default label and is the
   recommended starting point. It fits the reference relationship while
-  excluding event-like periods.
-- Adaptive Event-Gated Fit is a Candidate for recordings where the
-  signal-reference relationship may change over time. Inspect its evidence.
-- Global Linear Regression is a baseline comparison and is not recommended for
-  most long-duration recordings; its label is not an endorsement.
-- Signal-Only F0 is available as a diagnostic comparison in the local preview,
-  and it can also be an executable per-ROI production choice on the
-  repeated/session Neurophotometrics route and the continuous RWD route,
-  including supported mixed per-ROI plans. A preview selection by itself is
-  not production authorization; the selected route must accept the choice.
-- Decision-Support Audit is marked Coming later and currently provides
-  read-only evidence. It does not run analysis or choose a strategy.
+  excluding event-like periods; compare its local preview with the other
+  approaches before confirming a strategy.
+- Adaptive Event-Gated Fit is included for recordings where the
+  signal-reference relationship may change over time. Compare its local preview
+  with the other approaches before confirming a strategy.
+- Global Linear Regression is included as a baseline comparison and is generally
+  not recommended for long-duration recordings. Compare its local preview with
+  the other approaches before confirming a strategy.
+- Signal-Only F0 is available for local comparison and can be selected as an
+  explicit per-ROI correction strategy in Guided. The local preview is
+  diagnostic evidence for comparison. Final analysis
+  recomputes the correction across the complete recording and does not reuse
+  the preview trace. Signal-Only F0 does not use the reference channel for
+  correction. Select it independently for each ROI; mixed per-ROI plans are
+  supported.
 
 ### Read the preview
 
-The preview compares selected methods on one recording segment. Choose the ROI,
-Preview segment, methods, and Generate correction preview. It includes the
-reference-based methods and Signal-Only F0 for diagnostic comparison. It is
-local evidence and does not modify source data or start final analysis.
+The preview compares selected approaches on one recording segment. Choose the
+ROI, Preview segment, approaches, and Generate correction preview. The preview
+is diagnostic evidence for the selected segment; it does not modify source data
+or start final analysis.
 
 ### Compare representative windows
 
@@ -308,12 +326,13 @@ appropriate.
 
 ### Choose an approach for each ROI
 
-After comparing evidence, confirm one strategy for each included ROI. A method
-selected for preview is not automatically final for every ROI. The final
-Guided Run uses the complete selected recording set for the confirmed strategy,
-not only the preview segment. Do not continue when the signal/reference mapping
-appears wrong or the corrected trace remains scientifically implausible; fix
-the mapping or reconsider the correction choice first.
+After comparing the preview evidence, confirm one correction strategy for each
+included ROI. The approach selected for preview is not automatically final for
+every ROI. Guided Run recomputes the confirmed correction across the complete
+selected recording set, not only the preview segment. Different ROIs may use
+different correction strategies. If the signal/reference mapping appears wrong
+or the corrected trace remains scientifically implausible, fix the mapping or
+reconsider the correction choice before continuing.
 
 ## 8. Review Feature Detection
 
@@ -400,15 +419,14 @@ the earlier steps and shows:
 - The output destination.
 - The next step and the Go to Run action when the plan is ready.
 
-Read the plan as a scientist, not as a formality. Confirm the source, format,
-structure, timing or window length, time placement, ROIs, correction,
-feature-detection assignments, and output destination. Follow attention
-messages back to the relevant step. Use technical details only when a
-maintainer or support person asks for them.
+Confirm that the source, recording structure, timing, selected ROIs, correction
+choices, feature-detection settings, and output folder are correct. If the plan
+identifies an item that needs attention, return to the indicated step and correct
+it before running the analysis.
 
 Review plan can report that the setup is complete while your scientific review
 is still incomplete. Software readiness and scientific readiness are separate.
-Go to Run only when both the visible plan and your own review agree.
+Choose Go to Run after the visible plan and your review agree.
 
 ## 10. Run the analysis
 
@@ -420,8 +438,8 @@ again.
 
 Read the status and attention text after the check. A blocked run is useful
 feedback: return to the step named in the message, correct the specific
-choice, and check the setup again. Do not work around a disabled Run button by
-switching to an unrelated workflow.
+choice, and check the setup again. If Run is disabled, correct the named setup
+item before checking again.
 
 For intermittent analysis, the GUI warns that the analysis cannot be stopped
 from the GUI once it starts. Do not close the window while it is running. Plan
@@ -432,18 +450,21 @@ is active. Stop requests a stop at the next safe point, so it can take a
 moment. It is a cooperative stop, not an immediate termination. Wait for the
 status to settle before closing the application.
 
-After a successful completed run, Guided can show Open results folder and Load
-completed run for review. Use the latter to move directly to the Guided Review
-step. If the run fails, read the displayed reason and do not treat a partially
-created folder as a completed scientific result.
+After a successful run, choose **Open results folder** to view the saved files or
+**Load completed run for review** to open them in Guided. If the run fails, the
+displayed message identifies the failure, and the incomplete output folder will
+not load as a completed run.
 
 ## 11. Review completed results
 
 Review summarizes completed-run outputs when results are loaded. Use the ROI
 selector to inspect each included ROI. The normal result views can include:
 
-- Verification, for checking that the completed run has the expected review
-  material.
+- Verification provides a visual review of the completed correction result. It
+  shows representative signal, reference or correction baseline, and dF/F
+  traces for the selected ROI, together with the correction approach used. When
+  the run is loaded, Guided also checks that the completed package contains the
+  expected saved outputs and provenance.
 - Tonic, for tonic signal views where tonic analysis ran.
 - Phasic Sig/Iso, for signal and reference context.
 - Dynamic Fit, for the fitted reference behavior.
@@ -454,16 +475,23 @@ selector to inspect each included ROI. The normal result views can include:
 - Phasic Summary, for event-activity summaries across plotted days.
 
 Use Run Report to open the saved analysis report. For the selected ROI, Summary,
-Day Plots, and Tables open corresponding result areas when they exist. Views
-depend on what the completed run produced; do not infer a missing result from
-another tab.
+Day Plots, and Tables open corresponding result areas when they exist. The
+available views depend on which analyses were run and which outputs were
+produced.
 
-Continuous results use a simpler workspace with one ROI selector and Tonic or
-Phasic tabs only for analyses that actually ran. The continuous overview
-summarizes the recording duration, analysis windows, correction state, and
-which analysis branches completed. Long traces may be downsampled for display,
-while window summaries provide the more detailed view. Inspect both the
-overview and the per-window summaries when judging long recordings.
+These checks confirm that the saved result is internally consistent; they do not
+establish biological validity or determine whether the selected correction is
+scientifically appropriate.
+
+Continuous results use a simpler workspace with one ROI selector. Depending on
+which analyses were run and which outputs were produced, the viewer can provide
+Verification, correction-reference or baseline views, dF/F views, stacked views,
+and summaries, as well as Tonic or Phasic views. Not every view appears for
+every run. The continuous overview summarizes the recording duration, analysis
+windows, correction state, and which analysis branches completed. Long traces
+may be downsampled for display, while window summaries provide the more detailed
+view. Inspect both the overview and the per-window summaries when judging long
+recordings.
 
 Relate outputs to the experiment. Check timeline placement, correction,
 event summaries, and missing or excluded sessions against the protocol.
@@ -482,9 +510,9 @@ ROIs and timing again.
 
 Confirm the Time column and Time units, then verify every Signal column and
 Reference column pairing. If an unintended ROI mapping is present, use its
-Remove control or correct the mapping in the Interpret CSV columns area; do
-not edit or delete rows in the original recording CSV. Use Add ROI when another
-valid signal/reference pair is needed. For repeated sessions, verify that the
+Remove control or correct the mapping in the Interpret CSV columns area. Leave
+the original recording CSV unchanged. Use Add ROI when another valid
+signal/reference pair is needed. For repeated sessions, verify that the
 displayed CSV session order is chronological.
 
 ### Timing does not match the experiment
@@ -498,7 +526,8 @@ wrong.
 
 Read the visible reason first. Check ROI, Preview segment, and mapping, then
 compare the result with raw signal and reference/control. Choose another
-candidate and regenerate only when the current data and controls are correct.
+approach and regenerate after confirming that the current data and controls are
+correct.
 
 ### Events are missing or excessive
 
@@ -510,24 +539,25 @@ ROI and recheck quiet periods and expected responses.
 
 Go to Review plan and read What needs attention. Correct the named step, then
 press Check my setup again. Confirm at least one ROI, destination, timing,
-correction, and feature settings are complete. Open Results mode cannot launch
-a new run.
+correction, and feature settings are complete. Opening completed results does
+not launch a new run.
 
 ### A completed run does not load in Review
 
 Use Start and choose the completed-results entry point, or use Load completed
 run for review after success. Select the actual completed-results folder. If it
-is not recognized, read the message and do not substitute an input or
-in-progress folder.
+is not recognized, read the message and select a completed-results folder rather
+than an input or in-progress folder.
 
 ### Results do not show a view you expected
 
 Confirm which branches completed and which ROI is selected. Use the continuous
 overview or Review status to distinguish "not run" from "not loaded." Use Run
 Report, Summary, Day Plots, or Tables when the corresponding output exists. If
-the run failed, use the failure message rather than an incomplete folder.
+the run failed, use the failure message; an incomplete folder will not load as a
+completed run.
 
-## 13. Quick checklist for future analyses
+## 13. Quick checklist for upcoming analyses
 
 Use this short checklist:
 

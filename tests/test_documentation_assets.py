@@ -158,8 +158,8 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
         lower,
     )
     assert "supported repeated-session organization" not in lower
-    assert "one candidate csv file defaults to a continuous" in lower
-    assert "multiple candidate csv files default to repeated sessions" in lower
+    assert "one csv recording file defaults to a continuous" in lower
+    assert "multiple csv recording files default to repeated sessions" in lower
     for label in (
         "Time column",
         "Time units",
@@ -176,7 +176,6 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
         "Adaptive Event-Gated Fit",
         "Global Linear Regression",
         "Signal-Only F0",
-        "Decision-Support Audit",
         "Default",
         "Custom",
         "Review plan",
@@ -205,11 +204,32 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
 
     assert "Tools -> Generate Guided Demo Dataset" in guide
     assert "preview segment" in lower
-    assert "complete selected recording set" in lower
-    assert "executable per-roi production choice" in lower
-    assert "repeated/session neurophotometrics route" in lower
-    assert "continuous rwd route" in lower
-    assert "not a current guided run production route" not in lower
+    assert re.search(r"complete\s+selected\s+recording\s+set", lower)
+    assert re.search(r"explicit\s+per-roi\s+correction\s+strategy", lower)
+    assert re.search(r"final\s+analysis\s+recomputes", lower)
+    assert re.search(
+        r"does\s+not\s+use\s+the\s+reference\s+channel\s+for\s+correction",
+        lower,
+    )
+    assert re.search(r"mixed\s+per-roi\s+plans\s+are\s+supported", lower)
+    assert "production route" not in lower
+    assert re.search(r"select\s+rois\s+lists\s+the\s+rois\s+found\s+in\s+the\s+recording", lower)
+    assert re.search(r"choose\s+the\s+rois\s+you\s+want\s+included\s+in\s+the\s+analysis", lower)
+    assert "repeated-session and continuous rwd can prefill" in lower
+    assert "for repeated neurophotometrics" in lower
+    assert re.search(
+        r"csv\s+does\s+not\s+provide\s+an\s+absolute\s+recording-start\s+timestamp",
+        lower,
+    )
+    assert "exclude one incomplete final recording session" in lower
+    assert re.search(
+        r"verification\s+provides\s+a\s+visual\s+review\s+of\s+the\s+completed\s+correction\s+result",
+        lower,
+    )
+    assert re.search(r"not\s+every\s+view\s+appears\s+for\s+every\s+run", lower)
+    assert "decision-support" not in lower
+    assert "coming later" not in lower
+    assert "read-only evidence" not in lower
     for warning_pattern in (
         r"flattens\s+most\s+plausible\s+signal\s+variation",
         r"inverted\s+responses",
@@ -217,10 +237,8 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
         r"behaves\s+very\s+differently\s+across\s+representative\s+preview\s+segments",
     ):
         assert re.search(warning_pattern, lower)
-    assert re.search(
-        r"do\s+not\s+continue\s+when\s+the\s+signal/reference\s+mapping\s+appears\s+wrong",
-        lower,
-    )
+    assert "if the signal/reference mapping appears wrong" in lower
+    assert "before continuing" in lower
     assert "software-ready" in lower
     assert "scientific readiness" in lower
     assert "programming is not required" in lower
