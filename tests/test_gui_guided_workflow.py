@@ -1991,13 +1991,25 @@ def test_guided_correction_step_shows_expected_non_executing_cards(window):
         "Adaptive Event-Gated Fit",
         "Global Linear Regression",
         "Signal-Only F0",
-        "Decision-Support Audit",
     ]
     assert "not recommended" in " ".join(_label_texts(cards["Global Linear Regression"])).lower()
-    assert cards["Decision-Support Audit"].property("guidedCorrectionCardNonExecuting") is True
-    assert "read-only evidence" in " ".join(_label_texts(cards["Decision-Support Audit"])).lower()
     assert "No Correction" not in cards
-    assert "Decision-Support Audit" not in window._guided_correction_select_buttons
+    assert "Decision-Support Audit" not in cards
+    assert set(window._guided_correction_select_buttons) == {
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+        "Signal-Only F0",
+    }
+    correction_text, _ = _guided_step_visible_texts(window, "Correction approach")
+    assert "Decision-Support Audit" not in correction_text
+    assert "Coming later" not in correction_text
+    assert "read-only evidence" not in correction_text
+
+    window._guided_correction_select_buttons["Signal-Only F0"].click()
+    assert window._guided_correction_intent == "Signal-Only F0"
+    window._guided_correction_select_buttons["Robust Global Event-Reject Fit"].click()
+    assert window._guided_correction_intent == "Robust Global Event-Reject Fit"
 
 
 def test_no_correction_is_not_a_normal_guided_correction_card(window):
@@ -3209,17 +3221,6 @@ def test_guided_signal_only_f0_intent_does_not_change_dynamic_fit_mode_or_write_
     assert not (output_root / "applied_dff_gui_provenance.json").exists()
 
 
-def test_decision_support_audit_does_not_alter_dynamic_fit_mode(window):
-    idx = window._dynamic_fit_mode_combo.findData("global_linear_regression")
-    assert idx >= 0
-    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
-    before_mode = window._selected_dynamic_fit_mode()
-
-    assert "Decision-Support Audit" not in window._guided_correction_select_buttons
-    assert window._guided_correction_cards["Decision-Support Audit"].property("guidedCorrectionCardNonExecuting") is True
-    assert window._selected_dynamic_fit_mode() == before_mode
-
-
 def test_guided_setup_summary_state_reports_correction_state(window):
     """4J16k28: the display panel that used to render this as raw text
     ("Reference correction method: ...", "Guided correction intent: ...")
@@ -3251,10 +3252,10 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert isinstance(actions_section.layout(), QVBoxLayout)
     assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
     assert "Reference correction method:" in window._guided_diagnostics_context_label.text()
-    assert "Decision-Support Audit: coming later / read-only evidence" in window._guided_diagnostics_context_label.text()
+    assert "Decision-Support Audit" not in window._guided_diagnostics_context_label.text()
     assert "No Correction: not available in Guided Workflow" in window._guided_diagnostics_context_label.text()
     assert "Global linear baseline comparison" in window._guided_diagnostics_slot_labels
-    assert "Decision-Support Audit evidence" in window._guided_diagnostics_slot_labels
+    assert "Decision-Support Audit evidence" not in window._guided_diagnostics_slot_labels
     assert "not generated" in window._guided_diagnostics_slot_labels["Fit stability"].text()
     assert window._guided_diagnostics_completed_run_content.isHidden() is True
     assert window._guided_diagnostics_context_content.isHidden() is True

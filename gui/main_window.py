@@ -7731,14 +7731,6 @@ class MainWindow(QMainWindow):
                 "for production on supported Guided routes.",
                 "standard",
             ),
-            (
-                "Decision-Support Audit",
-                "Coming later / read-only evidence.",
-                "Future advisory report that may summarize evidence for "
-                "candidate strategies. It will not run analysis or silently "
-                "choose a strategy.",
-                "future",
-            ),
         ]
         self._guided_correction_intent = ""
         self._guided_correction_select_buttons = {}
@@ -8612,7 +8604,6 @@ class MainWindow(QMainWindow):
             "Reference coupling warnings",
             "Signal-Only F0 evidence",
             "needs_review flags",
-            "Decision-Support Audit evidence",
         ]
         for idx, slot in enumerate(slots):
             label = QLabel(f"{slot}: not generated")
@@ -11579,7 +11570,6 @@ class MainWindow(QMainWindow):
                 f"Reference correction method: {state['reference_correction_label']} ({state['reference_correction_method']})",
                 f"Guided correction intent: {state['guided_correction_intent']}",
                 f"Signal-Only F0 intent: {'selected for later explicit confirmation' if signal_only else 'not selected'}",
-                "Decision-Support Audit: coming later / read-only evidence",
                 "No Correction: not available in Guided Workflow",
             ]
             self._guided_diagnostics_context_label.setText("\n".join(lines))
@@ -11646,8 +11636,7 @@ class MainWindow(QMainWindow):
                     )
         if hasattr(self, "_guided_diagnostics_slot_labels"):
             for slot, label in self._guided_diagnostics_slot_labels.items():
-                suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
-                label.setText(f"{slot}: {suffix}")
+                label.setText(f"{slot}: not generated")
         self._refresh_guided_diagnostic_cache_panel()
         self._refresh_guided_confirm_strategy_panel()
 
