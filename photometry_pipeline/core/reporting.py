@@ -81,6 +81,113 @@ def build_continuous_phasic_auc_provenance(
         }
     return provenance
 
+
+def append_applied_correction_summary(
+    output_dir: str, applied_correction_summary: Mapping[str, Any]
+) -> None:
+    """Append applied correction semantics to the shared run report.
+
+    ``generate_run_report`` runs before numerical correction, so its original
+    analytical contract is configuration-based.  The Pipeline calls this
+    updater only after the per-ROI correction records have been consumed.  A
+    compact summary is added beside the existing requested correction
+    provenance; the full provenance is not copied into another object.
+    """
+    path = os.path.join(output_dir, "run_report.json")
+    if not os.path.isfile(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as f:
+        report = json.load(f)
+    if not isinstance(report, dict):
+        raise ValueError("run_report.json must contain an object")
+
+    summary = make_json_safe(dict(applied_correction_summary))
+    classification = str(summary.get("classification", ""))
+    if classification not in {
+        "all_signal_only_f0",
+        "all_reference_based",
+        "mixed",
+    }:
+        raise ValueError(
+            "unsupported applied correction summary classification: "
+            f"{classification!r}"
+        )
+
+    derived = report.setdefault("derived_settings", {})
+    if not isinstance(derived, dict):
+        raise ValueError("run_report.json derived_settings must be an object")
+    derived["applied_correction_summary"] = summary
+
+    # Uniform reference-based runs retain the historical analytical contract;
+    # it remains truthful when every applied ROI has the same reference-fit
+    # strategy.  Signal-Only and mixed runs need explicit per-ROI wording.
+    if classification == "all_reference_based":
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        return
+
+    contract = report.get("analytical_contract")
+    if not isinstance(contract, dict):
+        raise ValueError("run_report.json analytical_contract must be an object")
+
+    contract["correction_semantics"] = {
+        "scope": "per_roi",
+        "strategy_classification": classification,
+        "authority": "applied_correction_summary",
+        "per_roi_detail_source": (
+            "correction_provenance.requested_by_roi and saved correction fields"
+        ),
+    }
+
+    if classification == "all_signal_only_f0":
+        contract["signal_semantics"] = {
+            "uv_raw": "raw isosbestic channel on the canonical grid",
+            "sig_raw": "raw calcium-dependent channel on the canonical grid",
+            "uv_fit": "not used for Signal-Only F0 ROIs",
+            "delta_f": "sig_raw - signal_only_f0_baseline",
+            "dff": (
+                "100 * (sig_raw - signal_only_f0_baseline) "
+                "/ signal_only_f0_baseline"
+            ),
+        }
+        contract["baseline_semantics"] = {
+            "method": "signal_only_f0",
+            "f0_source": "signal_only_f0_baseline",
+            "f0_units": "signal-scale",
+            "dff_formula": (
+                "100 * (sig_raw - signal_only_f0_baseline) "
+                "/ signal_only_f0_baseline"
+            ),
+            "interpretation_note": (
+                "Signal-Only F0 uses the existing production uncapped "
+                "signal-only F0 candidate as the per-ROI baseline; "
+                "reference-channel fitting is not used for these ROIs."
+            ),
+        }
+    else:
+        per_roi_note = (
+            "Correction and baseline semantics are ROI-specific; consult "
+            "the per-ROI correction provenance and saved correction fields."
+        )
+        contract["signal_semantics"] = {
+            "uv_raw": "raw isosbestic channel on the canonical grid",
+            "sig_raw": "raw calcium-dependent channel on the canonical grid",
+            "uv_fit": per_roi_note,
+            "delta_f": per_roi_note,
+            "dff": per_roi_note,
+        }
+        contract["baseline_semantics"] = {
+            "method": "per_roi",
+            "f0_source": "per_roi",
+            "f0_units": "per_roi",
+            "dff_formula": "per_roi",
+            "interpretation_note": per_roi_note,
+        }
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
 def make_json_safe(obj: Any) -> Any:
     """
     Recursively converts objects to JSON-safe primitives.

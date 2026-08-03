@@ -47,7 +47,11 @@ from .core.correction_policy_proposal import (
 )
 from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
-from .core.reporting import generate_run_report, append_run_report_warnings
+from .core.reporting import (
+    append_applied_correction_summary,
+    append_run_report_warnings,
+    generate_run_report,
+)
 from .input_processing_completeness import (
     InputProcessingAccountant,
     InputProcessingError,
@@ -319,6 +323,7 @@ class Pipeline:
         self._guided_npm_consumed_source_records = None
         self._guided_npm_consumed_authority_callback = None
         self._guided_npm_consumed_authority_callback_invoked = False
+        self._applied_correction_records_by_roi = {}
         self._rwd_contract_validation = dict(
             getattr(config, "rwd_contract_validation", {}) or {}
         )
@@ -2100,6 +2105,8 @@ class Pipeline:
              chunk.metadata["correction_strategy_consumed_by_roi"] = consumed_by_roi
              chunk.metadata["signal_only_f0_production_baseline"] = production_baselines
              chunk.metadata["signal_only_f0_production_qc"] = production_qc_by_roi
+             if self.per_roi_correction is not None:
+                 self._record_applied_correction_records(consumed_by_roi)
              if self._is_phasic_timing_enabled():
                  self._add_phasic_detail_bucket("pass2.dff_compute", time.perf_counter() - t_dff)
         
@@ -2233,6 +2240,110 @@ class Pipeline:
             "finite_coverage_fraction": float(
                 getattr(self.config, "signal_only_f0_min_coverage_fraction", 0.80)
             ),
+        }
+
+    def _record_applied_correction_records(
+        self, consumed_by_roi: dict[str, dict]
+    ) -> None:
+        """Retain the applied records that are written into the trace cache.
+
+        These records are produced after correction dispatch and final dF/F
+        construction. They are therefore the applied authority for the compact
+        metadata summary, rather than a reconstruction from the requested map
+        or from Config.dynamic_fit_mode.
+        """
+        for roi_id, record in consumed_by_roi.items():
+            roi = str(roi_id)
+            applied = {
+                "roi_id": roi,
+                "strategy_family": str(record.get("strategy_family", "")),
+                "applied_strategy": str(record.get("applied_strategy", "")),
+                "applied_correction_source": str(
+                    record.get("applied_correction_source", "")
+                ),
+                "dynamic_fit_mode": (
+                    str(record["dynamic_fit_mode"])
+                    if record.get("dynamic_fit_mode") is not None
+                    else None
+                ),
+            }
+            previous = self._applied_correction_records_by_roi.get(roi)
+            if previous is not None and previous != applied:
+                raise RuntimeError(
+                    "applied correction strategy changed for ROI "
+                    f"{roi!r} during one run"
+                )
+            self._applied_correction_records_by_roi[roi] = applied
+
+    def _build_applied_correction_summary(self) -> dict | None:
+        """Build a compact summary from correction records actually consumed."""
+        if self.per_roi_correction is None:
+            return None
+
+        requested = getattr(self, "_requested_correction_provenance", {})
+        expected_rois = [
+            str(roi)
+            for roi in requested.get(
+                "included_roi_ids", self._applied_correction_records_by_roi
+            )
+        ]
+        applied_by_roi = self._applied_correction_records_by_roi
+        if not expected_rois or set(applied_by_roi) != set(expected_rois):
+            raise RuntimeError(
+                "applied correction records do not cover every included ROI"
+            )
+
+        by_roi = [dict(applied_by_roi[roi]) for roi in expected_rois]
+        families = sorted(
+            {str(record["strategy_family"]) for record in by_roi}
+        )
+        strategies = sorted(
+            {str(record["applied_strategy"]) for record in by_roi}
+        )
+        sources = sorted(
+            {str(record["applied_correction_source"]) for record in by_roi}
+        )
+        if families == ["signal_only_f0"] and strategies == ["signal_only_f0"]:
+            classification = "all_signal_only_f0"
+        elif families == ["dynamic_fit"] and len(strategies) == 1:
+            classification = "all_reference_based"
+        else:
+            classification = "mixed"
+
+        return {
+            "authority": "applied_correction_records",
+            "scope": "per_roi",
+            "classification": classification,
+            "included_roi_ids": expected_rois,
+            "strategy_families": families,
+            "applied_strategies": strategies,
+            "applied_sources": sources,
+            "by_roi": by_roi,
+        }
+
+    @staticmethod
+    def _correction_aware_run_metadata_fields(
+        applied_correction_summary: dict | None,
+    ) -> dict[str, str]:
+        if applied_correction_summary is None:
+            return {}
+        classification = str(
+            applied_correction_summary.get("classification", "")
+        )
+        if classification == "all_reference_based":
+            return {}
+        if classification == "all_signal_only_f0":
+            return {
+                "baseline_method": "signal_only_f0_baseline",
+                "f0_source": "signal_only_f0_baseline",
+                "phasic_uv_fit_method": "not_applicable",
+                "regression_mode": "not_applicable",
+            }
+        return {
+            "baseline_method": "per_roi",
+            "f0_source": "per_roi",
+            "phasic_uv_fit_method": "per_roi",
+            "regression_mode": "per_roi",
         }
 
     def _signal_state_config(self) -> dict:
@@ -2640,6 +2751,7 @@ class Pipeline:
                 json.dump(_sanitize_metadata(self.qc_summary), f, indent=2)
             pass2_qc_summary_write_sec += (time.perf_counter() - t_qc_write)
             
+        applied_correction_summary = self._build_applied_correction_summary()
         run_meta = {
             'target_fs_hz': self.config.target_fs_hz,
             'seed': self.config.seed,
@@ -2669,6 +2781,15 @@ class Pipeline:
                 None,
             ),
         }
+        run_meta.update(
+            self._correction_aware_run_metadata_fields(
+                applied_correction_summary
+            )
+        )
+        if applied_correction_summary is not None:
+            run_meta[
+                'applied_correction_summary'
+            ] = applied_correction_summary
         if self._guided_npm_authorized_runtime is not None:
             authorized = self._guided_npm_authorized_runtime.authorized_input
             run_meta["guided_npm_cross_session_chronology"] = {
@@ -2709,6 +2830,10 @@ class Pipeline:
         t_meta_write = time.perf_counter()
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(_sanitize_metadata(run_meta), f, indent=2)
+        if applied_correction_summary is not None:
+            append_applied_correction_summary(
+                output_dir, applied_correction_summary
+            )
         pass2_run_metadata_write_sec += (time.perf_counter() - t_meta_write)
             
         if self.qc_summary['chunk_fail_fraction'] > self.config.qc_max_chunk_fail_fraction:
