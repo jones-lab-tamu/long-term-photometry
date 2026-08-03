@@ -4381,40 +4381,6 @@ class MainWindow(QMainWindow):
             self._guided_allow_partial_final_window_cb,
         )
 
-        self._guided_incomplete_final_rwd_group = QGroupBox(
-            "Final recording session"
-        )
-        incomplete_layout = QVBoxLayout(
-            self._guided_incomplete_final_rwd_group
-        )
-        incomplete_layout.setContentsMargins(10, 8, 10, 8)
-        self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox(
-            "Exclude one incomplete final recording session"
-        )
-        self._guided_exclude_incomplete_final_rwd_chunk_cb.setObjectName(
-            "guidedExcludeIncompleteFinalRwdChunk"
-        )
-        self._guided_exclude_incomplete_final_rwd_chunk_cb.setToolTip(
-            self._exclude_incomplete_final_rwd_chunk_cb.toolTip()
-        )
-        incomplete_layout.addWidget(
-            self._guided_exclude_incomplete_final_rwd_chunk_cb,
-        )
-        self._guided_incomplete_final_rwd_help_label = QLabel(
-            "Use this only when the last recording file is shorter than "
-            "expected. Selecting it explicitly excludes that one final "
-            "recording file. Earlier incomplete sessions still stop "
-            "validation. Raw files are not modified."
-        )
-        self._guided_incomplete_final_rwd_help_label.setProperty(
-            "guidedSecondaryText", True
-        )
-        self._guided_incomplete_final_rwd_help_label.setWordWrap(True)
-        incomplete_layout.addWidget(
-            self._guided_incomplete_final_rwd_help_label
-        )
-        form.addRow("", self._guided_incomplete_final_rwd_group)
-
         self._guided_timeline_group = QGroupBox("Timeline placement")
         timeline_form = QFormLayout(self._guided_timeline_group)
         timeline_form.setContentsMargins(10, 8, 10, 8)
@@ -4950,7 +4916,6 @@ class MainWindow(QMainWindow):
             "_guided_session_duration_edit",
             "_guided_continuous_window_sec_spin",
             "_guided_allow_partial_final_window_cb",
-            "_guided_exclude_incomplete_final_rwd_chunk_cb",
         )
         if not all(hasattr(self, name) for name in required):
             return
@@ -5050,12 +5015,6 @@ class MainWindow(QMainWindow):
                 self._guided_allow_partial_final_window_cb.isChecked(),
             )
         )
-        self._guided_exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
-            lambda _state: self._sync_checkbox_value(
-                self._exclude_incomplete_final_rwd_chunk_cb,
-                self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked(),
-            )
-        )
         self._guided_input_dir_edit.textChanged.connect(
             lambda _text: self._invalidate_guided_backend_validation(
                 "input source changed"
@@ -5094,11 +5053,6 @@ class MainWindow(QMainWindow):
                 "partial final window policy changed"
             )
         )
-        self._guided_exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
-            lambda _state: self._invalidate_guided_backend_validation(
-                "incomplete final RWD policy changed"
-            )
-        )
 
         self._input_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._output_dir.textChanged.connect(
@@ -5112,9 +5066,6 @@ class MainWindow(QMainWindow):
             lambda _value: self._sync_guided_setup_from_full()
         )
         self._allow_partial_final_window_cb.stateChanged.connect(
-            lambda _state: self._sync_guided_setup_from_full()
-        )
-        self._exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
             lambda _state: self._sync_guided_setup_from_full()
         )
         self._guided_setup_sync_connected = True
@@ -5145,9 +5096,6 @@ class MainWindow(QMainWindow):
             "continuous_window_sec": float(self._continuous_window_sec_spin.value()),
             "continuous_step_sec": float(self._continuous_window_sec_spin.value()),
             "allow_partial_final_window": bool(self._allow_partial_final_window_cb.isChecked()),
-            "exclude_incomplete_final_rwd_chunk": bool(
-                self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
-            ),
             "selected_roi_count": len(selected_rois),
             "total_roi_count": len(all_rois),
             "selected_rois": selected_rois,
@@ -6425,7 +6373,6 @@ class MainWindow(QMainWindow):
             "_guided_session_duration_edit",
             "_guided_continuous_window_sec_spin",
             "_guided_allow_partial_final_window_cb",
-            "_guided_exclude_incomplete_final_rwd_chunk_cb",
         )
         if not all(hasattr(self, name) for name in required):
             return
@@ -6440,7 +6387,6 @@ class MainWindow(QMainWindow):
                 QSignalBlocker(self._guided_session_duration_edit),
                 QSignalBlocker(self._guided_continuous_window_sec_spin),
                 QSignalBlocker(self._guided_allow_partial_final_window_cb),
-                QSignalBlocker(self._guided_exclude_incomplete_final_rwd_chunk_cb),
             ]
             self._guided_input_dir_edit.setText(self._input_dir.text())
             output_dir_text = self._output_dir.text()
@@ -6460,9 +6406,6 @@ class MainWindow(QMainWindow):
             self._guided_continuous_window_sec_spin.setValue(float(self._continuous_window_sec_spin.value()))
             self._guided_allow_partial_final_window_cb.setChecked(
                 bool(self._allow_partial_final_window_cb.isChecked())
-            )
-            self._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(
-                bool(self._exclude_incomplete_final_rwd_chunk_cb.isChecked())
             )
             del blockers
         finally:
@@ -6560,10 +6503,6 @@ class MainWindow(QMainWindow):
             )
         ).strip().lower()
         self._refresh_guided_timeline_controls()
-        if hasattr(self, "_guided_incomplete_final_rwd_group"):
-            self._guided_incomplete_final_rwd_group.setVisible(
-                not continuous and resolved_format == "rwd"
-            )
         self._sync_guided_continuous_mode_availability(resolved_format)
         self._refresh_guided_use_detected_timing_action()
         if continuous:
@@ -14748,19 +14687,6 @@ class MainWindow(QMainWindow):
             )
         included = ", ".join(plan.included_roi_ids) or "none"
         excluded = ", ".join(plan.excluded_roi_ids) or "none"
-        final_session_policy = ""
-        if plan.input_format == "rwd" and plan.acquisition_mode == "intermittent":
-            if plan.exclude_incomplete_final_rwd_chunk:
-                final_session_policy = (
-                    "\nFinal incomplete session: if the final recording is "
-                    "incomplete, exclude that one final recording file. Earlier "
-                    "incomplete sessions still stop the setup check."
-                )
-            else:
-                final_session_policy = (
-                    "\nFinal incomplete session: do not exclude; an "
-                    "incomplete final recording stops the setup check."
-                )
         tonic_settings = plan.tonic_settings_contract
         tonic_summary = (
             "\nTonic session shape: "
@@ -14795,7 +14721,6 @@ class MainWindow(QMainWindow):
             f"{sessions_line}\n"
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
-            f"{final_session_policy}"
             f"{timeline_summary}"
             f"{tonic_summary}"
         )
@@ -15050,11 +14975,6 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "_guided_allow_partial_final_window_cb")
                 else None
             ),
-            exclude_incomplete_final_rwd_chunk=(
-                bool(self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked())
-                if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb")
-                else None
-            ),
             discovered_roi_ids=tuple(discovered),
             included_roi_ids=tuple(included),
             source_setup_signature=str(getattr(record, "source_setup_signature", "") or "") or None,
@@ -15088,7 +15008,6 @@ class MainWindow(QMainWindow):
             continuous_window_sec=identity.continuous_window_sec,
             continuous_step_sec=identity.continuous_step_sec,
             allow_partial_final_window=identity.allow_partial_final_window,
-            exclude_incomplete_final_rwd_chunk=identity.exclude_incomplete_final_rwd_chunk,
             discovered_roi_ids=identity.discovered_roi_ids,
             included_roi_ids=identity.included_roi_ids,
             source_setup_signature=signatures["source_setup_signature"],
@@ -15129,10 +15048,8 @@ class MainWindow(QMainWindow):
                 # Discovery has already validated the selected RWD source. Reuse
                 # that immutable in-memory result for the visible confirmation
                 # action instead of reopening every chunk solely to rebuild the
-                # same candidate. A changed policy falls through to the normal
-                # inference path so the exclusion semantics remain explicit.
+                # same candidate.
                 cache = getattr(self, "_rwd_contract_cache", None)
-                policy = bool(identity.exclude_incomplete_final_rwd_chunk)
                 cached_overrides = (
                     cache.get("overrides") if isinstance(cache, dict) else None
                 )
@@ -15143,12 +15060,6 @@ class MainWindow(QMainWindow):
                     and str(cache.get("format") or "").strip().lower()
                     in {"auto", "rwd"}
                     and isinstance(cached_overrides, dict)
-                    and bool(
-                        cached_overrides.get(
-                            "exclude_incomplete_final_rwd_chunk", policy
-                        )
-                    )
-                    == policy
                 ):
                     inferred = dict(cached_overrides)
                 elif acq == "continuous":
@@ -15442,7 +15353,6 @@ class MainWindow(QMainWindow):
                 "continuous_window_sec": identity.continuous_window_sec,
                 "continuous_step_sec": identity.continuous_step_sec,
                 "allow_partial_final_window": identity.allow_partial_final_window,
-                "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
                 **dataset_semantics,
                 **(
                     {"target_fs_hz": target_fs_hz_value}
@@ -15487,7 +15397,6 @@ class MainWindow(QMainWindow):
             "continuous_window_sec",
             "continuous_step_sec",
             "allow_partial_final_window",
-            "exclude_incomplete_final_rwd_chunk",
             "discovered_roi_ids",
             "included_roi_ids",
             "source_setup_signature",
@@ -19252,8 +19161,6 @@ class MainWindow(QMainWindow):
         timeline_values = self._guided_timeline_plan_values()
         
         allow_partial = self._guided_allow_partial_final_window_cb.isChecked() if hasattr(self, "_guided_allow_partial_final_window_cb") else False
-        exclude_rwd = self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked() if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb") else False
-        
         if acq_mode == "intermittent":
             if sph_val is not None and sph_val > 0 and dur_val is not None and dur_val > 0:
                 acq_status = "ready"
@@ -19516,7 +19423,6 @@ class MainWindow(QMainWindow):
             continuous_window_sec=win_val,
             continuous_step_sec=step_val,
             allow_partial_final_window=allow_partial,
-            exclude_incomplete_final_rwd_chunk=exclude_rwd,
             acquisition_structure_status=acq_status,
             dataset_contract_snapshot=dataset_contract_snapshot,
             output_base_path=out_base_path,
@@ -29653,67 +29559,11 @@ class MainWindow(QMainWindow):
         )
         return out
 
-    @staticmethod
-    def _format_rwd_incomplete_failure_details(failure: dict) -> str:
-        lines = [
-            f"  chunk index: {int(failure['chunk_index'])}",
-            f"  file: {failure['csv_path']}",
-        ]
-        if "required_strict_grid_end_s" in failure:
-            lines.extend(
-                [
-                    f"  required strict grid end: {float(failure['required_strict_grid_end_s']):.4f} s",
-                    f"  observed raw end: {float(failure['observed_raw_end_s']):.4f} s",
-                    f"  missing coverage: {float(failure['missing_coverage_s']):.4f} s",
-                ]
-            )
-        if "nominal_duration_sec" in failure:
-            lines.extend(
-                [
-                    f"  nominal required duration: {float(failure['nominal_duration_sec']):.4f} s",
-                    "  observed sample_count/fs duration: "
-                    f"{float(failure['observed_sample_count_over_fs_duration_sec']):.4f} s",
-                    f"  observed timestamp span: {float(failure['observed_timestamp_span_sec']):.4f} s",
-                    f"  missing duration: {float(failure['missing_duration_s']):.4f} s",
-                ]
-            )
-        return "\n".join(lines)
-
-    @classmethod
-    def _format_rwd_final_incomplete_failure(cls, failure: dict) -> str:
-        return (
-            "RWD contract validation failed on the final chronological chunk.\n\n"
-            "Failed chunk:\n"
-            f"{cls._format_rwd_incomplete_failure_details(failure)}\n\n"
-            "This appears to be an incomplete final acquisition window.\n"
-            "No files were excluded because:\n"
-            "  exclude_incomplete_final_rwd_chunk = false\n\n"
-            "To exclude only this final partial chunk and continue, enable "
-            "'Exclude incomplete final RWD chunk' in the RWD validation options, "
-            "then rerun validation/analysis.\n"
-            "Config key for provenance/debugging:\n"
-            "  exclude_incomplete_final_rwd_chunk = true\n\n"
-            "All raw files remain unmodified."
-        )
-
-    @classmethod
-    def _format_rwd_nonfinal_incomplete_failure(cls, failure: dict) -> str:
-        return (
-            "RWD contract validation failed on a non-final chunk.\n\n"
-            "Failed chunk:\n"
-            f"{cls._format_rwd_incomplete_failure_details(failure)}\n\n"
-            "This chunk is not the final chronological chunk, so it cannot be "
-            "automatically excluded.\n"
-            "Please inspect, remove/quarantine the bad file, or rerun acquisition/export.\n\n"
-            "All raw files remain unmodified."
-        )
-
     def _infer_rwd_dataset_contract_overrides(
         self,
         fmt_text: str,
         *,
         input_path: str | None = None,
-        exclude_final_override: bool | None = None,
         emit_warning: bool = True,
         whole_hz: bool = False,
     ) -> dict:
@@ -29929,131 +29779,23 @@ class MainWindow(QMainWindow):
                 )
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
-        exclude_final = (
-            bool(exclude_final_override)
-            if exclude_final_override is not None
-            else bool(
-                (
-                    getattr(
-                        self,
-                        "_exclude_incomplete_final_rwd_chunk_cb",
-                        None,
-                    )
-                    and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
-                )
-                or getattr(
-                    self._active_baseline_config(),
-                    "exclude_incomplete_final_rwd_chunk",
-                    False,
-                )
-            )
-        )
-        excluded_chunks: list[dict[str, object]] = []
-        final_chunk_index = len(contracts) - 1
-        non_final_chunks_all_passed = not any(
-            int(x["chunk_index"]) != final_chunk_index for x in incomplete_acquisition_failures
-        )
-        if incomplete_acquisition_failures:
-            failed_indices = {int(x["chunk_index"]) for x in incomplete_acquisition_failures}
-            first_failure = incomplete_acquisition_failures[0]
-            if failed_indices != {final_chunk_index}:
-                non_final_failure = next(
-                    (
-                        x
-                        for x in incomplete_acquisition_failures
-                        if int(x["chunk_index"]) != final_chunk_index
-                    ),
-                    first_failure,
-                )
-                raise ValueError(self._format_rwd_nonfinal_incomplete_failure(non_final_failure))
-            if not exclude_final:
-                raise ValueError(self._format_rwd_final_incomplete_failure(first_failure))
-            coverage_failure = next(
-                (
-                    x
-                    for x in incomplete_acquisition_failures
-                    if str(x.get("reason")) == "strict_grid_coverage_shortfall"
-                ),
-                None,
-            )
-            duration_failure = next(
-                (
-                    x
-                    for x in incomplete_acquisition_failures
-                    if str(x.get("reason")) == "chunk_duration_shortfall"
-                ),
-                None,
-            )
-            reason_details = coverage_failure or duration_failure or first_failure
-            excluded_chunks = [
-                {
-                    "chunk_index": int(reason_details["chunk_index"]),
-                    "file": str(reason_details["csv_path"]),
-                    "reason": "incomplete_final_rwd_chunk",
-                    "required_strict_grid_end_s": (
-                        float(coverage_failure["required_strict_grid_end_s"])
-                        if coverage_failure is not None
-                        else None
-                    ),
-                    "observed_raw_end_s": (
-                        float(coverage_failure["observed_raw_end_s"])
-                        if coverage_failure is not None
-                        else None
-                    ),
-                    "missing_coverage_s": (
-                        float(coverage_failure["missing_coverage_s"])
-                        if coverage_failure is not None
-                        else None
-                    ),
-                    "nominal_duration_sec": (
-                        float(duration_failure["nominal_duration_sec"])
-                        if duration_failure is not None
-                        else None
-                    ),
-                    "observed_sample_count_over_fs_duration_sec": (
-                        float(duration_failure["observed_sample_count_over_fs_duration_sec"])
-                        if duration_failure is not None
-                        else None
-                    ),
-                    "observed_timestamp_span_sec": (
-                        float(duration_failure["observed_timestamp_span_sec"])
-                        if duration_failure is not None
-                        else None
-                    ),
-                    "missing_duration_s": (
-                        float(duration_failure["missing_duration_s"])
-                        if duration_failure is not None
-                        else None
-                    ),
-                }
-            ]
-
         out = {
             "target_fs_hz": nominal_fs,
             "chunk_duration_sec": float(round(nominal_duration, 9)),
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
             "sig_suffix": str(base["sig_suffix"]),
-            "exclude_incomplete_final_rwd_chunk": bool(exclude_final),
             "rwd_contract_validation": {
-                "status": (
-                    "completed_with_excluded_final_chunk"
-                    if excluded_chunks
-                    else "passed"
-                ),
+                "status": "passed" if not incomplete_acquisition_failures else "session_failures_detected",
                 "strict_contract_enforced": True,
-                "exclude_incomplete_final_rwd_chunk": bool(exclude_final),
-                "excluded_chunks": excluded_chunks,
-                "non_final_chunks_all_passed": bool(non_final_chunks_all_passed),
+                "incomplete_acquisition_failures": incomplete_acquisition_failures,
             },
         }
-        if excluded_chunks:
-            out["rwd_excluded_source_files"] = [str(x["file"]) for x in excluded_chunks]
-        if excluded_chunks and emit_warning:
+        if incomplete_acquisition_failures and emit_warning:
             warning = (
-                "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
-                f"Analysis used {len(contracts) - 1} valid chunks. "
-                "1 final chunk was excluded. See provenance/status output for details."
+                "WARNING: One or more admitted RWD sessions have incomplete "
+                "coverage. The shared per-session processing boundary will record "
+                "an unusable session only when its identity and timeline are verified."
             )
             self._append_run_log(warning)
         self._rwd_contract_cache = {
@@ -30071,7 +29813,6 @@ class MainWindow(QMainWindow):
                 if str(x.get("reason")) == "strict_grid_coverage_shortfall"
             ],
             "incomplete_acquisition_failures": incomplete_acquisition_failures,
-            "excluded_chunks": excluded_chunks,
         }
         self._timing_end("rwd_contract_inference_total", t_total)
         return out
@@ -30757,13 +30498,6 @@ class MainWindow(QMainWindow):
         if selected_export_display_series_csv != default_export_display_series_csv:
             config_overrides["export_display_series_csv"] = selected_export_display_series_csv
 
-        exclude_incomplete_final_rwd_chunk = bool(
-            getattr(self, "_exclude_incomplete_final_rwd_chunk_cb", None)
-            and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
-        )
-        if exclude_incomplete_final_rwd_chunk:
-            config_overrides["exclude_incomplete_final_rwd_chunk"] = True
-
         # Ensure effective config tracks the selected RWD dataset contract.
         # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
         # from conflicting with the currently selected input data.
@@ -31133,9 +30867,6 @@ class MainWindow(QMainWindow):
                 self._allow_partial_final_window_cb.isChecked()
             ),
             "config_source_path": self._active_config_source_path(),
-            "exclude_incomplete_final_rwd_chunk": bool(
-                self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
-            ),
         }
         if snapshot["format"] == "custom_tabular":
             snapshot["custom_tabular_interpretation"] = (
@@ -31348,19 +31079,10 @@ class MainWindow(QMainWindow):
         if npm_overrides:
             data_contract_overrides = npm_overrides
         else:
-            exclude_final = bool(
-                snapshot["exclude_incomplete_final_rwd_chunk"]
-                or getattr(
-                    baseline_config,
-                    "exclude_incomplete_final_rwd_chunk",
-                    False,
-                )
-            )
             data_contract_overrides = (
                 self._infer_rwd_dataset_contract_overrides(
                     fmt,
                     input_path=input_dir,
-                    exclude_final_override=exclude_final,
                     emit_warning=emit_warning,
                     whole_hz=True,
                 )
@@ -34509,25 +34231,6 @@ class MainWindow(QMainWindow):
         )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
-
-        self._exclude_incomplete_final_rwd_chunk_cb = QCheckBox("")
-        self._exclude_incomplete_final_rwd_chunk_cb.setChecked(False)
-        self._exclude_incomplete_final_rwd_chunk_cb.setToolTip(
-            "When enabled, a single incomplete final chronological RWD chunk can be "
-            "excluded if all earlier chunks pass strict validation. Non-final failed "
-            "chunks still stop the run. Raw files are not modified."
-        )
-        self._exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(self._on_config_changed)
-        self._exclude_incomplete_final_rwd_chunk_label = QLabel(
-            "Exclude incomplete final RWD chunk:"
-        )
-        self._exclude_incomplete_final_rwd_chunk_label.setToolTip(
-            self._exclude_incomplete_final_rwd_chunk_cb.toolTip()
-        )
-        form.addRow(
-            self._exclude_incomplete_final_rwd_chunk_label,
-            self._exclude_incomplete_final_rwd_chunk_cb,
-        )
 
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")

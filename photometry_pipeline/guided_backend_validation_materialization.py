@@ -20,7 +20,6 @@ from typing import Any, Callable
 from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendSourceCandidateFile,
     GuidedBackendSourceSnapshotFacts,
-    GuidedBackendIncompleteFinalClassificationFacts,
     GuidedBackendValidationMaterializedFacts,
     GuidedBackendParserFacts,
     GuidedBackendAcquisitionDatasetFacts,
@@ -70,8 +69,6 @@ from photometry_pipeline.io.rwd_source_snapshot import (
     build_rwd_source_candidate_snapshot,
     compute_rwd_source_candidate_set_digest,
     compute_rwd_source_candidate_content_digest,
-    make_not_requested_incomplete_final_chunk_classification,
-    compute_incomplete_final_chunk_classification_digest,
     RwdSourceSnapshotError,
 )
 from photometry_pipeline.io.rwd_contract import (
@@ -283,8 +280,6 @@ STAGE_2C_VALID_ISSUES = {
     "source_snapshot_unstable",
     "source_snapshot_digest_mismatch",
     "approved_missing_session_invalid",
-    "unsupported_incomplete_final_exclusion",
-    "incomplete_final_classification_mismatch",
     "materialization_cancelled",
     "materializer_internal_error",
     "unsupported_stage_2a_state",
@@ -507,11 +502,11 @@ def _materialize_approved_missing_candidates(
     approvals = tuple(draft.approved_missing_sessions or ())
     if not approvals:
         return (), None
-    if draft.input_format != "rwd" or draft.acquisition_mode != "intermittent":
+    if draft.acquisition_mode != "intermittent":
         return None, _failure(
             "approved_missing_session_invalid",
             "missing_session",
-            "Missing-session continuation is available only for intermittent RWD recordings.",
+            "Missing-session continuation is available only for intermittent recordings.",
             detail_code="unsupported_recording_type",
         )
     candidates = {
@@ -1529,7 +1524,7 @@ def _materialize_dataset_and_roi_facts(
         return None, None, _failure(
             "dataset_facts_stale",
             "dataset",
-            "Dataset timing or incomplete-final policy is stale.",
+            "Dataset timing or intermittent-window policy is stale.",
             detail_code="dataset_timing_policy_mismatch",
         )
     if cache_facts.available and (
@@ -1616,9 +1611,6 @@ def _materialize_dataset_and_roi_facts(
         recording_start_clock=recording_start_clock,
         recording_start_clock_source=recording_start_clock_source,
         allow_partial_final_window=bool(identity.allow_partial_final_window),
-        exclude_incomplete_final_rwd_chunk=bool(
-            identity.exclude_incomplete_final_rwd_chunk
-        ),
         dataset_snapshot_schema_version=snapshot.schema_version,
         dataset_status=snapshot.status,
         dataset_current_applied=snapshot.current_applied,
@@ -2092,7 +2084,6 @@ def materialize_guided_backend_validation_facts(
 
     Currently compiles:
       - Source snapshot facts
-      - Incomplete-final not_requested classification facts
       - Parser contract facts
       - Feature/event effective values
       - Diagnostic-cache facts
@@ -2154,14 +2145,6 @@ def materialize_guided_backend_validation_facts(
             _npm_settings_incomplete_message(),
             detail_code="npm_parser_policy_missing",
         )
-    if is_npm and draft.exclude_incomplete_final_rwd_chunk:
-        return _failure(
-            "unsupported_incomplete_final_exclusion",
-            "incomplete_final",
-            "Excluding an incomplete final session is not available for NPM recordings.",
-            detail_code="npm_exclusion_unsupported",
-        )
-
     # 4. Parser Contract Presence Check (Before Snapshot)
     if parser_contract is None:
         return _failure(
@@ -2418,21 +2401,6 @@ def materialize_guided_backend_validation_facts(
     approved_missing_candidates, approval_failure = _materialize_approved_missing_candidates(
         draft, snapshot
     )
-    if (is_npm or is_custom_tabular) and draft.approved_missing_sessions:
-        return _failure(
-            "approved_missing_session_invalid",
-            "missing_session",
-            (
-                "Missing-session continuation is not available for NPM recordings."
-                if is_npm
-                else "Missing-session continuation is not available for CSV recordings."
-            ),
-            detail_code=(
-                "npm_missing_session_unsupported"
-                if is_npm
-                else "custom_tabular_missing_session_unsupported"
-            ),
-        )
     if approval_failure is not None:
         return approval_failure
 
@@ -2656,48 +2624,7 @@ def materialize_guided_backend_validation_facts(
         except (AttributeError, IndexError, TypeError, ValueError):
             validated_first_recording_start = None
 
-    # 8. Incomplete-Final not_requested Classification Materialization
-
-    if is_npm or is_custom_tabular:
-        # NPM has no RWD incomplete-final classifier. Its process-only
-        # disposition policy is compiled below as a format-neutral contract.
-        if is_custom_tabular:
-            classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
-                available=True,
-                classification_status="not_requested",
-                classification_digest=hashlib.sha256(
-                    b"guided-custom-tabular-no-exclusion:v1\x00"
-                    + snapshot.source_candidate_content_digest.encode("ascii")
-                ).hexdigest(),
-                source_candidate_set_digest=snapshot.source_candidate_set_digest,
-                source_candidate_content_digest=(
-                    snapshot.source_candidate_content_digest
-                ),
-            )
-        else:
-            classification_facts = (
-                GuidedBackendIncompleteFinalClassificationFacts()
-            )
-    else:
-        try:
-            classification = make_not_requested_incomplete_final_chunk_classification(snapshot)
-            classification_digest = compute_incomplete_final_chunk_classification_digest(classification)
-        except Exception as exc:
-            return _failure(
-                "materializer_internal_error",
-                "incomplete_final",
-                f"Failed to generate incomplete-final classification: {exc}",
-                detail_code="internal_classification_error",
-            )
-        classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
-            available=True,
-            classification_status="not_requested",
-            classification_digest=classification_digest,
-            source_candidate_set_digest=snapshot.source_candidate_set_digest,
-            source_candidate_content_digest=snapshot.source_candidate_content_digest,
-        )
-
-    # 9. Cancellation check before feature/event work
+    # 8. Cancellation check before feature/event work
     if cancellation_check and cancellation_check():
         return _failure(
             "materialization_cancelled",
@@ -2965,17 +2892,6 @@ def materialize_guided_backend_validation_facts(
     # format-neutral model. Reuses the same snapshot and facts computed
     # above rather than re-discovering or re-deriving anything.
     #
-    # Final-chunk exclusion identity uses the exact same rule as the
-    # accepted production execution-payload derivation
-    # (guided_execution_payloads.py: candidate_files[-1]) -- the
-    # chronologically final candidate in the already-A2-ordered snapshot.
-    # Computed here (one stage earlier) only so it can be represented on
-    # the normalized description too; it is not a second exclusion rule.
-    excluded_canonical_relative_path = (
-        snapshot.candidates[-1].canonical_relative_path
-        if dataset_facts.exclude_incomplete_final_rwd_chunk and snapshot.candidates
-        else None
-    )
     try:
         target_fs_hz = next(
             (
@@ -3036,15 +2952,11 @@ def materialize_guided_backend_validation_facts(
                     item.canonical_relative_path
                     for item in source_snapshot_facts.approved_missing_candidates
                 ),
-                excluded_canonical_relative_path=excluded_canonical_relative_path,
             )
     except NormalizedRecordingError as exc:
         # Malformed chronology, empty ROI scope, and non-positive session
         # duration are already caught earlier by dedicated checks with
         # scientist-facing messages. A genuinely reachable case here is a
-        # scientist having approved the same final session as both
-        # missing and exclude-incomplete-final at once
-        # ("session_both_missing_and_excluded").
         if is_npm:
             _LOGGER.debug(
                 "NPM recording setup could not be confirmed: %s",
@@ -3083,7 +2995,6 @@ def materialize_guided_backend_validation_facts(
 
     facts = GuidedBackendValidationMaterializedFacts(
         source_snapshot=source_snapshot_facts,
-        incomplete_final_classification=classification_facts,
         parser=parser_facts,
         acquisition_dataset=dataset_facts,
         roi_scope=roi_facts,

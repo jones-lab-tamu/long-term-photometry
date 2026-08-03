@@ -545,15 +545,23 @@ def input_completeness_error(run_dir: str, run_mode: dict[str, Any]) -> str:
         payloads[label] = payload
 
     # When the wrapper froze one run-wide input manifest, every analysis must be
-    # bound to it: same admitted chunks, order, sizes/identities, dispositions,
-    # and authorized exclusion -- proven by a shared digest, not a chunk count.
+    # bound to the same admitted identities and order. A branch may additionally
+    # record an admitted source as missing after it becomes unusable; that is a
+    # terminal disposition change, not a different discovered input set.
     if run_mode.get("shared_input_manifest"):
         manifest, error = load_frozen_input_manifest(
             os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
         )
         if manifest is None:
             return f"the run-wide frozen input manifest is {error}"
-        run_digest = manifest["digest"]
+        run_expected = manifest.get("expected")
+        if not isinstance(run_expected, list):
+            return "the run-wide frozen input manifest has no expected session list"
+        run_by_index = {
+            int(entry.get("index")): entry
+            for entry in run_expected
+            if isinstance(entry, dict) and isinstance(entry.get("index"), int)
+        }
         for label, payload in payloads.items():
             recorded = str(payload.get("frozen_manifest_digest", ""))
             if not recorded:
@@ -562,8 +570,35 @@ def input_completeness_error(run_dir: str, run_mode: dict[str, Any]) -> str:
             # so a tampered expected set cannot ride a copied digest field.
             if expected_entries_digest(payload.get("expected", [])) != recorded:
                 return f"the {label} analysis record does not match its own frozen identity"
-            if recorded != run_digest:
+            branch_expected = payload.get("expected")
+            if not isinstance(branch_expected, list) or len(branch_expected) != len(run_expected):
                 return f"the {label} analysis used a different input set than the run manifest"
+            for branch_entry in branch_expected:
+                if not isinstance(branch_entry, dict):
+                    return f"the {label} analysis has an unreadable expected session"
+                index = branch_entry.get("index")
+                root_entry = run_by_index.get(index)
+                if root_entry is None:
+                    return f"the {label} analysis used a different input order than the run manifest"
+                for key in (
+                    "source",
+                    "size_bytes",
+                    "sha256",
+                    "expected_start_time",
+                    "expected_duration_sec",
+                ):
+                    if branch_entry.get(key) != root_entry.get(key):
+                        return f"the {label} analysis used a different input identity than the run manifest"
+                root_disposition = str(root_entry.get("disposition", ""))
+                branch_disposition = str(branch_entry.get("disposition", ""))
+                if branch_disposition == root_disposition:
+                    continue
+                if (
+                    root_disposition == "process"
+                    and branch_disposition == "authorized_missing_corrupted"
+                ):
+                    continue
+                return f"the {label} analysis used an incompatible session disposition"
     return ""
 
 
@@ -809,13 +844,6 @@ def _load_authoritative_analysis_sessions(
 
     expected = payload.get("expected")
     processed = payload.get("processed")
-    if run_mode.get("shared_input_manifest"):
-        manifest, manifest_error = load_frozen_input_manifest(
-            os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
-        )
-        if manifest is None:
-            return None, None, f"the run-wide frozen input manifest is {manifest_error}"
-        expected = manifest.get("expected")
     if not isinstance(expected, list) or not isinstance(processed, list):
         return None, None, f"the authoritative {analysis_kind} session index is malformed"
     return expected, processed, ""
@@ -1925,14 +1953,14 @@ def _classify_current(
     if verification_error:
         return corrupted(verification_error, run_id=run_id)
 
-    # A run with scientist-approved missing sessions or an authorized final
-    # exclusion completes as a distinct outcome, never indistinguishable clean
-    # success.
+    # A run with missing sessions completes as a distinct outcome, never
+    # indistinguishable clean success. Legacy final exclusions remain readable
+    # for older artifacts but are no longer produced by the active workflow.
     missing_count, exclusion_count = _authorized_gap_counts(run_dir, run_mode)
     if missing_count or exclusion_count:
         pieces = []
         if missing_count:
-            pieces.append(f"{missing_count} approved missing session(s)")
+            pieces.append(f"{missing_count} missing session(s)")
         if exclusion_count:
             pieces.append("an incomplete final chunk excluded")
         return TerminalClassification(
@@ -1957,10 +1985,11 @@ def _classify_current(
 
 
 def _authorized_gap_counts(run_dir: str, run_mode: dict[str, Any]) -> tuple[int, int]:
-    """Count approved missing sessions and authorized final exclusions in the run.
+    """Count missing sessions and legacy final exclusions in the run.
 
-    Read from the run-wide session index (the frozen manifest) when present, else
-    from an analysis completeness record. Counts are per-session, run-wide.
+    Read branch completeness records first because a session can become missing
+    after the shared admission manifest was frozen. Counts are deduplicated by
+    authoritative position and source across phasic and tonic outputs.
     """
     from photometry_pipeline.input_processing_completeness import (
         DISPOSITION_AUTHORIZED_EXCLUSION,
@@ -1968,28 +1997,41 @@ def _authorized_gap_counts(run_dir: str, run_mode: dict[str, Any]) -> tuple[int,
         load_frozen_input_manifest,
     )
 
-    expected = None
-    if run_mode.get("shared_input_manifest"):
+    missing_keys: set[tuple[int, str]] = set()
+    exclusion_keys: set[tuple[int, str]] = set()
+    for analysis in ("phasic_out", "tonic_out"):
+        payload, _err = read_input_completeness(
+            os.path.join(run_dir, "_analysis", analysis)
+        )
+        if payload is None:
+            continue
+        expected = payload.get("expected")
+        if not isinstance(expected, list):
+            continue
+        for entry in expected:
+            if not isinstance(entry, dict) or not isinstance(entry.get("index"), int):
+                continue
+            key = (int(entry["index"]), _normalized_source(entry.get("source", "")))
+            if entry.get("disposition") == DISPOSITION_AUTHORIZED_MISSING:
+                missing_keys.add(key)
+            elif entry.get("disposition") == DISPOSITION_AUTHORIZED_EXCLUSION:
+                exclusion_keys.add(key)
+
+    if not missing_keys and not exclusion_keys and run_mode.get("shared_input_manifest"):
+        # Compatibility for older artifacts whose branch records predate the
+        # shared completeness contract.
         manifest, _err = load_frozen_input_manifest(
             os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
         )
-        if manifest is not None:
-            expected = manifest.get("expected")
-    if expected is None:
-        for analysis in ("phasic_out", "tonic_out"):
-            payload, _err = read_input_completeness(
-                os.path.join(run_dir, "_analysis", analysis)
-            )
-            if payload is not None:
-                expected = payload.get("expected")
-                break
-    if not isinstance(expected, list):
-        return 0, 0
-    missing = sum(1 for e in expected if e.get("disposition") == DISPOSITION_AUTHORIZED_MISSING)
-    exclusions = sum(
-        1 for e in expected if e.get("disposition") == DISPOSITION_AUTHORIZED_EXCLUSION
-    )
-    return missing, exclusions
+        for entry in (manifest or {}).get("expected", []):
+            if not isinstance(entry, dict) or not isinstance(entry.get("index"), int):
+                continue
+            key = (int(entry["index"]), _normalized_source(entry.get("source", "")))
+            if entry.get("disposition") == DISPOSITION_AUTHORIZED_MISSING:
+                missing_keys.add(key)
+            elif entry.get("disposition") == DISPOSITION_AUTHORIZED_EXCLUSION:
+                exclusion_keys.add(key)
+    return len(missing_keys), len(exclusion_keys)
 
 
 def _run_mode_disagreement(run_mode: dict[str, Any], status: dict[str, Any]) -> str:

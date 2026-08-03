@@ -308,7 +308,6 @@ def test_no_timestamp_or_cache_id_or_object_repr_contaminates_identity():
         {"global_correction_strategy": "signal_only_f0", "dynamic_fit_mode": None},
         {"dynamic_fit_mode": "global_linear_regression"},
         {"output_base_path": r"C:\data\output_2"},
-        {"exclude_incomplete_final_rwd_chunk": True},
         {"feature_event_profile_id": "custom_profile"},
         {"feature_event_values": {"peak_threshold_k": 12.0}},
     ),

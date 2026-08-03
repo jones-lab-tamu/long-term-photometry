@@ -97,18 +97,6 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         recording_start_clock="00:00",
         recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
-        exclude_incomplete_final_rwd_chunk=False,
-        classification_schema_name=(
-            contracts.GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
-        ),
-        classification_schema_version=(
-            contracts.GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
-        ),
-        classifier_version=(
-            contracts.GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION
-        ),
-        classification_status="not_requested",
-        not_requested_classification_digest=_C,
         dataset_snapshot_schema_version="dataset_snapshot.v1",
         dataset_status="applied",
         dataset_current_applied=True,
@@ -742,16 +730,6 @@ def test_incomplete_or_stale_evidence_reference_refuses(
                 ),
             ),
             "unsupported_acquisition_mode",
-        ),
-        (
-            lambda request: _unchecked(
-                request,
-                acquisition_dataset=_unchecked(
-                    request.acquisition_dataset,
-                    exclude_incomplete_final_rwd_chunk=True,
-                ),
-            ),
-            None,
         ),
         (
             lambda request: _unchecked(

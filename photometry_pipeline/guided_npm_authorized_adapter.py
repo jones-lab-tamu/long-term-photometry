@@ -17,6 +17,8 @@ from pathlib import Path
 import stat
 from typing import Any
 
+import pandas as pd
+
 from photometry_pipeline.config import Config
 from photometry_pipeline.guided_npm_production_execution_request import (
     GuidedNpmProductionSessionRuntimeProjection,
@@ -33,6 +35,7 @@ from photometry_pipeline.guided_normalized_recording import (
 from photometry_pipeline.guided_production_mapping import (
     guided_production_strategy_map_to_correction_specs,
 )
+from photometry_pipeline.input_processing_completeness import SessionLocalInputError
 from photometry_pipeline.io.adapters import load_npm_authorized_bytes
 from photometry_pipeline.io.npm_contract import NpmParserContract
 
@@ -43,7 +46,6 @@ _CORRECTION_CONFIG_NAMES = {
 }
 _IRRELEVANT_CONFIG_FIELDS = frozenset(
     {
-        "rwd_excluded_source_files",
         "rwd_contract_validation",
         "authorized_missing_sessions",
         "rwd_time_col",
@@ -464,6 +466,8 @@ def load_guided_npm_authorized_chunk_with_record(
     path: str,
     config: Config,
     chunk_id: int,
+    *,
+    on_source_consumed=None,
 ):
     """Open and consume one exact authorized session with no rediscovery."""
     verify_guided_npm_authorized_input(authorized)
@@ -475,25 +479,45 @@ def load_guided_npm_authorized_chunk_with_record(
     if not stored_paths_equal(path, session.source_path, authorized.source_path_style):
         raise ValueError("authorized_npm_source_path_mismatch")
     content, consumed_file_facts = _stable_authorized_bytes(session)
-    chunk = load_npm_authorized_bytes(
-        session.source_path,
-        content,
-        config,
-        chunk_id,
-        contract=authorized.parser_contract,
-        resolved_timestamp_column=session.resolved_timestamp_column,
-        reference_led_value=authorized.reference_led_value,
-        signal_led_value=authorized.signal_led_value,
-        physical_to_canonical_roi_mapping=authorized.physical_to_canonical_roi_map,
-        authorized_timing_geometry={
-            "overlap_origin_absolute": session.overlap_origin_absolute,
-            "inner_start_rel_overlap": session.support_start_offset_sec,
-            "inner_end_rel_overlap": session.support_end_offset_sec,
-            "resolved_support_start_absolute": session.support_start_absolute,
-            "resolved_support_end_absolute": session.support_end_absolute,
-            "observed_duration_sec": session.observed_support_duration_sec,
-        },
-    )
+    try:
+        try:
+            chunk = load_npm_authorized_bytes(
+                session.source_path,
+                content,
+                config,
+                chunk_id,
+                contract=authorized.parser_contract,
+                resolved_timestamp_column=session.resolved_timestamp_column,
+                reference_led_value=authorized.reference_led_value,
+                signal_led_value=authorized.signal_led_value,
+                physical_to_canonical_roi_mapping=authorized.physical_to_canonical_roi_map,
+                authorized_timing_geometry={
+                    "overlap_origin_absolute": session.overlap_origin_absolute,
+                    "inner_start_rel_overlap": session.support_start_offset_sec,
+                    "inner_end_rel_overlap": session.support_end_offset_sec,
+                    "resolved_support_start_absolute": session.support_start_absolute,
+                    "resolved_support_end_absolute": session.support_end_absolute,
+                    "observed_duration_sec": session.observed_support_duration_sec,
+                },
+            )
+        except SessionLocalInputError:
+            raise
+        except (OSError, EOFError, UnicodeError, pd.errors.ParserError) as exc:
+            raise SessionLocalInputError(
+                category="session_input_unreadable",
+                reason=str(exc),
+            ) from exc
+    except Exception:
+        if on_source_consumed is not None:
+            on_source_consumed(
+                _build_authorized_consumed_source_record(
+                    authorized,
+                    session,
+                    config,
+                    consumed_file_facts,
+                )
+            )
+        raise
     metadata = chunk.metadata
     metadata.update(
         {
@@ -541,45 +565,96 @@ def load_guided_npm_authorized_chunk_with_record(
         != authorized.authoritative_source_start_times[chunk_id]
     ):
         raise ValueError("authorized_npm_loaded_session_mismatch")
+    record = _build_authorized_consumed_source_record(
+        authorized,
+        session,
+        config,
+        consumed_file_facts,
+        observed_physical_roi_ids=tuple(metadata["npm_observed_physical_roi_ids"]),
+        canonical_roi_ids=tuple(chunk.channel_names),
+        recording_time_start_sec=float(
+            session.actual_elapsed_sec + chunk.time_sec[0]
+        ),
+        recording_time_end_sec=float(
+            session.actual_elapsed_sec + chunk.time_sec[-1]
+        ),
+        resolved_timestamp_column=metadata["npm_resolved_timestamp_column"],
+        timestamp_unit=metadata["npm_timestamp_unit"],
+        support_policy=metadata["npm_support_policy"],
+        output_time_basis=metadata["output_time_basis"],
+        source_size_bytes=len(content),
+        source_sha256=hashlib.sha256(content).hexdigest(),
+    )
+    return GuidedNpmAuthorizedChunkLoadResult(chunk, record)
+
+
+def _build_authorized_consumed_source_record(
+    authorized: GuidedNpmAuthorizedInput,
+    session: GuidedNpmProductionSessionRuntimeProjection,
+    config: Config,
+    consumed_file_facts: os.stat_result,
+    *,
+    observed_physical_roi_ids: tuple[str, ...] | None = None,
+    canonical_roi_ids: tuple[str, ...] | None = None,
+    recording_time_start_sec: float | None = None,
+    recording_time_end_sec: float | None = None,
+    resolved_timestamp_column: str | None = None,
+    timestamp_unit: str | None = None,
+    support_policy: str | None = None,
+    output_time_basis: str | None = None,
+    source_size_bytes: int | None = None,
+    source_sha256: str | None = None,
+):
     from photometry_pipeline.guided_npm_worker_acknowledgement import (
         GuidedNpmConsumedSourceRecord,
         compute_guided_npm_consumed_source_record_identity,
     )
 
+    if recording_time_start_sec is None or recording_time_end_sec is None:
+        fs = float(config.target_fs_hz)
+        if config.allow_partial_final_chunk:
+            ideal = int(round(float(config.chunk_duration_sec) * fs))
+            support = int(math.floor(float(session.support_end_offset_sec) * fs)) + 1
+            local_start = 0.0
+            local_end = (min(ideal, support) - 1) / fs
+        else:
+            local_start = math.ceil(float(session.support_start_offset_sec) * fs) / fs
+            local_end = math.floor(float(session.support_end_offset_sec) * fs) / fs
+        recording_time_start_sec = float(session.actual_elapsed_sec + local_start)
+        recording_time_end_sec = float(session.actual_elapsed_sec + local_end)
     record = GuidedNpmConsumedSourceRecord(
         session.chronological_position,
         session.source_path,
         session.canonical_relative_path,
-        len(content),
-        hashlib.sha256(content).hexdigest(),
+        session.source_size_bytes if source_size_bytes is None else source_size_bytes,
+        session.source_sha256 if source_sha256 is None else source_sha256,
         consumed_file_facts.st_mtime_ns,
         consumed_file_facts.st_dev,
         consumed_file_facts.st_ino,
         consumed_file_facts.st_mode,
         session.canonical_session_runtime_identity,
-        metadata["npm_resolved_timestamp_column"],
-        metadata["npm_timestamp_unit"],
+        session.resolved_timestamp_column if resolved_timestamp_column is None else resolved_timestamp_column,
+        session.timestamp_unit if timestamp_unit is None else timestamp_unit,
         session.resolved_led_column,
         authorized.reference_led_value,
         authorized.signal_led_value,
-        metadata["npm_support_policy"],
-        metadata["output_time_basis"],
+        session.support_policy if support_policy is None else support_policy,
+        session.output_time_basis if output_time_basis is None else output_time_basis,
         session.physical_roi_inventory,
-        tuple(metadata["npm_observed_physical_roi_ids"]),
-        tuple(chunk.channel_names),
+        session.physical_roi_inventory if observed_physical_roi_ids is None else observed_physical_roi_ids,
+        authorized.canonical_roi_ids if canonical_roi_ids is None else canonical_roi_ids,
         authorized.physical_to_canonical_roi_map,
         session.actual_elapsed_sec,
-        float(session.actual_elapsed_sec + chunk.time_sec[0]),
-        float(session.actual_elapsed_sec + chunk.time_sec[-1]),
+        recording_time_start_sec,
+        recording_time_end_sec,
         "0" * 64,
     )
-    record = replace(
+    return replace(
         record,
         canonical_consumed_source_record_identity=(
             compute_guided_npm_consumed_source_record_identity(record)
         ),
     )
-    return GuidedNpmAuthorizedChunkLoadResult(chunk, record)
 
 
 def load_guided_npm_authorized_chunk(

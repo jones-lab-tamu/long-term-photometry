@@ -33,7 +33,6 @@ def _request(**overrides: object) -> GuidedValidationRequest:
         "acquisition_mode": "intermittent",
         "sessions_per_hour": 6,
         "session_duration_sec": 120.0,
-        "exclude_incomplete_final_rwd_chunk": True,
         "timeline_anchor_mode": "civil",
         "included_roi_ids": ["ROI1", "ROI0"],
         "execution_mode": "phasic",

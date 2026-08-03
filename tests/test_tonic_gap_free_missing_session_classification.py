@@ -1,10 +1,9 @@
-"""Gap-free tonic time is blocked only by a compressible missing interval.
+"""Gap-free tonic time is blocked only by an internal missing interval.
 
-An explicitly excluded incomplete final recording session ends the recording
-earlier; it never collapses an interval between two retained sessions, so it
-must not force the real elapsed-time tonic view.  A missing or excluded session
-that still has retained recording data after it does compress a real interval
-and must keep blocking gap-free elapsed time.
+A missing final recording session has no retained recording data after it, so
+it does not collapse an interval between two retained sessions. A missing
+session with later retained data does compress a real interval and must keep
+blocking gap-free elapsed time.
 
 These checks drive the real Pipeline and then the real ``plot_tonic_48h.py``
 command the deliverables wrapper issues.
@@ -59,10 +58,6 @@ def _missing(index: int) -> dict:
     return _session(index, "missing_corrupted")
 
 
-def _final_exclusion(index: int) -> dict:
-    return _session(index, "authorized_final_exclusion")
-
-
 def _blocking_indices(sessions) -> list:
     return [
         int(item["session_index"])
@@ -76,15 +71,15 @@ def test_no_missing_sessions_never_blocks():
     assert last_retained_plot_session_index(sessions) == 2
 
 
-def test_excluded_incomplete_final_session_only_never_blocks():
-    sessions = [_valid(0), _valid(1), _valid(2), _final_exclusion(3)]
+def test_missing_final_session_only_never_blocks():
+    sessions = [_valid(0), _valid(1), _valid(2), _missing(3)]
     assert _blocking_indices(sessions) == []
 
 
-def test_terminal_exclusion_with_no_retained_session_after_it_never_blocks():
-    # The excluded fragment is the highest chronological index, so nothing
+def test_terminal_missing_session_with_no_retained_session_after_it_never_blocks():
+    # The missing session is the highest chronological index, so nothing
     # retained follows it even though the recording is now shorter.
-    sessions = [_valid(0), _final_exclusion(1)]
+    sessions = [_valid(0), _missing(1)]
     assert _blocking_indices(sessions) == []
     assert last_retained_plot_session_index(sessions) == 0
 
@@ -94,8 +89,8 @@ def test_internal_missing_session_blocks():
     assert _blocking_indices(sessions) == [1]
 
 
-def test_internal_missing_session_plus_terminal_exclusion_blocks_only_the_internal_one():
-    sessions = [_valid(0), _missing(1), _valid(2), _final_exclusion(3)]
+def test_internal_missing_session_plus_terminal_missing_blocks_only_the_internal_one():
+    sessions = [_valid(0), _missing(1), _valid(2), _missing(3)]
     assert _blocking_indices(sessions) == [1]
 
 
@@ -110,7 +105,7 @@ def test_missing_first_session_followed_by_retained_data_blocks():
 
 
 def test_no_retained_session_at_all_yields_no_classification():
-    sessions = [_missing(0), _final_exclusion(1)]
+    sessions = [_missing(0), _missing(1)]
     assert last_retained_plot_session_index(sessions) is None
     assert _blocking_indices(sessions) == []
 
@@ -154,14 +149,15 @@ def _plot_tonic(out: Path, target: Path, timeline_mode: str, *, sessions_per_hou
     return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
 
-def _terminal_exclusion_run(tmp_path: Path):
-    """Valid retained sessions plus one explicitly excluded final session."""
+def _terminal_missing_run(tmp_path: Path):
+    """Valid retained sessions plus one identifiable unusable final session."""
     inp = _build_input(tmp_path, n_sessions=4)
-    # The final session is a short incomplete fragment the user excluded.
+    # The final session is a short incomplete fragment that fails the existing
+    # analysis requirement and is recorded with the shared missing disposition.
     from tests.test_missing_session_backend import _write_valid
 
     _write_valid(inp / NAMES[3], seed=3, n=120)
-    cfg = _config(tmp_path, rwd_excluded_source_files=[_source(inp, 3)])
+    cfg = _config(tmp_path)
     return inp, _run(tmp_path, cfg, inp, mode="tonic")
 
 
@@ -171,20 +167,22 @@ def _internal_missing_run(tmp_path: Path):
     return inp, _run(tmp_path, cfg, inp, mode="tonic")
 
 
-def test_excluded_final_session_is_recorded_as_authorized_exclusion(tmp_path: Path):
-    _inp, out = _terminal_exclusion_run(tmp_path)
+def test_unusable_final_session_is_recorded_as_missing(tmp_path: Path):
+    _inp, out = _terminal_missing_run(tmp_path)
     record = _record(out)
     by_index = {int(e["index"]): e for e in record["expected"]}
     assert [by_index[i]["disposition"] for i in sorted(by_index)] == [
         DISPOSITION_PROCESS,
         DISPOSITION_PROCESS,
         DISPOSITION_PROCESS,
-        DISPOSITION_AUTHORIZED_EXCLUSION,
+        DISPOSITION_AUTHORIZED_MISSING,
     ]
+    assert by_index[3]["failure_category"] == "session_input_shortfall"
+    assert "End Coverage Failure" in by_index[3]["reason"]
 
 
-def test_gap_free_tonic_publication_succeeds_for_terminal_exclusion(tmp_path: Path):
-    _inp, out = _terminal_exclusion_run(tmp_path)
+def test_gap_free_tonic_publication_succeeds_for_terminal_missing(tmp_path: Path):
+    _inp, out = _terminal_missing_run(tmp_path)
     target = tmp_path / "tonic_overview.png"
     result = _plot_tonic(out, target, GAP_FREE)
     combined = result.stdout + result.stderr
@@ -194,10 +192,10 @@ def test_gap_free_tonic_publication_succeeds_for_terminal_exclusion(tmp_path: Pa
     assert target.is_file()
 
 
-def test_real_elapsed_tonic_publication_also_succeeds_for_terminal_exclusion(
+def test_real_elapsed_tonic_publication_also_succeeds_for_terminal_missing(
     tmp_path: Path,
 ):
-    _inp, out = _terminal_exclusion_run(tmp_path)
+    _inp, out = _terminal_missing_run(tmp_path)
     target = tmp_path / "tonic_overview_real.png"
     result = _plot_tonic(out, target, REAL_ELAPSED)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -234,17 +232,16 @@ def test_real_elapsed_tonic_publication_succeeds_for_internal_missing_session(
     assert target.is_file()
 
 
-def test_assemble_arrays_tags_terminal_exclusion_as_not_compressible(tmp_path: Path):
+def test_assemble_arrays_tags_terminal_missing_without_later_data(tmp_path: Path):
     from types import SimpleNamespace
 
     from photometry_pipeline.io.hdf5_cache_reader import open_tonic_cache
     from tools.plot_tonic_48h import (
-        MISSING_SESSION_COMPRESSIBLE_KEY,
         assemble_arrays,
         sessions_blocking_gap_free_timeline,
     )
 
-    _inp, out = _terminal_exclusion_run(tmp_path)
+    _inp, out = _terminal_missing_run(tmp_path)
     cache = open_tonic_cache(str(out / "tonic_trace_cache.h5"))
     try:
         args = SimpleNamespace(
@@ -262,8 +259,5 @@ def test_assemble_arrays_tags_terminal_exclusion_as_not_compressible(tmp_path: P
     finally:
         cache.close()
 
-    # The excluded slot is still reported to the marker code unchanged; only the
-    # gap-free compatibility classification treats it as non-compressible.
-    assert [item["status"] for item in missing] == ["authorized_final_exclusion"]
-    assert missing[0][MISSING_SESSION_COMPRESSIBLE_KEY] is False
+    assert [item["status"] for item in missing] == ["missing_corrupted"]
     assert sessions_blocking_gap_free_timeline(missing) == []

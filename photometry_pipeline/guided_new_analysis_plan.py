@@ -367,7 +367,6 @@ class GuidedNewAnalysisDatasetContractSourceIdentity:
     continuous_window_sec: float | None = None
     continuous_step_sec: float | None = None
     allow_partial_final_window: bool | None = None
-    exclude_incomplete_final_rwd_chunk: bool | None = None
     discovered_roi_ids: tuple[str, ...] = ()
     included_roi_ids: tuple[str, ...] = ()
     source_setup_signature: str | None = None
@@ -1205,7 +1204,6 @@ class GuidedNewAnalysisDraftPlan:
     continuous_window_sec: float | None = 600.0
     continuous_step_sec: float | None = 600.0
     allow_partial_final_window: bool = False
-    exclude_incomplete_final_rwd_chunk: bool = False
     # Scientist approvals are scoped to this draft only; no preference/global
     # storage is used. Every entry remains identity-bound to the discovered RWD
     # source and must be rechecked before a fresh run.
@@ -2005,8 +2003,6 @@ def _dataset_contract_snapshot_plan_consistency_reasons(
         reasons.append("continuous_step_sec mismatch")
     if not _same_optional_value(plan.allow_partial_final_window, identity.allow_partial_final_window):
         reasons.append("allow_partial_final_window mismatch")
-    if not _same_optional_value(plan.exclude_incomplete_final_rwd_chunk, identity.exclude_incomplete_final_rwd_chunk):
-        reasons.append("exclude_incomplete_final_rwd_chunk mismatch")
     if identity.included_roi_ids and tuple(plan.included_roi_ids) != identity.included_roi_ids:
         reasons.append("included_roi_ids mismatch")
 
@@ -2433,12 +2429,6 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
                 blocks_subset=True,
                 issue_category=blocks_category,
             ))
-        fields.append(_execution_field(
-            "acquisition_repair_fields",
-            "present",
-            value={"exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk},
-            provenance="GuidedNewAnalysisDraftPlan acquisition repair field",
-        ))
     elif fmt == "npm":
         if acq == "continuous":
             fields.append(_execution_field(
@@ -2728,7 +2718,6 @@ def _dataset_contract_snapshot_preview_dict(
             "continuous_window_sec": identity.continuous_window_sec,
             "continuous_step_sec": identity.continuous_step_sec,
             "allow_partial_final_window": identity.allow_partial_final_window,
-            "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
             "discovered_roi_ids": list(identity.discovered_roi_ids),
             "included_roi_ids": list(identity.included_roi_ids),
             "source_setup_signature": identity.source_setup_signature,
@@ -2755,7 +2744,6 @@ RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS = (
 )
 RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS = {
     *RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS,
-    "exclude_incomplete_final_rwd_chunk",
 }
 RWD_NORMALIZATION_STRUCTURAL_FIELDS = {
     "input_format",
@@ -2770,7 +2758,6 @@ RWD_NORMALIZATION_PROVENANCE_FIELDS = {
     "no_file_inspection",
     "real_backend_contract_values_not_inferred",
     "rwd_contract_validation",
-    "rwd_excluded_source_files",
 }
 
 
@@ -2820,7 +2807,6 @@ def build_guided_rwd_dataset_contract_normalization_preview(
             "sessions_per_hour": identity.sessions_per_hour,
             "session_duration_sec": identity.session_duration_sec,
             "allow_partial_final_window": identity.allow_partial_final_window,
-            "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
             "source_setup_signature": identity.source_setup_signature,
             "config_fingerprint": identity.config_fingerprint,
             "diagnostic_cache_contract_identity": identity.diagnostic_cache_contract_identity,
@@ -2841,13 +2827,6 @@ def build_guided_rwd_dataset_contract_normalization_preview(
             unresolved_fields.append(field_name)
         else:
             backend_config_values[field_name] = value
-    if isinstance(plan.exclude_incomplete_final_rwd_chunk, bool):
-        backend_config_values["exclude_incomplete_final_rwd_chunk"] = (
-            plan.exclude_incomplete_final_rwd_chunk
-        )
-    else:
-        unresolved_fields.append("exclude_incomplete_final_rwd_chunk")
-
     inconsistent_fields: list[dict[str, Any]] = []
     plan_format = _normalized_format(plan.input_format)
     plan_acquisition = _normalized_format(plan.acquisition_mode)
@@ -2891,12 +2870,6 @@ def build_guided_rwd_dataset_contract_normalization_preview(
             _normalized_format(identity.acquisition_mode),
             "source_identity.acquisition_mode",
         ),
-        (
-            "exclude_incomplete_final_rwd_chunk",
-            bool(plan.exclude_incomplete_final_rwd_chunk),
-            identity.exclude_incomplete_final_rwd_chunk,
-            "source_identity.exclude_incomplete_final_rwd_chunk",
-        ),
     )
     for field_name, plan_value, snapshot_value, location in identity_candidates:
         if snapshot_value is not None and plan_value != snapshot_value:
@@ -2917,22 +2890,15 @@ def build_guided_rwd_dataset_contract_normalization_preview(
             "input_format",
             "resolved_input_format",
             "acquisition_mode",
-            "exclude_incomplete_final_rwd_chunk",
         ):
             if field_name not in values:
                 continue
             expected = (
-                plan.exclude_incomplete_final_rwd_chunk
-                if field_name == "exclude_incomplete_final_rwd_chunk"
-                else plan_acquisition
+                plan_acquisition
                 if field_name == "acquisition_mode"
                 else plan_format
             )
-            actual = (
-                values[field_name]
-                if field_name == "exclude_incomplete_final_rwd_chunk"
-                else _normalized_format(values[field_name])
-            )
+            actual = _normalized_format(values[field_name])
             if expected != actual:
                 inconsistent_fields.append(
                     _rwd_normalization_consistency_record(
@@ -3402,7 +3368,6 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "continuous_window_sec": plan.continuous_window_sec,
             "continuous_step_sec": plan.continuous_step_sec,
             "allow_partial_final_window": plan.allow_partial_final_window,
-            "exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk,
             "acquisition_structure_status": plan.acquisition_structure_status,
             "timeline_anchor_mode": {
                 "status": "represented",
@@ -4293,7 +4258,6 @@ def _dataset_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview
                 "rwd_time_col",
                 "sig_suffix",
                 "uv_suffix",
-                "exclude_incomplete_final_rwd_chunk",
             )
         ]
         entries.extend(
@@ -4342,7 +4306,7 @@ def _dataset_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview
             "no_config_dict": True,
         }
     entries: list[GuidedFirstSubsetMappingEntry] = []
-    for field_name in ("rwd_time_col", "sig_suffix", "uv_suffix", "exclude_incomplete_final_rwd_chunk"):
+    for field_name in ("rwd_time_col", "sig_suffix", "uv_suffix"):
         entries.append(_mapping_entry(
             field_name,
             backend_values.get(field_name),
@@ -5364,7 +5328,6 @@ def build_guided_new_analysis_execution_spec_preview(
             "continuous_window_sec": plan.continuous_window_sec,
             "continuous_step_sec": plan.continuous_step_sec,
             "allow_partial_final_window": plan.allow_partial_final_window,
-            "exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk,
         },
         dataset_contract=dataset_contract,
         roi={

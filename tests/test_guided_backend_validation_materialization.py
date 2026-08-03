@@ -223,7 +223,6 @@ def _apply_valid_diagnostic_cache_and_evidence(
             "rwd_time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
-            "exclude_incomplete_final_rwd_chunk": False,
         },
         source_identity=GuidedNewAnalysisDatasetContractSourceIdentity(
             input_source_path=str(source_root),
@@ -234,7 +233,6 @@ def _apply_valid_diagnostic_cache_and_evidence(
             sessions_per_hour=6,
             session_duration_sec=120.0,
             allow_partial_final_window=False,
-            exclude_incomplete_final_rwd_chunk=False,
             discovered_roi_ids=(roi_id,),
             included_roi_ids=(roi_id,),
             source_setup_signature=source_signature,
@@ -313,7 +311,6 @@ def _valid_npm_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
         sessions_per_hour=1,
         session_duration_sec=2.0,
         allow_partial_final_window=False,
-        exclude_incomplete_final_rwd_chunk=False,
         discovered_roi_ids=("Region0",),
         included_roi_ids=("Region0",),
         source_setup_signature=None,
@@ -617,7 +614,6 @@ def _apply_valid_local_preview_correction_evidence(
             "rwd_time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
-            "exclude_incomplete_final_rwd_chunk": False,
         },
         source_identity=GuidedNewAnalysisDatasetContractSourceIdentity(
             input_source_path=str(source_root),
@@ -628,7 +624,6 @@ def _apply_valid_local_preview_correction_evidence(
             sessions_per_hour=6,
             session_duration_sec=120.0,
             allow_partial_final_window=False,
-            exclude_incomplete_final_rwd_chunk=False,
             discovered_roi_ids=(roi_id,),
             included_roi_ids=(roi_id,),
             source_setup_signature=None,
@@ -1476,39 +1471,6 @@ def test_setup_check_freezes_normalized_recording_description_identity(tmp_path:
     )
 
 
-def test_final_exclusion_is_represented_at_the_real_materialization_boundary(tmp_path: Path):
-    """B1-completion item 2: the real accepted final-exclusion state
-    (draft.dataset_contract_snapshot.source_identity.exclude_incomplete_final_rwd_chunk)
-    must flow into materialize_guided_backend_validation_facts (not a
-    direct adapter-unit construction) and produce a normalized recording
-    whose chronologically final session has disposition 'excluded'."""
-    draft = _valid_local_preview_stage2c_draft(tmp_path)
-    root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
-    # A second, later, real RWD session -- the true chronological final
-    # session that final-exclusion should apply to.
-    _write_session(root, "2026_07_02-12_00_00", b"time,uv,sig\n0.0,1.2,3.4\n")
-    draft.dataset_contract_snapshot = replace(
-        draft.dataset_contract_snapshot,
-        source_identity=replace(
-            draft.dataset_contract_snapshot.source_identity,
-            exclude_incomplete_final_rwd_chunk=True,
-        ),
-    )
-
-    result = materialize_guided_backend_validation_facts(
-        draft, parser_contract=_valid_parser_contract()
-    )
-    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
-    payload = result.facts.normalized_recording_description
-    sessions = payload["sessions"]
-    assert len(sessions) == 2
-    by_disposition = {s["disposition"]: s for s in sessions}
-    assert by_disposition["process"]["stable_source_identity"].startswith("2026_06_30-12_00_00")
-    assert by_disposition["excluded"]["stable_source_identity"].startswith("2026_07_02-12_00_00")
-    assert by_disposition["excluded"]["chronological_position"] == 1
-    assert "missing" not in by_disposition
-
-
 def test_request_ready_enriched_facts_are_complete_and_immutable(tmp_path: Path):
     draft = _valid_stage2c_draft(tmp_path)
     parser = _valid_parser_contract()
@@ -2179,7 +2141,7 @@ def test_backend_validation_workflow_accepts_npm_without_rwd_classifier_claims(
     assert acquisition.recording_start_clock == "12:00"
     assert acquisition.recording_start_clock_source == "validated_metadata"
     assert acquisition.disposition_policy.admitted_dispositions == ("process",)
-    assert acquisition.disposition_policy.missing_session_policy == "unsupported"
+    assert acquisition.disposition_policy.missing_session_policy == "supported"
     assert not hasattr(acquisition, "classification_schema_name")
     assert outcome.materialization_result.npm_cadence_evidence == ()
     assert outcome.user_summary == (
@@ -2284,7 +2246,7 @@ def test_shared_npm_validation_accepts_loaded_default_profile_without_apply(
     assert outcome.accepted_for_backend_validation is True
 
 
-def test_npm_missing_session_approval_is_refused_before_materialization(
+def test_npm_missing_session_approval_still_requires_matching_source_identity(
     tmp_path: Path,
 ):
     draft = _valid_npm_stage2c_draft(tmp_path)
@@ -2305,27 +2267,7 @@ def test_npm_missing_session_approval_is_refused_before_materialization(
 
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].category == "approved_missing_session_invalid"
-    assert result.blocking_issues[0].detail_code == "npm_missing_session_unsupported"
-    assert result.blocking_issues[0].message == (
-        "Missing-session continuation is not available for NPM recordings."
-    )
-
-
-def test_npm_excluded_final_session_is_refused_before_materialization(
-    tmp_path: Path,
-):
-    draft = _valid_npm_stage2c_draft(tmp_path)
-    draft.exclude_incomplete_final_rwd_chunk = True
-    result = materialize_guided_backend_validation_facts(
-        draft,
-        parser_contract=NpmParserContract(target_fs_hz=2.0, session_duration_sec=2.0),
-    )
-
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "unsupported_incomplete_final_exclusion"
-    assert result.blocking_issues[0].message == (
-        "Excluding an incomplete final session is not available for NPM recordings."
-    )
+    assert result.blocking_issues[0].detail_code == "source_identity_changed"
 
 
 def test_npm_setup_check_failures_use_scientist_facing_messages(tmp_path: Path):
@@ -2445,25 +2387,6 @@ def test_npm_materialization_retains_per_interval_cadence_evidence(
         90.0,
         60.0,
     ]
-
-
-# Preservation: Exclusion True Refused
-def test_exclusion_true_reaches_source_materialization(tmp_path: Path):
-    source_root = _create_tiny_rwd_fixture(tmp_path)
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path=str(source_root),
-        input_format="rwd",
-        acquisition_mode="intermittent",
-        exclude_incomplete_final_rwd_chunk=True,
-    )
-    parser = _valid_parser_contract()
-
-    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
-    assert not (
-        isinstance(result, GuidedBackendValidationMaterializationFailure)
-        and result.blocking_issues[0].category
-        == "unsupported_incomplete_final_exclusion"
-    )
 
 
 # Preservation: Cancellation

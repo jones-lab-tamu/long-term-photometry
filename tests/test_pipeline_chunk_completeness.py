@@ -1,11 +1,12 @@
 """Every admitted intermittent chunk reaches one terminal disposition (4J16k41 / C8).
 
 These drive the real Pipeline in-process over a small multi-chunk RWD recording.
-An admitted chunk that cannot be processed must fail the run; it is never omitted
-from the outputs while the run still succeeds.
+An identified admitted chunk that cannot be processed becomes an explicit missing
+session; it is never omitted from the outputs while the run still succeeds.
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ import pytest
 from photometry_pipeline.config import Config
 from photometry_pipeline.pipeline import Pipeline
 from photometry_pipeline.input_processing_completeness import (
-    DISPOSITION_AUTHORIZED_EXCLUSION,
+    DISPOSITION_AUTHORIZED_MISSING,
     INPUT_COMPLETENESS_FILENAME,
     InputProcessingError,
     validate_input_completeness,
@@ -48,7 +49,12 @@ def _build_input(tmp_path: Path, *, malformed=(), flat=()) -> Path:
     for i, name in enumerate(CHUNK_NAMES):
         if i in malformed:
             (inp / name).mkdir(parents=True, exist_ok=True)
-            (inp / name / "fluorescence.csv").write_text("not,valid\nrwd,chunk\n", encoding="utf-8")
+            (inp / name / "fluorescence.csv").write_text(
+                "TimeStamp,Region0-470,Region0-410\n"
+                "0,1.2,1.0\n"
+                '0.1,"unterminated,1.1\n',
+                encoding="utf-8",
+            )
         else:
             _write_rwd_chunk(inp / name, seed=i, flat=(i in flat))
     return inp
@@ -93,25 +99,43 @@ def test_all_admitted_chunks_process_with_exact_accounting(tmp_path: Path):
     assert {p["index"] for p in record["processed"]} == {0, 1, 2}
 
 
-# 2 / 12. Malformed chunk fails the run, never omitted ------------------------
+# Identifiable malformed chunks continue, never omitted -----------------------
 
 
-def test_middle_malformed_chunk_fails_the_run(tmp_path: Path):
-    with pytest.raises(Exception):
-        _run(tmp_path, _config(tmp_path), _build_input(tmp_path, malformed=(1,)))
-    assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
+def test_middle_malformed_chunk_is_recorded_and_later_chunk_keeps_index(tmp_path: Path):
+    out = _run(tmp_path, _config(tmp_path), _build_input(tmp_path, malformed=(1,)))
+    record = _record(out)
+    assert validate_input_completeness(record) == ""
+    by_index = {entry["index"]: entry for entry in record["expected"]}
+    assert by_index[1]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert by_index[1]["failure_category"] == "session_input_unreadable"
+    assert "Error tokenizing data" in by_index[1]["reason"]
+    assert [item["index"] for item in record["processed"]] == [0, 2]
 
 
-def test_malformed_final_chunk_without_exclusion_fails(tmp_path: Path):
-    with pytest.raises(Exception):
-        _run(tmp_path, _config(tmp_path), _build_input(tmp_path, malformed=(2,)))
+def test_malformed_final_chunk_is_recorded_without_exclusion(tmp_path: Path):
+    out = _run(tmp_path, _config(tmp_path), _build_input(tmp_path, malformed=(2,)))
+    record = _record(out)
+    by_index = {entry["index"]: entry for entry in record["expected"]}
+    assert by_index[2]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert [item["index"] for item in record["processed"]] == [0, 1]
+
+
+def test_no_usable_sessions_fails_closed(tmp_path: Path):
+    with pytest.raises(InputProcessingError) as excinfo:
+        _run(
+            tmp_path,
+            _config(tmp_path),
+            _build_input(tmp_path, malformed=(0, 1, 2)),
+        )
+    assert excinfo.value.category == "no_usable_sessions"
     assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
 
 
 # 5 / 6 / 7. Injected load / correction / feature exceptions fail the run ------
 
 
-def test_load_exception_for_one_chunk_fails(tmp_path: Path, monkeypatch):
+def test_unexpected_runtime_error_from_per_session_load_aborts(tmp_path: Path, monkeypatch):
     inp = _build_input(tmp_path)
     import photometry_pipeline.pipeline as pipeline_mod
 
@@ -123,12 +147,15 @@ def test_load_exception_for_one_chunk_fails(tmp_path: Path, monkeypatch):
         return real_load(path, fmt, config, **kwargs)
 
     monkeypatch.setattr(pipeline_mod, "load_chunk", _boom)
-    with pytest.raises(Exception):
+    with pytest.raises(InputProcessingError) as excinfo:
         _run(tmp_path, _config(tmp_path), inp)
-    assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
+    assert excinfo.value.category == "processing_exception"
+    assert "injected load failure" in excinfo.value.reason
 
 
-def test_feature_extraction_exception_for_one_chunk_fails(tmp_path: Path, monkeypatch):
+def test_unrelated_value_error_from_per_session_feature_extraction_aborts(
+    tmp_path: Path, monkeypatch
+):
     inp = _build_input(tmp_path)
     from photometry_pipeline.core import feature_extraction
 
@@ -138,17 +165,20 @@ def test_feature_extraction_exception_for_one_chunk_fails(tmp_path: Path, monkey
     def _boom(chunk, config, per_roi_config=None):
         calls["n"] += 1
         if calls["n"] == 2:  # fail on the second processed chunk
-            raise RuntimeError("injected feature-extraction failure")
+            raise ValueError("injected feature-extraction failure")
         return real_extract(chunk, config, per_roi_config=per_roi_config)
 
     monkeypatch.setattr(feature_extraction, "extract_features", _boom)
-    with pytest.raises(Exception):
+    with pytest.raises(InputProcessingError) as excinfo:
         _run(tmp_path, _config(tmp_path), inp)
-    assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
+    assert excinfo.value.category == "processing_exception"
+    assert "injected feature-extraction failure" in excinfo.value.reason
 
 
-def test_analysis_exception_for_one_chunk_fails(tmp_path: Path, monkeypatch):
-    """A per-chunk correction/analysis exception terminates the run."""
+def test_unexpected_runtime_error_from_per_session_analysis_aborts(
+    tmp_path: Path, monkeypatch
+):
+    """A per-chunk correction/analysis exception remains fatal."""
     inp = _build_input(tmp_path)
 
     real_apply = Pipeline._apply_standard_analysis
@@ -161,48 +191,96 @@ def test_analysis_exception_for_one_chunk_fails(tmp_path: Path, monkeypatch):
         return real_apply(self, chunk, i)
 
     monkeypatch.setattr(Pipeline, "_apply_standard_analysis", _boom)
-    with pytest.raises(Exception):
+    with pytest.raises(InputProcessingError) as excinfo:
         _run(tmp_path, _config(tmp_path), inp)
-    assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
+    assert excinfo.value.category == "processing_exception"
+    assert "injected analysis failure" in excinfo.value.reason
 
 
-# 8 / 10 / 11. Authorized exclusion vs. non-final / multiple ------------------
+def test_ambiguous_admitted_order_fails_closed(tmp_path: Path):
+    from photometry_pipeline.input_processing_completeness import build_session_index
+
+    source = tmp_path / "2024_01_01-00_00_00" / "fluorescence.csv"
+    _write_rwd_chunk(source.parent)
+    with pytest.raises(InputProcessingError) as excinfo:
+        build_session_index(
+            acquisition_mode="intermittent",
+            input_format="rwd",
+            ordered_sources=[str(source), str(source)],
+            expected_duration_sec=60.0,
+        )
+    assert excinfo.value.category == "ambiguous_session_order"
 
 
-def test_authorized_incomplete_final_chunk_excluded(tmp_path: Path):
-    # Final chunk malformed, but explicitly excluded by the incomplete-final
-    # policy: the two valid chunks process and the run succeeds.
-    inp = _build_input(tmp_path, malformed=(2,))
-    final_source = str(inp / CHUNK_NAMES[2] / "fluorescence.csv")
-    cfg = _config(tmp_path, rwd_excluded_source_files=[final_source])
+def test_identifiable_npm_middle_failure_continues_with_original_position(
+    tmp_path: Path,
+):
+    from tests.test_npm_b2a_characterization import FIXTURE_ROOT, _npm_config
 
-    out = _run(tmp_path, cfg, inp)
-    record = _record(out)
-    assert validate_input_completeness(record) == ""
-    assert record["expected"][-1]["disposition"] == DISPOSITION_AUTHORIZED_EXCLUSION
-    assert len(record["processed"]) == 2
-
-
-def test_excluding_a_non_final_chunk_fails(tmp_path: Path):
-    inp = _build_input(tmp_path)
-    middle_source = str(inp / CHUNK_NAMES[1] / "fluorescence.csv")
-    cfg = _config(tmp_path, rwd_excluded_source_files=[middle_source])
-
-    with pytest.raises(ValueError, match="final chronological chunk"):
-        _run(tmp_path, cfg, inp)
-
-
-def test_two_recorded_exclusions_fail(tmp_path: Path):
-    inp = _build_input(tmp_path)
-    cfg = _config(
-        tmp_path,
-        rwd_excluded_source_files=[
-            str(inp / CHUNK_NAMES[1] / "fluorescence.csv"),
-            str(inp / CHUNK_NAMES[2] / "fluorescence.csv"),
-        ],
+    input_dir = tmp_path / "npm_input"
+    shutil.copytree(FIXTURE_ROOT / "basic", input_dir)
+    middle = next(input_dir.glob("*15_39_00*.csv"))
+    middle.write_text(
+        'System Timestamp,LED State,Region 1\n0,"unterminated,1\n',
+        encoding="utf-8",
     )
-    with pytest.raises(ValueError):
-        _run(tmp_path, cfg, inp)
+    out = tmp_path / "npm_out"
+    Pipeline(_npm_config(), mode="phasic").run(
+        str(input_dir),
+        str(out),
+        force_format="npm",
+        traces_only=True,
+    )
+
+    record = _record(out)
+    by_index = {entry["index"]: entry for entry in record["expected"]}
+    assert by_index[1]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert "Error tokenizing data" in by_index[1]["reason"]
+    assert [item["index"] for item in record["processed"]] == [0, 2]
+    assert [item["cache_chunk_id"] for item in record["processed"]] == [0, 2]
+
+
+def test_identifiable_mapped_csv_middle_failure_continues_with_original_position(
+    tmp_path: Path,
+):
+    input_dir = tmp_path / "mapped_csv"
+    for index in range(3):
+        times = np.arange(600, dtype=float) / 10.0
+        frame = pd.DataFrame(
+            {
+                "time_sec": times,
+                "Region0_iso": 1.0 + 0.01 * np.sin(times + index),
+                "Region0_sig": 1.2 + 0.02 * np.cos(times + index),
+            }
+        )
+        input_dir.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(input_dir / f"session_{index}.csv", index=False)
+    (input_dir / "session_1.csv").write_text(
+        'time_sec,Region0_iso,Region0_sig\n0,1.0,1.2\n0.1,"unterminated,1.3\n',
+        encoding="utf-8",
+    )
+
+    cfg = Config(
+        target_fs_hz=10.0,
+        chunk_duration_sec=60.0,
+        baseline_method="uv_raw_percentile_session",
+        baseline_percentile=10,
+        custom_tabular_time_col="time_sec",
+        custom_tabular_uv_suffix="_iso",
+        custom_tabular_sig_suffix="_sig",
+        allow_partial_final_chunk=False,
+    )
+    out = tmp_path / "mapped_csv_out"
+    Pipeline(cfg, mode="phasic").run(
+        str(input_dir), str(out), force_format="custom_tabular", traces_only=True
+    )
+
+    record = _record(out)
+    by_index = {entry["index"]: entry for entry in record["expected"]}
+    assert by_index[1]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert "Error tokenizing data" in by_index[1]["reason"]
+    assert [item["index"] for item in record["processed"]] == [0, 2]
+    assert [item["cache_chunk_id"] for item in record["processed"]] == [0, 2]
 
 
 # 3 / 4. Source drift after the admitted set is frozen ------------------------

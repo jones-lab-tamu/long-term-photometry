@@ -38,16 +38,8 @@ DIGEST_ALGORITHM = "sha256"
 SOURCE_FORMAT = "rwd"
 ACQUISITION_MODE = "intermittent"
 
-INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_NAME = (
-    "guided_rwd_incomplete_final_chunk_classification"
-)
-INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_VERSION = "v1"
-INCOMPLETE_FINAL_CLASSIFIER_VERSION = "not_requested_only.v1"
-NOT_REQUESTED_STATUS = "not_requested"
-
 _SET_DIGEST_DOMAIN = "guided-rwd-source-candidate-set:v1"
 _CONTENT_DIGEST_DOMAIN = "guided-rwd-source-candidate-content:v1"
-_CLASSIFICATION_DIGEST_DOMAIN = "guided-rwd-incomplete-final-classification:v1"
 _READ_CHUNK_SIZE = 4 * 1024 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
@@ -134,31 +126,6 @@ class GuidedRwdSourceCandidateSnapshot:
 
 
 @dataclass(frozen=True)
-class GuidedIncompleteFinalChunkPolicy:
-    exclude_incomplete_final_rwd_chunk: bool
-    non_final_short_chunks_block: bool = True
-    malformed_final_chunk_blocks: bool = True
-    exactly_one_final_chunk_may_be_excluded: bool = True
-
-
-@dataclass(frozen=True)
-class GuidedIncompleteFinalChunkClassification:
-    schema_name: str
-    schema_version: str
-    classifier_version: str
-    classification_status: str
-    source_candidate_set_digest: str
-    source_candidate_content_digest: str
-    excluded_canonical_relative_path: str | None
-    reason: str | None
-    evidence: None
-    policy: GuidedIncompleteFinalChunkPolicy
-    parsing_contract_digest: str | None
-    timing_contract_digest: str | None
-    unresolved_inputs: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class _CandidatePath:
     runtime_path: str
     canonical_relative_path: str
@@ -198,8 +165,6 @@ def _error(
         context,
         retryable=retryable,
     )
-
-
 def _check_cancelled(
     cancellation_check: Callable[[], bool] | None,
 ) -> None:
@@ -962,113 +927,4 @@ def build_rwd_source_candidate_snapshot(
         "source_changed_during_snapshot",
         "RWD source remained unstable after one complete retry.",
         last_category=last_error.category if last_error else None,
-    )
-
-
-def _validate_classification(
-    classification: GuidedIncompleteFinalChunkClassification,
-) -> dict[str, Any]:
-    if not isinstance(classification, GuidedIncompleteFinalChunkClassification):
-        raise _error(
-            "invalid_rwd_source_snapshot",
-            "Expected a fixed incomplete-final classification.",
-        )
-    if (
-        classification.schema_name
-        != INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_NAME
-        or classification.schema_version
-        != INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_VERSION
-        or classification.classifier_version
-        != INCOMPLETE_FINAL_CLASSIFIER_VERSION
-        or classification.classification_status != NOT_REQUESTED_STATUS
-    ):
-        raise _error(
-            "invalid_rwd_source_snapshot",
-            "Unsupported incomplete-final classification contract.",
-        )
-    if (
-        not _valid_sha256(classification.source_candidate_set_digest)
-        or not _valid_sha256(classification.source_candidate_content_digest)
-    ):
-        raise _error(
-            "invalid_rwd_source_snapshot",
-            "Incomplete-final classification candidate digest is invalid.",
-        )
-    if (
-        classification.excluded_canonical_relative_path is not None
-        or classification.reason is not None
-        or classification.evidence is not None
-        or classification.parsing_contract_digest is not None
-        or classification.timing_contract_digest is not None
-        or classification.unresolved_inputs
-        or classification.policy.exclude_incomplete_final_rwd_chunk is not False
-        or classification.policy.non_final_short_chunks_block is not True
-        or classification.policy.malformed_final_chunk_blocks is not True
-        or classification.policy.exactly_one_final_chunk_may_be_excluded is not True
-    ):
-        raise _error(
-            "invalid_rwd_source_snapshot",
-            "Invalid not_requested incomplete-final classification state.",
-        )
-    return {
-        "schema_name": classification.schema_name,
-        "schema_version": classification.schema_version,
-        "classifier_version": classification.classifier_version,
-        "classification_status": classification.classification_status,
-        "source_candidate_set_digest": classification.source_candidate_set_digest,
-        "source_candidate_content_digest": (
-            classification.source_candidate_content_digest
-        ),
-        "excluded_canonical_relative_path": None,
-        "reason": None,
-        "evidence": None,
-        "policy": {
-            "exclude_incomplete_final_rwd_chunk": False,
-            "non_final_short_chunks_block": True,
-            "malformed_final_chunk_blocks": True,
-            "exactly_one_final_chunk_may_be_excluded": True,
-        },
-        "parsing_contract_digest": None,
-        "timing_contract_digest": None,
-        "unresolved_inputs": [],
-    }
-
-
-def make_not_requested_incomplete_final_chunk_classification(
-    snapshot: GuidedRwdSourceCandidateSnapshot,
-) -> GuidedIncompleteFinalChunkClassification:
-    """Bind a deterministic no-exclusion policy to a complete snapshot."""
-    if not isinstance(snapshot, GuidedRwdSourceCandidateSnapshot):
-        raise _error(
-            "invalid_rwd_source_snapshot",
-            "A complete RWD source candidate snapshot is required.",
-        )
-    set_digest = compute_rwd_source_candidate_set_digest(snapshot)
-    content_digest = compute_rwd_source_candidate_content_digest(snapshot)
-    return GuidedIncompleteFinalChunkClassification(
-        schema_name=INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_NAME,
-        schema_version=INCOMPLETE_FINAL_CLASSIFICATION_SCHEMA_VERSION,
-        classifier_version=INCOMPLETE_FINAL_CLASSIFIER_VERSION,
-        classification_status=NOT_REQUESTED_STATUS,
-        source_candidate_set_digest=set_digest,
-        source_candidate_content_digest=content_digest,
-        excluded_canonical_relative_path=None,
-        reason=None,
-        evidence=None,
-        policy=GuidedIncompleteFinalChunkPolicy(
-            exclude_incomplete_final_rwd_chunk=False,
-        ),
-        parsing_contract_digest=None,
-        timing_contract_digest=None,
-        unresolved_inputs=(),
-    )
-
-
-def compute_incomplete_final_chunk_classification_digest(
-    classification: GuidedIncompleteFinalChunkClassification,
-) -> str:
-    """Digest the fixed non-authorizing not_requested classification."""
-    return _digest(
-        _CLASSIFICATION_DIGEST_DOMAIN,
-        _validate_classification(classification),
     )

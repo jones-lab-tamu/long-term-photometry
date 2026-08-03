@@ -19,10 +19,6 @@ class Config:
     # grid coverage and reciprocity. This is separate from the RWD-specific
     # final-source exclusion policy below.
     allow_partial_final_chunk: bool = False
-    # RWD-specific opt-in policy: exclude one incomplete final source file before
-    # downstream analysis. It does not relax loader strictness for processed files.
-    exclude_incomplete_final_rwd_chunk: bool = False
-    rwd_excluded_source_files: List[str] = field(default_factory=list)
     rwd_contract_validation: Dict[str, object] = field(default_factory=dict)
     # Scientist-approved corrupted/missing sessions (4J16k41c). Each listed source
     # stays in its chronological slot as an explicit missing interval -- it is not

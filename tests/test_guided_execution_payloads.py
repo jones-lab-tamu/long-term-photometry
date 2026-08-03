@@ -78,12 +78,6 @@ def _rebuild_normalized_recording_identity(intent) -> str:
         compute_normalized_recording_description_identity,
     )
 
-    excluded_path = (
-        intent.input_source.candidate_files[-1].canonical_relative_path
-        if intent.acquisition.exclude_incomplete_final_rwd_chunk
-        and intent.input_source.candidate_files
-        else None
-    )
     description = build_rwd_normalized_recording_description(
         source_root_canonical=intent.input_source.source_root_canonical,
         candidate_snapshot=SimpleNamespace(
@@ -113,7 +107,6 @@ def _rebuild_normalized_recording_identity(intent) -> str:
             item.canonical_relative_path
             for item in intent.input_source.approved_missing_candidates
         ),
-        excluded_canonical_relative_path=excluded_path,
     )
     return compute_normalized_recording_description_identity(description)
 
@@ -388,14 +381,6 @@ def test_config_mapping_contract_completeness_refusal(auth_result):
     # extra override key refuses config_mapping_incomplete
     bad_overrides = dict(payloads.GUIDED_CONFIG_DEFAULT_OVERRIDES)
     bad_overrides["extra_nonexistent_field"] = 42
-    contract = payloads.build_guided_execution_startup_mapping_contract(fixed_config_overrides=bad_overrides)
-    result = payloads.derive_guided_execution_payloads(auth_result, startup_mapping_contract=contract)
-    assert result.status == payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_REFUSED
-    assert result.blocking_issues[0].category == "config_mapping_incomplete"
-
-    # duplicate mapped intent field in overrides refuses config_mapping_incomplete
-    bad_overrides = dict(payloads.GUIDED_CONFIG_DEFAULT_OVERRIDES)
-    bad_overrides["exclude_incomplete_final_rwd_chunk"] = True
     contract = payloads.build_guided_execution_startup_mapping_contract(fixed_config_overrides=bad_overrides)
     result = payloads.derive_guided_execution_payloads(auth_result, startup_mapping_contract=contract)
     assert result.status == payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_REFUSED

@@ -55,7 +55,7 @@ from .core.reporting import (
 from .input_processing_completeness import (
     InputProcessingAccountant,
     InputProcessingError,
-    POLICY_INCOMPLETE_FINAL_RWD_CHUNK,
+    SessionLocalInputError,
 )
 from .run_completion_contract import CORRECTION_PROVENANCE_SCHEMA_VERSION
 from .guided_manifest_current_facts import build_guided_manifest_current_facts
@@ -310,11 +310,10 @@ class Pipeline:
         # map intentionally preserves the legacy uniform dynamic-fit path;
         # an explicit map is copied above and passed to every phasic chunk.
         self.file_list = []
-        # The single authorized final-chunk exclusion (if any) and the frozen
-        # per-chunk accountant, so every admitted chunk reaches exactly one
-        # terminal disposition and none is silently omitted (4J16k41 / C8).
-        self._authorized_exclusion = None
+        # The frozen per-session accountant, so every admitted session reaches
+        # exactly one terminal disposition and none is silently omitted.
         self._admitted_accountant = None
+        self._automatic_missing_sources = set()
         self._intermittent_chunk_id_by_source = {}
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
@@ -1125,70 +1124,9 @@ class Pipeline:
         else:
             self.file_list.sort(key=natural_sort_key)
 
-        def _normalized_abs_path(path: str) -> str:
-            return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
-
-        raw_excluded_source_files = [
-            str(path)
-            for path in (getattr(self.config, "rwd_excluded_source_files", []) or [])
-            if str(path).strip()
-        ]
-        excluded_source_files = {
-            _normalized_abs_path(path) for path in raw_excluded_source_files
-        }
         if self._rwd_contract_validation:
             self.qc_summary["rwd_contract_validation"] = _sanitize_metadata(
                 self._rwd_contract_validation
-            )
-
-        self._authorized_exclusion = None
-
-        if excluded_source_files:
-            if len(raw_excluded_source_files) != 1 or len(excluded_source_files) != 1:
-                raise ValueError(
-                    "Recorded RWD final-chunk exclusion did not match discovered source files; "
-                    "analysis will not continue. Expected exactly one recorded "
-                    f"rwd_excluded_source_files entry, got {len(raw_excluded_source_files)}."
-                )
-            before_count = len(self.file_list)
-            before_files = list(self.file_list)
-            # The incomplete-final-chunk policy may exclude ONLY the final
-            # chronological chunk. A recorded exclusion pointing anywhere else is
-            # not this policy and must not silently drop a mid-recording chunk.
-            final_discovered = _normalized_abs_path(before_files[-1]) if before_files else None
-            if final_discovered not in excluded_source_files:
-                raise ValueError(
-                    "Recorded RWD final-chunk exclusion does not name the final "
-                    "chronological chunk; only the incomplete final chunk may be "
-                    "excluded. Recorded exclusions: "
-                    f"{raw_excluded_source_files}. Final discovered chunk: {before_files[-1] if before_files else None}."
-                )
-            self.file_list = [
-                path
-                for path in self.file_list
-                if _normalized_abs_path(path) not in excluded_source_files
-            ]
-            excluded_count = before_count - len(self.file_list)
-            if excluded_count != 1:
-                raise ValueError(
-                    "Recorded RWD final-chunk exclusion did not match discovered source files; "
-                    "analysis will not continue. Expected exactly one discovered "
-                    f"file to be removed, removed {excluded_count}. "
-                    f"Recorded exclusions: {raw_excluded_source_files}. "
-                    f"Discovered source files: {before_files}."
-                )
-            if not self.file_list:
-                raise ValueError(
-                    "RWD final-chunk exclusion removed all discovered source files; "
-                    "no validated chunks remain for analysis."
-                )
-            self._authorized_exclusion = before_files[-1]
-            print(
-                "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
-                f"Analysis used {len(self.file_list)} valid chunks. "
-                f"{excluded_count} final chunk was excluded. "
-                "See provenance/status output for details.",
-                flush=True,
             )
             
         print(f"Found {len(self.file_list)} files.")
@@ -1257,11 +1195,10 @@ class Pipeline:
 
         Skipped for continuous runs (they carry a window index) and for preview
         runs (an explicit user subset). For a full intermittent run the ordered
-        admitted set is the frozen expected set; the one authorized final-chunk
-        exclusion is appended last so it is verifiably the final chronological
-        chunk.
+        admitted set is the frozen expected session set.
         """
         self._admitted_accountant = None
+        self._automatic_missing_sources = set()
         if self._is_continuous_mode_enabled():
             return
         if getattr(self, "run_type", "full") != "full":
@@ -1283,8 +1220,6 @@ class Pipeline:
         def _norm(path):
             return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
 
-        excluded = self._authorized_exclusion
-
         # Scientist-approved corrupted/missing sessions stay in the ordered set as
         # explicit missing intervals; they are not loaded (removed from the
         # processing list) but keep their chronological slot in the session index.
@@ -1303,22 +1238,113 @@ class Pipeline:
                 "sessions may be authorized missing."
             )
 
-        # Full chronological set = admitted-for-processing (file_list) plus the
-        # single final exclusion appended last. Approved-missing sources are
-        # inside file_list and are marked (not removed from the index).
-        full_ordered = list(self.file_list) + ([excluded] if excluded is not None else [])
+        # Approved-missing sources are inside the full ordered set and are marked
+        # without being removed from the authoritative session index.
+        full_ordered = list(self.file_list)
         self._intermittent_chunk_id_by_source = {
             _norm(source): index for index, source in enumerate(full_ordered)
         }
         expected_duration = float(getattr(self.config, "chunk_duration_sec", 0.0)) or None
+
+        rwd_contract_missing_metadata: dict[str, dict[str, object]] = {}
+        if str(input_format).strip().lower() == "rwd":
+            contract_failures = self._rwd_contract_validation.get(
+                "incomplete_acquisition_failures", []
+            )
+            if contract_failures:
+                if not isinstance(contract_failures, list):
+                    raise InputProcessingError(
+                        chunk_index=None,
+                        source="",
+                        phase="rwd_contract_validation",
+                        category="invalid_rwd_contract_failure",
+                        reason="RWD contract shortfall findings are not a list",
+                    )
+                source_by_norm = {
+                    _norm(source): (index, source)
+                    for index, source in enumerate(full_ordered)
+                }
+                for failure in contract_failures:
+                    if not isinstance(failure, dict):
+                        raise InputProcessingError(
+                            chunk_index=None,
+                            source="",
+                            phase="rwd_contract_validation",
+                            category="invalid_rwd_contract_failure",
+                            reason="an RWD contract shortfall finding is unreadable",
+                        )
+                    reason = str(failure.get("reason", "")).strip()
+                    if reason not in {
+                        "strict_grid_coverage_shortfall",
+                        "chunk_duration_shortfall",
+                    }:
+                        raise InputProcessingError(
+                            chunk_index=None,
+                            source=str(failure.get("csv_path", "")),
+                            phase="rwd_contract_validation",
+                            category="unsupported_rwd_contract_failure",
+                            reason=(
+                                "the RWD contract reported a shortfall that is not "
+                                f"an identified session-local coverage failure: {reason}"
+                            ),
+                        )
+                    csv_path = str(failure.get("csv_path", "")).strip()
+                    source_info = source_by_norm.get(_norm(csv_path))
+                    if source_info is None:
+                        raise InputProcessingError(
+                            chunk_index=None,
+                            source=csv_path,
+                            phase="rwd_contract_validation",
+                            category="unassignable_rwd_contract_failure",
+                            reason=(
+                                "the RWD contract shortfall does not identify an "
+                                "admitted session source"
+                            ),
+                        )
+                    expected_index, admitted_source = source_info
+                    finding_index = failure.get("chunk_index")
+                    if (
+                        isinstance(finding_index, bool)
+                        or not isinstance(finding_index, int)
+                        or finding_index != expected_index
+                    ):
+                        raise InputProcessingError(
+                            chunk_index=expected_index,
+                            source=admitted_source,
+                            phase="rwd_contract_validation",
+                            category="ambiguous_rwd_contract_position",
+                            reason=(
+                                "the RWD contract shortfall index does not match "
+                                "the authoritative admitted session position"
+                            ),
+                        )
+
+                    norm = _norm(admitted_source)
+                    metadata = rwd_contract_missing_metadata.get(norm)
+                    if metadata is None:
+                        rwd_contract_missing_metadata[norm] = {
+                            "failure_category": "rwd_contract_shortfall",
+                            "reason": reason,
+                            "failure_reasons": [reason],
+                            "failure_details": [dict(failure)],
+                            "authorization_source": "rwd_contract_validation",
+                        }
+                    else:
+                        failure_reasons = metadata.setdefault("failure_reasons", [])
+                        if reason not in failure_reasons:
+                            failure_reasons.append(reason)
+                        failure_details = metadata.setdefault("failure_details", [])
+                        failure_details.append(dict(failure))
+
+        missing_norm.update(rwd_contract_missing_metadata)
+        missing_metadata = dict(rwd_contract_missing_metadata)
 
         local_index = build_session_index(
             acquisition_mode="intermittent",
             input_format=str(input_format),
             ordered_sources=full_ordered,
             missing_sources=sorted(missing_norm),
-            excluded_source=excluded,
-            exclusion_policy=(POLICY_INCOMPLETE_FINAL_RWD_CHUNK if excluded is not None else ""),
+            missing_metadata=missing_metadata,
             expected_duration_sec=expected_duration,
         )
 
@@ -1419,6 +1445,7 @@ class Pipeline:
                 entry,
                 self.config,
                 chunk_id,
+                on_source_consumed=self._record_guided_npm_consumed_source,
             )
             chunk = self._bind_authorized_chunk_chronology(
                 result.chunk, entry, chunk_id
@@ -1678,6 +1705,12 @@ class Pipeline:
             fallback_windows=len(entries) if self._is_continuous_mode_enabled() else 0,
         )
         for fallback_chunk_id, entry in enumerate(entries):
+            source = self._entry_source_file(entry)
+            if (
+                self._admitted_accountant is not None
+                and self._admitted_accountant.session_is_missing(source)
+            ):
+                continue
             chunk_id = self._intermittent_chunk_id_by_source.get(
                 os.path.normcase(os.path.abspath(os.path.normpath(str(entry)))),
                 fallback_chunk_id,
@@ -1720,21 +1753,46 @@ class Pipeline:
     def _handle_pass_chunk_exception(self, fpath, phase: str, exc: Exception) -> None:
         """React to an exception while processing an admitted chunk.
 
-        Fail closed for a frozen admitted intermittent run: any processing
-        exception for an admitted, non-excluded chunk terminates the run, so a
-        chunk can never be silently omitted from the outputs. When no admitted
-        accountant is active (continuous or preview), preserve the prior
-        record-and-continue behavior unchanged.
+        Only a loader-produced SessionLocalInputError may be recorded as an
+        existing missing session when the accountant can prove the source and
+        timeline. Identity-bound failures and all other exceptions remain fatal.
+        Continuous and preview runs preserve their prior behavior.
         """
         if isinstance(exc, InputProcessingError):
             raise exc
         if self._admitted_accountant is not None:
-            raise self._admitted_accountant.fail(
-                source=self._entry_source_file(fpath),
+            source = self._entry_source_file(fpath)
+            if not isinstance(exc, SessionLocalInputError):
+                raise self._admitted_accountant.fail(
+                    source=source,
+                    phase=phase,
+                    category="processing_exception",
+                    reason=str(exc),
+                ) from exc
+            self._admitted_accountant.mark_missing(
+                source=source,
                 phase=phase,
-                category="processing_exception",
-                reason=str(exc),
-            ) from exc
+                category=exc.category,
+                reason=exc.reason,
+            )
+            self._automatic_missing_sources.add(
+                os.path.normcase(os.path.abspath(os.path.normpath(source)))
+            )
+            logging.warning(
+                "%s: Recording %s as missing_corrupted and continuing: %s",
+                phase,
+                source,
+                exc,
+            )
+            if not any(x.get('file') == source for x in self.qc_summary['failed_chunks']):
+                self.qc_summary['failed_chunks'].append(
+                    {
+                        'file': source,
+                        'error': str(exc),
+                        'status': 'missing_corrupted',
+                    }
+                )
+            return
         logging.warning(f"{phase}: Skipping {fpath} due to error: {exc}")
         if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
             self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(exc)})
@@ -2501,7 +2559,17 @@ class Pipeline:
         
         # Check for new files not in pass 1 manifest
         t_manifest = time.perf_counter()
-        new_files = [f for f in self.file_list if f not in frozen_manifest]
+        new_files = [
+            f
+            for f in self.file_list
+            if f not in frozen_manifest
+            and not (
+                self._admitted_accountant is not None
+                and self._admitted_accountant.session_is_missing(
+                    self._entry_source_file(f)
+                )
+            )
+        ]
         for f in new_files:
             if not any(x['file'] == f for x in self.qc_summary['failed_chunks']):
                 self.qc_summary['failed_chunks'].append({'file': f, 'error': 'Ignored (Not in Pass 1 manifest)'})
@@ -2606,15 +2674,9 @@ class Pipeline:
                 # Already identity-bound (e.g. source drift at load); fail closed.
                 raise
             except Exception as e:
-                # Fail fast: an admitted chunk that cannot be processed in Pass 2
-                # terminates the run rather than being omitted from the outputs.
                 if self._admitted_accountant is not None:
-                    raise self._admitted_accountant.fail(
-                        source=self._entry_source_file(fpath),
-                        phase="pass2",
-                        category="processing_exception",
-                        reason=str(e),
-                    ) from e
+                    self._handle_pass_chunk_exception(fpath, "pass2", e)
+                    continue
                 raise RuntimeError(f"Pass 2: Cannot reliably read manifest file {fpath} successfully processed in Pass 1. Error: {e}")
 
         # Write the input-processing completeness record fail-closed: finalize()
@@ -3111,41 +3173,6 @@ class Pipeline:
                 item.absolute_path
                 for item in guided_verification.verified_candidates
             ]
-            # Guided verification restores the authoritative full candidate
-            # order. Reapply the already validated final exclusion so the
-            # excluded source remains in session accounting but is never
-            # reopened by either analysis branch.
-            guided_exclusions = [
-                str(path)
-                for path in (
-                    getattr(self.config, "rwd_excluded_source_files", []) or []
-                )
-                if str(path).strip()
-            ]
-            if guided_exclusions:
-                if len(guided_exclusions) != 1 or not self.file_list:
-                    raise ValueError(
-                        "Guided final exclusion must identify exactly one final source."
-                    )
-                excluded_norm = os.path.normcase(
-                    os.path.abspath(os.path.normpath(guided_exclusions[0]))
-                )
-                final_norm = os.path.normcase(
-                    os.path.abspath(os.path.normpath(self.file_list[-1]))
-                )
-                if excluded_norm != final_norm:
-                    raise ValueError(
-                        "Guided final exclusion does not identify the final chronological source."
-                    )
-                self._authorized_exclusion = self.file_list[-1]
-                self.file_list = [
-                    path
-                    for path in self.file_list
-                    if os.path.normcase(
-                        os.path.abspath(os.path.normpath(path))
-                    )
-                    != excluded_norm
-                ]
             self._selected_rois = list(
                 guided_verification.verified_included_roi_ids
             )
@@ -3242,7 +3269,9 @@ class Pipeline:
                         roi_read_sec += (time.perf_counter() - t_roi_read)
                         channels_seen.append(chunk.channel_names)
                     except Exception as e:
-                        logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+                        self._handle_pass_chunk_exception(
+                            fpath, "roi_discovery", e
+                        )
                 if self._is_continuous_mode_enabled():
                     self._record_continuous_csv_reading(
                         "roi_discovery",
@@ -3252,6 +3281,13 @@ class Pipeline:
             self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", roi_read_sec)
 
             if not channels_seen:
+                if self._admitted_accountant is not None:
+                    raise self._admitted_accountant.fail(
+                        source=self._entry_source_file(self.file_list[0]),
+                        phase="roi_discovery",
+                        category="no_usable_sessions",
+                        reason="no admitted session produced usable channels",
+                    )
                 raise RuntimeError("No valid data files found for ROI discovery.")
 
             # Intersection over all valid chunks, preserving first-chunk order.

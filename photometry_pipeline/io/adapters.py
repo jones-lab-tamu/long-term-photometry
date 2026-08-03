@@ -12,6 +12,7 @@ from datetime import datetime
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from ..core.utils import natural_sort_key
+from ..input_processing_completeness import SessionLocalInputError
 from .rwd_chronology import RwdChronologyError, order_rwd_session_candidates
 from .npm_contract import NpmParserContract, resolve_npm_support_geometry
 from dataclasses import asdict
@@ -2142,29 +2143,56 @@ def load_chunk(
     selected_roi: Optional[str] = None,
 ) -> Chunk:
     fmt = str(format_type).strip().lower()
-    if fmt in {"rwd", "custom_tabular"}:
-        source_data = _resolve_source_data(path, fmt, config, source_cache=source_cache)
-        chunk = _build_chunk_from_source(
-            path,
-            fmt,
-            config,
-            chunk_id,
-            source_data=source_data,
-            continuous_window=continuous_window,
-        )
-    elif fmt == "npm":
-        if continuous_window is not None:
-            raise ValueError(
-                "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
+    try:
+        if fmt in {"rwd", "custom_tabular"}:
+            source_data = _resolve_source_data(path, fmt, config, source_cache=source_cache)
+            chunk = _build_chunk_from_source(
+                path,
+                fmt,
+                config,
+                chunk_id,
+                source_data=source_data,
+                continuous_window=continuous_window,
             )
-        chunk = _load_npm(
-            path,
-            config,
-            chunk_id,
-            selected_roi=selected_roi,
-        )
-    else:
-        raise ValueError(f"Unknown format: {format_type}")
+        elif fmt == "npm":
+            if continuous_window is not None:
+                raise ValueError(
+                    "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
+                )
+            chunk = _load_npm(
+                path,
+                config,
+                chunk_id,
+                selected_roi=selected_roi,
+            )
+        else:
+            raise ValueError(f"Unknown format: {format_type}")
+    except SessionLocalInputError:
+        raise
+    except (OSError, EOFError, UnicodeError, pd.errors.ParserError) as exc:
+        raise SessionLocalInputError(
+            category="session_input_unreadable",
+            reason=str(exc),
+        ) from exc
+    except ValueError as exc:
+        # Intermittent RWD strict-grid coverage is a known source-local
+        # shortfall. Translate only the two exact loader messages here; other
+        # ValueError instances remain fatal to the Pipeline.
+        reason = str(exc)
+        if (
+            fmt == "rwd"
+            and continuous_window is None
+            and reason.startswith("RWD strict:")
+            and (
+                reason.endswith("(Start Coverage Failure)")
+                or reason.endswith("(End Coverage Failure)")
+            )
+        ):
+            raise SessionLocalInputError(
+                category="session_input_shortfall",
+                reason=reason,
+            ) from exc
+        raise
 
     _ensure_session_time_metadata(chunk)
     chunk.validate(tolerance_frac=config.timestamp_cv_max)

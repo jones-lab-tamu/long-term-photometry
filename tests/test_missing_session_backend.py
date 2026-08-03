@@ -1,7 +1,7 @@
-"""Approved missing sessions stay in their time slot as explicit gaps (4J16k41c).
+"""Identifiable unusable sessions stay in their time slot as explicit gaps (4J16k41c).
 
-Drives the real Pipeline in-process over multi-chunk RWD. A scientist-approved
-corrupted session is never removed from the time axis: it keeps its chronological
+Drives the real Pipeline in-process over multi-chunk RWD. A corrupted session
+that was already discovered and ordered is never removed from the time axis: it keeps its chronological
 index and validated timestamp, contributes NaN (never zero) session summaries,
 and is distinct from a valid zero-event session. Later sessions never shift.
 """
@@ -17,7 +17,6 @@ import pytest
 from photometry_pipeline.config import Config
 from photometry_pipeline.pipeline import Pipeline
 from photometry_pipeline.input_processing_completeness import (
-    DISPOSITION_AUTHORIZED_EXCLUSION,
     DISPOSITION_AUTHORIZED_MISSING,
     DISPOSITION_PROCESS,
     INPUT_COMPLETENESS_FILENAME,
@@ -51,7 +50,12 @@ def _write_valid(chunk_dir: Path, *, seed: int, flat: bool = False, n: int = 600
 
 def _write_corrupted(chunk_dir: Path):
     chunk_dir.mkdir(parents=True, exist_ok=True)
-    (chunk_dir / "fluorescence.csv").write_text("garbage,not,valid\n1,2,3\n", encoding="utf-8")
+    (chunk_dir / "fluorescence.csv").write_text(
+        "TimeStamp,Region0-470,Region0-410\n"
+        "0,1.2,1.0\n"
+        '0.1,"unterminated,1.1\n',
+        encoding="utf-8",
+    )
 
 
 def _build_input(tmp_path: Path, *, corrupted=(), flat=(), n_sessions=3) -> Path:
@@ -165,15 +169,18 @@ def test_no_event_level_rows_are_fabricated(tmp_path: Path):
     assert not list((out).glob("**/*events*.csv"))
 
 
-# Authorization gating ---------------------------------------------------------
+# Fail-closed identity and chronology gates ------------------------------------
 
 
-def test_unapproved_corrupted_session_still_fails(tmp_path: Path):
+def test_identifiable_corrupted_session_continues_without_approval(tmp_path: Path):
     inp = _build_input(tmp_path, corrupted=(1,))
-    cfg = _config(tmp_path)  # no authorization
-    with pytest.raises(Exception):
-        _run(tmp_path, cfg, inp)
-    assert not (tmp_path / "out_phasic" / INPUT_COMPLETENESS_FILENAME).exists()
+    out = _run(tmp_path, _config(tmp_path), inp)  # no authorization
+    record = _record(out)
+    by_index = {entry["index"]: entry for entry in record["expected"]}
+    assert by_index[1]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert by_index[1]["failure_category"] == "session_input_unreadable"
+    assert "Error tokenizing data" in by_index[1]["reason"]
+    assert [item["index"] for item in record["processed"]] == [0, 2]
 
 
 def test_approving_a_session_not_discovered_fails(tmp_path: Path):
@@ -229,19 +236,23 @@ def test_build_session_index_refuses_missing_session_without_own_timestamp(tmp_p
 
 
 @pytest.mark.parametrize("input_format", ["npm", "custom_tabular"])
-def test_generic_filename_datetime_cannot_authorize_missing_session(tmp_path: Path, input_format: str):
-    """Non-RWD filename tokens are not yet an authoritative timing contract."""
-    source = tmp_path / "session_2024-01-01_01_00_00.csv"
+def test_ordered_non_rwd_session_can_place_missing_with_authoritative_duration(
+    tmp_path: Path, input_format: str
+):
+    """Established ordered NPM/CSV inputs can preserve a gap without a filename timestamp."""
+    source = tmp_path / "session_without_timestamp.csv"
     source.write_text("time,signal\n0,1\n", encoding="utf-8")
-    with pytest.raises(InputProcessingError) as excinfo:
-        build_session_index(
-            acquisition_mode="intermittent",
-            input_format=input_format,
-            ordered_sources=[str(source)],
-            missing_sources=[str(source)],
-            expected_duration_sec=60.0,
-        )
-    assert excinfo.value.category == "unsupported_missing_session_timing"
+    manifest = build_session_index(
+        acquisition_mode="intermittent",
+        input_format=input_format,
+        ordered_sources=[str(source)],
+        missing_sources=[str(source)],
+        expected_duration_sec=60.0,
+    )
+    entry = manifest["expected"][0]
+    assert entry["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert entry["expected_start_time"] == ""
+    assert entry["expected_duration_sec"] == 60.0
 
 
 # Phasic and tonic share the same session index --------------------------------
@@ -274,23 +285,19 @@ def test_different_missing_sets_yield_different_identity(tmp_path: Path):
     assert _record(out_a)["frozen_manifest_digest"] != _record(out_b)["frozen_manifest_digest"]
 
 
-# Final exclusion stays distinct from a missing middle session -----------------
+# Final failures use the same missing-session disposition ----------------------
 
 
-def test_final_exclusion_is_distinct_from_a_missing_session(tmp_path: Path):
-    inp = _build_input(tmp_path, corrupted=(1,))
-    cfg = _config(
-        tmp_path,
-        authorized_missing_sessions=[_source(inp, 1)],
-        rwd_excluded_source_files=[_source(inp, 2)],  # final chunk excluded
-    )
-    out = _run(tmp_path, cfg, inp)
+def test_identifiable_final_failure_continues_without_approval(tmp_path: Path):
+    inp = _build_input(tmp_path, corrupted=(2,))
+    out = _run(tmp_path, _config(tmp_path), inp)
 
     record = _record(out)
     by_index = {e["index"]: e for e in record["expected"]}
-    assert by_index[1]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
-    assert by_index[2]["disposition"] == DISPOSITION_AUTHORIZED_EXCLUSION
+    assert by_index[2]["disposition"] == DISPOSITION_AUTHORIZED_MISSING
+    assert by_index[2]["failure_category"] == "session_input_unreadable"
     assert by_index[0]["disposition"] == DISPOSITION_PROCESS
+    assert by_index[1]["disposition"] == DISPOSITION_PROCESS
 
 
 # Clean runs unchanged ---------------------------------------------------------

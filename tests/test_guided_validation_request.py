@@ -48,7 +48,6 @@ def test_build_guided_validation_request_from_plan(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         included_roi_ids=["ROI0", "ROI1"],
         output_base_path=str(tmp_path / "output_base"),
         global_correction_strategy="dynamic_fit",
@@ -72,7 +71,6 @@ def test_build_guided_validation_request_from_plan(tmp_path: Path):
     assert request.acquisition_mode == "intermittent"
     assert request.sessions_per_hour == 6
     assert request.session_duration_sec == 120.0
-    assert request.exclude_incomplete_final_rwd_chunk is True
     assert request.timeline_anchor_mode == "civil"
     assert request.included_roi_ids == ["ROI0", "ROI1"]
     assert request.execution_mode == "phasic"
@@ -285,7 +283,6 @@ def test_validation_missing_output_base(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -302,7 +299,6 @@ def test_validation_missing_strategy(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy=None,
@@ -321,7 +317,6 @@ def test_validation_signal_only_f0_does_not_require_dynamic_fit_mode(
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="signal_only_f0",
@@ -342,7 +337,6 @@ def test_validation_unsupported_dynamic_fit_mode(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -361,7 +355,6 @@ def test_validation_output_source_same_path(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -381,7 +374,6 @@ def test_validation_output_nested_in_source(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -402,7 +394,6 @@ def test_validation_source_nested_in_output(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -421,7 +412,6 @@ def test_validation_output_overwrite_blocks(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -441,7 +431,6 @@ def test_validation_successful_case_passes(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -460,7 +449,6 @@ def test_nonwriting_invariant_compile_and_validate(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         included_roi_ids=["ROI0"],
         output_base_path=str(tmp_path / "out"),
         global_correction_strategy="dynamic_fit",
@@ -484,7 +472,6 @@ def test_request_identity_hashing(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -497,7 +484,6 @@ def test_request_identity_hashing(tmp_path: Path):
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["ROI0"],
         global_correction_strategy="dynamic_fit",
@@ -611,7 +597,6 @@ def _base_request_with_strategy_map(tmp_path, entries, *, dynamic_fit_mode="robu
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         included_roi_ids=["CH1"],
         strategy_scope="global",
@@ -790,7 +775,6 @@ def test_compute_request_identity_includes_applied_dff_orchestration_enabled():
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         timeline_anchor_mode="civil",
         applied_dff_orchestration_enabled=False
     )

@@ -9,9 +9,6 @@ from typing import Any, Mapping
 from photometry_pipeline.guided_backend_validation_request import (
     GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION,
     GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION,
-    GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
-    GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME,
-    GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION,
     GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
     GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
     GUIDED_BACKEND_LOCAL_CHECK_CONTRACT_VERSION,
@@ -575,22 +572,12 @@ def _validate_semantics(
             "dataset_timing_invalid",
         )
     if not is_npm:
-        if (
-            dataset.allow_partial_final_window is not False
-            or dataset.classification_schema_name
-            != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
-            or dataset.classification_schema_version
-            != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
-            or dataset.classifier_version
-            != GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION
-            or dataset.classification_status != "not_requested"
-            or not _is_sha256_lower(dataset.not_requested_classification_digest)
-        ):
+        if dataset.allow_partial_final_window is not False:
             return _issue(
                 "incomplete_final_policy_not_supported",
                 "acquisition_dataset",
-                "The incomplete-final policy is unsupported.",
-                "incomplete_final_contract_invalid",
+                "The intermittent acquisition cannot use partial final windows.",
+                "incomplete_final_policy_invalid",
             )
     else:
         policy = dataset.disposition_policy
@@ -599,7 +586,7 @@ def _validate_semantics(
             or policy.schema_name != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME
             or policy.schema_version != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION
             or policy.admitted_dispositions != ("process",)
-            or policy.missing_session_policy != "unsupported"
+            or policy.missing_session_policy != "supported"
             or policy.excluded_session_policy != "unsupported"
             or policy.partial_support_owner != "parser_contract"
             or source.approved_missing_candidates
@@ -607,8 +594,8 @@ def _validate_semantics(
             return _issue(
                 "incomplete_final_policy_not_supported",
                 "acquisition_dataset",
-                "Missing-session continuation is not available for NPM recordings. "
-                "Excluding an incomplete final session is not available for NPM recordings.",
+                "The NPM session-disposition policy does not match the shared "
+                "identifiable-session processing boundary.",
                 "npm_disposition_policy_invalid",
             )
     if (
@@ -1299,10 +1286,6 @@ def _validate_semantics(
                 "mark_evidence_reference_mismatch",
             )
 
-    # The request does not carry the source set/content digests used by the
-    # incomplete-final classifier. That binding was checked by the compiler
-    # before canonical request identity was computed; this validator does not
-    # reread mutable facts to reconstruct it.
     return None
 
 

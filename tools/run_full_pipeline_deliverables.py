@@ -590,9 +590,9 @@ def _continuous_row_counts_from_writer(summary_result):
 def _freeze_run_input_manifest(*, input_dir, config_path, run_dir, force_format):
     """Freeze one ordered production input manifest for the whole run.
 
-    Uses the Pipeline's own discovery so the frozen ordered set and authorized
-    exclusion are identical to what each analysis subprocess resolves; each
-    subprocess additionally re-verifies its discovery against this manifest.
+    Uses the Pipeline's own discovery so the frozen ordered set is identical to
+    what each analysis subprocess resolves; each subprocess additionally
+    re-verifies its discovery against this manifest.
     Returns the written manifest path.
     """
     import os as _os
@@ -600,7 +600,6 @@ def _freeze_run_input_manifest(*, input_dir, config_path, run_dir, force_format)
     from photometry_pipeline.config import Config as _Config
     from photometry_pipeline.pipeline import Pipeline as _Pipeline
     from photometry_pipeline.input_processing_completeness import (
-        POLICY_INCOMPLETE_FINAL_RWD_CHUNK as _POLICY,
         build_session_index as _build,
         write_frozen_input_manifest as _write,
     )
@@ -625,15 +624,12 @@ def _freeze_run_input_manifest(*, input_dir, config_path, run_dir, force_format)
     if probe._is_continuous_mode_enabled():
         return None
 
-    ordered_admitted = list(probe.file_list)
-    excluded = probe._authorized_exclusion
-    ordered_sources = ordered_admitted + ([excluded] if excluded is not None else [])
+    ordered_sources = list(probe.file_list)
 
-    # Resolve ``auto`` before writing the shared index.  Missing-session
-    # authorization is deliberately supported only for validated timestamped
-    # RWD folders; passing the literal ``auto`` here would weaken that gate.
+    # Resolve ``auto`` before writing the shared index so the branch-local
+    # accountant applies the same format-specific timing checks.
     try:
-        resolved_input_format = probe._get_format(ordered_admitted[0], force_format)
+        resolved_input_format = probe._get_format(ordered_sources[0], force_format)
     except Exception:
         resolved_input_format = str(force_format)
 
@@ -647,8 +643,6 @@ def _freeze_run_input_manifest(*, input_dir, config_path, run_dir, force_format)
         input_format=str(resolved_input_format),
         ordered_sources=ordered_sources,
         missing_sources=missing_norm,
-        excluded_source=excluded,
-        exclusion_policy=(_POLICY if excluded is not None else ""),
         expected_duration_sec=expected_duration,
     )
     return _write(run_dir, manifest)

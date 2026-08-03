@@ -64,8 +64,6 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "peak_pre_filter",
     "event_auc_baseline",
     "export_display_series_csv",
-    # RWD contract validation
-    "exclude_incomplete_final_rwd_chunk",
 }
 
 GUI_KNOBS_DEVELOPER: Set[str] = {
@@ -171,14 +169,6 @@ KNOB_META: Dict[str, dict] = {
             "Advanced external replotting export for displayed plotted series on "
             "supported plots (phasic day plots and tonic overview). This is not "
             "canonical raw/full-resolution analysis output."
-        ),
-    },
-    "exclude_incomplete_final_rwd_chunk": {
-        "label": "Exclude Incomplete Final RWD Chunk",
-        "help": (
-            "RWD validation option. If enabled, one incomplete final chronological "
-            "RWD source file may be excluded before downstream analysis when all "
-            "earlier chunks pass strict validation. Raw files are not modified."
         ),
     },
     "window_sec": {

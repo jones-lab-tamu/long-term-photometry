@@ -51,7 +51,7 @@ def test_authoritative_plot_layout_keeps_missing_middle_slot(tmp_path: Path):
         "missing_corrupted",
         "valid",
     ]
-    assert [item["cache_chunk_id"] for item in sessions] == [0, None, 1]
+    assert [item["cache_chunk_id"] for item in sessions] == [0, None, 2]
 
     layout = compute_day_layout(
         [(0, sources[0]), (1, sources[1])],

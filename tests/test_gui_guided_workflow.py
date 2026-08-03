@@ -430,7 +430,6 @@ def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
             "continuous_window_sec",
             "continuous_step_sec",
             "allow_partial_final_window",
-            "exclude_incomplete_final_rwd_chunk",
             "selected_roi_count",
             "total_roi_count",
             "selected_rois",
@@ -2210,25 +2209,10 @@ def test_guided_recording_mode_visibility_is_intermittent_only(window):
     )
     assert window._guided_sessions_per_hour_edit.isHidden() is False
     assert window._guided_continuous_window_sec_spin.isHidden() is True
-    assert window._guided_incomplete_final_rwd_group.isHidden() is False
-    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
-        "Exclude one incomplete final recording session"
-    )
-    assert "Use this only when" in (
-        window._guided_incomplete_final_rwd_help_label.text()
-    )
-    assert "explicitly excludes" in (
-        window._guided_incomplete_final_rwd_help_label.text()
-    )
-    assert "Earlier incomplete sessions still stop validation" in (
-        window._guided_incomplete_final_rwd_help_label.text()
-    )
-    assert "Raw files are not modified" in (
-        window._guided_incomplete_final_rwd_help_label.text()
-    )
+    assert not hasattr(window, "_guided_incomplete_final_rwd_group")
+    assert not hasattr(window, "_guided_exclude_incomplete_final_rwd_chunk_cb")
+    assert not hasattr(window, "_guided_incomplete_final_rwd_help_label")
 
-    # This incomplete-final-session control belongs to intermittent recording,
-    # which is still what Guided is planning here.
     assert window._guided_acquisition_mode_combo.currentData() == "intermittent"
 
 
@@ -2249,11 +2233,12 @@ def test_guided_roi_discovery_failure_hides_parser_internals(window):
     assert "chunk 0" not in lowered
 
 
-def test_guided_incomplete_final_rwd_option_hidden_for_non_rwd(window):
+def test_guided_incomplete_final_rwd_option_is_removed_for_non_rwd(window):
     _set_guided_rwd_intermittent(window)
     window._guided_format_combo.setCurrentText("custom_tabular")
 
-    assert window._guided_incomplete_final_rwd_group.isHidden() is True
+    assert not hasattr(window, "_guided_incomplete_final_rwd_group")
+    assert not hasattr(window, "_guided_exclude_incomplete_final_rwd_chunk_cb")
 
 
 def _timed_discovery(input_dir, session_ids, resolved_format="RWD"):
@@ -3165,20 +3150,6 @@ def test_guided_and_full_control_roi_selection_summary_equivalence(qapp):
         full._roi_list.item(1).setCheckState(Qt.Unchecked)
 
         assert _state_for_equivalence(guided) == _state_for_equivalence(full)
-    finally:
-        _close_window(guided)
-        _close_window(full)
-
-
-def test_guided_and_full_control_rwd_final_chunk_option_equivalence(qapp):
-    guided = _make_window(qapp)
-    full = _make_window(qapp)
-    try:
-        guided._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
-        full._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
-
-        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
-        assert guided._exclude_incomplete_final_rwd_chunk_cb.isChecked() is True
     finally:
         _close_window(guided)
         _close_window(full)
@@ -6060,13 +6031,8 @@ def test_recording_structure_page_avoids_developer_facing_wording(window, qapp):
     # has no sessions to align.
     assert "interpret the timeline correctly" in visible_text
     assert "align sessions correctly" not in visible_text
-    assert "Final recording session" in visible_text
     assert "Sessions per hour:" in visible_text
-    # QCheckBox text isn't covered by the generic label/button/group scan
-    # above; check it directly.
-    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
-        "Exclude one incomplete final recording session"
-    )
+    assert "Exclude one incomplete final recording session" not in visible_text
     assert "Sessions per hour (required)" not in visible_text
 
 

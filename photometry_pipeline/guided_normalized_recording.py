@@ -1832,12 +1832,6 @@ def rebuild_normalized_recording_description_from_intent(
     """
     from types import SimpleNamespace
 
-    excluded_path = (
-        intent.input_source.candidate_files[-1].canonical_relative_path
-        if intent.acquisition.exclude_incomplete_final_rwd_chunk
-        and intent.input_source.candidate_files
-        else None
-    )
     target_fs_hz = next(
         (
             item.value
@@ -1906,5 +1900,4 @@ def rebuild_normalized_recording_description_from_intent(
             item.canonical_relative_path
             for item in intent.input_source.approved_missing_candidates
         ),
-        excluded_canonical_relative_path=excluded_path,
     )

@@ -660,7 +660,7 @@ def test_review_plan_page_has_scientist_facing_hierarchy(window):
     assert "Review the analysis plan" in intro.text()
     assert "No analysis files have been written yet" in intro.text()
     assert "in-memory GuidedRunPlan" not in intro.text()
-    assert "Review Plan" in (
+    assert "Review plan" in (
         window._guided_workflow_stepper.item(draft_index).text()
     )
     assert "Draft plan" not in (
@@ -782,43 +782,6 @@ def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
     assert "local setup issue" not in status.lower()
     assert "mixed_dynamic_fit_modes" not in status
     assert "one shared dynamic-fit correction strategy" not in status
-
-
-def test_review_plan_describes_final_session_exclusion_as_conditional(window):
-    plan = replace(
-        _complete_new_analysis_plan_for_gui(),
-        exclude_incomplete_final_rwd_chunk=True,
-    )
-    window._discovery_cache = {
-        "sessions": [
-            {"session_id": "2025_01_01-00_00_00"},
-            {"session_id": "2025_01_01-00_30_00"},
-        ]
-    }
-
-    _render_review_checkpoint(window, plan)
-
-    summary = window._guided_review_analysis_summary_label.text()
-    assert "if the final recording is incomplete" in summary
-    assert "exclude that one final recording file" in summary
-    assert "2025_01_01-00_30_00" not in summary
-    assert "Earlier incomplete sessions still stop the setup check" in summary
-
-
-def test_review_plan_says_incomplete_final_session_blocks_without_policy(window):
-    plan = replace(
-        _complete_new_analysis_plan_for_gui(),
-        exclude_incomplete_final_rwd_chunk=False,
-    )
-
-    _render_review_checkpoint(window, plan)
-
-    summary = window._guided_review_analysis_summary_label.text()
-    assert (
-        "Final incomplete session: do not exclude; an incomplete final "
-        "recording stops the setup check."
-        in summary
-    )
 
 
 def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
@@ -1080,7 +1043,6 @@ def test_new_analysis_dataset_contract_apply_valid_rwd_snapshot_without_writes(
     assert snapshot.source_identity.acquisition_mode == "intermittent"
     assert snapshot.source_identity.sessions_per_hour == 6
     assert snapshot.source_identity.session_duration_sec == 120.0
-    assert snapshot.source_identity.exclude_incomplete_final_rwd_chunk is False
     assert snapshot.contract_values["rwd_time_col"] == "Time(s)"
     assert snapshot.contract_values["uv_suffix"] == "-410"
     assert snapshot.contract_values["sig_suffix"] == "-470"

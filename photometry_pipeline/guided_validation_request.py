@@ -19,7 +19,6 @@ class GuidedValidationRequest:
     acquisition_mode: str
     sessions_per_hour: int | None
     session_duration_sec: float | None
-    exclude_incomplete_final_rwd_chunk: bool
     timeline_anchor_mode: str
 
     # ROI Selection
@@ -66,7 +65,6 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
     acq_mode = getattr(plan, "acquisition_mode", "continuous")
     sessions_per_hour = getattr(plan, "sessions_per_hour", None)
     session_duration_sec = getattr(plan, "session_duration_sec", None)
-    exclude_incomplete_final_rwd_chunk = getattr(plan, "exclude_incomplete_final_rwd_chunk", False)
     
     # ROI selection
     included_roi_ids = list(getattr(plan, "included_roi_ids", []) or [])
@@ -120,7 +118,6 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
         acquisition_mode=acq_mode,
         sessions_per_hour=sessions_per_hour,
         session_duration_sec=session_duration_sec,
-        exclude_incomplete_final_rwd_chunk=exclude_incomplete_final_rwd_chunk,
         timeline_anchor_mode=timeline_anchor_mode,
         included_roi_ids=included_roi_ids,
         excluded_roi_ids=excluded_roi_ids,
@@ -172,7 +169,6 @@ def compute_request_identity(request: GuidedValidationRequest) -> str:
         str(request.acquisition_mode),
         str(request.sessions_per_hour),
         str(request.session_duration_sec),
-        str(request.exclude_incomplete_final_rwd_chunk),
         str(request.timeline_anchor_mode),
         ",".join(sorted(request.included_roi_ids)),
         str(request.global_correction_strategy),

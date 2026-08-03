@@ -14,10 +14,8 @@ from photometry_pipeline.io.rwd_source_snapshot import (
     GuidedRwdSourceCandidateSnapshot,
     RwdSourceSnapshotError,
     build_rwd_source_candidate_snapshot,
-    compute_incomplete_final_chunk_classification_digest,
     compute_rwd_source_candidate_content_digest,
     compute_rwd_source_candidate_set_digest,
-    make_not_requested_incomplete_final_chunk_classification,
 )
 
 
@@ -270,66 +268,6 @@ def test_stored_snapshot_digest_mismatch_blocks(tmp_path: Path, field: str):
         else:
             compute_rwd_source_candidate_content_digest(malformed)
     assert excinfo.value.category == "source_candidate_digest_mismatch"
-    with pytest.raises(RwdSourceSnapshotError):
-        make_not_requested_incomplete_final_chunk_classification(malformed)
-
-
-def test_not_requested_classification_is_snapshot_bound_and_empty(tmp_path: Path):
-    snapshot = build_rwd_source_candidate_snapshot(str(_dataset(tmp_path)))
-    classification = make_not_requested_incomplete_final_chunk_classification(
-        snapshot
-    )
-    assert classification.classification_status == "not_requested"
-    assert classification.source_candidate_set_digest == snapshot.source_candidate_set_digest
-    assert classification.source_candidate_content_digest == snapshot.source_candidate_content_digest
-    assert classification.excluded_canonical_relative_path is None
-    assert classification.reason is None
-    assert classification.evidence is None
-    assert classification.parsing_contract_digest is None
-    assert classification.timing_contract_digest is None
-    assert classification.unresolved_inputs == ()
-    assert classification.policy.exclude_incomplete_final_rwd_chunk is False
-
-
-def test_not_requested_does_not_inspect_headers_or_timestamps(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    snapshot = build_rwd_source_candidate_snapshot(str(_dataset(tmp_path)))
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("not_requested must not inspect source content")
-
-    monkeypatch.setattr(rwd_source_snapshot, "_open_candidate", forbidden)
-    classification = make_not_requested_incomplete_final_chunk_classification(
-        snapshot
-    )
-    assert classification.classification_status == "not_requested"
-
-
-def test_classification_digest_is_deterministic_and_snapshot_sensitive(tmp_path: Path):
-    root = _dataset(tmp_path)
-    first_snapshot = build_rwd_source_candidate_snapshot(str(root))
-    first = make_not_requested_incomplete_final_chunk_classification(first_snapshot)
-    assert (
-        compute_incomplete_final_chunk_classification_digest(first)
-        == compute_incomplete_final_chunk_classification_digest(first)
-    )
-    (root / "2025_01_01-00_00_00" / "fluorescence.csv").write_bytes(b"xyz\n")
-    second_snapshot = build_rwd_source_candidate_snapshot(str(root))
-    second = make_not_requested_incomplete_final_chunk_classification(second_snapshot)
-    assert (
-        compute_incomplete_final_chunk_classification_digest(first)
-        != compute_incomplete_final_chunk_classification_digest(second)
-    )
-
-
-def test_malformed_snapshot_blocks_classification(tmp_path: Path):
-    snapshot = build_rwd_source_candidate_snapshot(str(_dataset(tmp_path)))
-    malformed = replace(snapshot, candidates=())
-    with pytest.raises(RwdSourceSnapshotError) as excinfo:
-        make_not_requested_incomplete_final_chunk_classification(malformed)
-    assert excinfo.value.category == "invalid_rwd_source_snapshot"
 
 
 def test_module_has_no_forbidden_imports():

@@ -618,7 +618,7 @@ def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
     """Return plain-language completion text for the existing Review surface.
 
     This deliberately reads the shared session-index record only to translate
-    approved gaps into scientist-facing terms.  It does not expose internal
+    recorded gaps into scientist-facing terms.  It does not expose internal
     implementation vocabulary in the normal summary.
     """
     if classification is None:
@@ -630,9 +630,9 @@ def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
 
     expected = None
     candidates = [
-        os.path.join(run_dir, "input_manifest.json"),
         os.path.join(run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"),
         os.path.join(run_dir, "_analysis", "tonic_out", "input_processing_completeness.json"),
+        os.path.join(run_dir, "input_manifest.json"),
     ]
     for path in candidates:
         try:
@@ -647,19 +647,19 @@ def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
     missing_count = int(getattr(classification, "missing_session_count", 0))
     exclusion_count = int(getattr(classification, "final_exclusion_count", 0))
     if missing_count and exclusion_count:
-        headline = "Completed with missing sessions and an incomplete final session excluded."
+        headline = "Completed with missing sessions and a legacy final-session exclusion."
     elif exclusion_count:
-        headline = "Completed with an incomplete final session excluded."
+        headline = "Completed with a legacy final-session exclusion."
     else:
         headline = "Completed with missing sessions."
     lines = [headline]
     if missing_count:
         lines.append(
-            f"{missing_count} missing session(s) were approved and kept in their original time positions."
+            f"{missing_count} missing session(s) were recorded and kept in their original time positions."
         )
     if exclusion_count:
         lines.append(
-            f"{exclusion_count} incomplete final session(s) were excluded from analysis."
+            f"{exclusion_count} legacy final session(s) were excluded from analysis."
         )
     affected = []
     for entry in expected or []:
@@ -679,9 +679,9 @@ def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
         if duration is not None:
             label += f", expected duration {float(duration):g}s"
         if disposition == "authorized_exclusion":
-            reason_text = "final incomplete session excluded"
+            reason_text = "legacy final incomplete session excluded"
         else:
-            reason_text = reason or "approved missing/corrupted session"
+            reason_text = reason or "session could not be processed"
         affected.append(f"{label}: {reason_text}")
     if affected:
         lines.append("Affected sessions:")

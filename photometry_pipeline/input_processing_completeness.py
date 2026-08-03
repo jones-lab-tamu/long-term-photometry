@@ -40,7 +40,8 @@ INPUT_COMPLETENESS_CONTRACT_VERSION = "input_processing_completeness.v1"
 FROZEN_INPUT_MANIFEST_FILENAME = "input_manifest.json"
 FROZEN_INPUT_MANIFEST_CONTRACT_VERSION = "frozen_input_manifest.v1"
 
-# The only authorized automatic exclusion policy.
+# Retained for reading older run artifacts. New runs use the shared missing
+# disposition for every identifiable unusable intermittent session.
 POLICY_INCOMPLETE_FINAL_RWD_CHUNK = "incomplete_final_rwd_chunk"
 
 DISPOSITION_PROCESS = "process"
@@ -136,6 +137,15 @@ class InputProcessingError(RuntimeError):
             + (f" ({label})" if label else "")
             + ". No results were produced for this run; the recording was left unchanged."
         )
+
+
+class SessionLocalInputError(Exception):
+    """A known input-boundary failure for one already identified session."""
+
+    def __init__(self, *, category: str, reason: str):
+        self.category = str(category)
+        self.reason = str(reason)
+        super().__init__(self.reason)
 
 
 # ----------------------------------------------------------------------
@@ -261,9 +271,10 @@ class InputProcessingAccountant:
 
     Built once from the frozen admitted set. The Pipeline calls
     :meth:`before_load` at each chunk (source-drift guard), :meth:`mark_processed`
-    when a chunk finishes, and :meth:`fail` on any processing exception (which
-    raises). :meth:`finalize` refuses to produce a record unless every
-    process-disposition chunk has exactly one successful processing record.
+    when a chunk finishes, and :meth:`mark_missing` when an identifiable session
+    becomes unusable after admission. :meth:`finalize` refuses to produce a
+    record unless every admitted session has a terminal disposition and at least
+    one session was usable.
     """
 
     acquisition_mode: str
@@ -348,6 +359,11 @@ class InputProcessingAccountant:
     def session_index_by_source(self) -> dict[str, int]:
         """Map each normalized source to its authoritative chronological session index."""
         return {entry.source: entry.index for entry in self._expected}
+
+    def session_is_missing(self, source: str) -> bool:
+        """Whether an admitted source has already been recorded as unusable."""
+        entry = self._entry_for_source(source)
+        return entry is not None and entry.disposition == DISPOSITION_AUTHORIZED_MISSING
 
     def _entry_for_source(self, source: str) -> _ExpectedChunk | None:
         norm = _normalize_source(source)
@@ -441,6 +457,68 @@ class InputProcessingAccountant:
             "cache_chunk_id": int(cache_chunk_id),
         }
 
+    def mark_missing(
+        self, *, source: str, phase: str, category: str, reason: str
+    ) -> None:
+        """Record an admitted source as an identifiable missing/corrupted session.
+
+        This is deliberately narrower than :meth:`fail`: the source must still
+        match its frozen identity on disk and the frozen session entry must carry
+        enough timing information to preserve its position. A source that has
+        disappeared or drifted is no longer safely assignable and remains fatal.
+        """
+        entry = self._entry_for_source(source)
+        if entry is None:
+            raise InputProcessingError(
+                chunk_index=None,
+                source=source,
+                phase=phase,
+                category="unassignable_session_failure",
+                reason="the failure could not be assigned to an admitted session",
+            )
+        if entry.disposition != DISPOSITION_PROCESS:
+            raise InputProcessingError(
+                chunk_index=entry.index,
+                source=source,
+                phase=phase,
+                category="duplicate_session_failure",
+                reason="the admitted session already has a terminal disposition",
+            )
+        drift = source_drift_reason(entry.data, size_only=False)
+        if drift:
+            raise InputProcessingError(
+                chunk_index=entry.index,
+                source=source,
+                phase=phase,
+                category="source_drift",
+                reason=drift,
+            )
+
+        fmt = self.input_format.strip().lower()
+        has_timestamp = bool(str(entry.data.get("expected_start_time", "")).strip())
+        duration = entry.data.get("expected_duration_sec")
+        has_ordered_duration = (
+            fmt in {"npm", "custom_tabular"}
+            and isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and float(duration) > 0.0
+        )
+        if not has_timestamp and not has_ordered_duration:
+            raise InputProcessingError(
+                chunk_index=entry.index,
+                source=source,
+                phase=phase,
+                category="ambiguous_session_timeline",
+                reason="the admitted session has no authoritative timeline placement",
+            )
+
+        entry.data["disposition"] = DISPOSITION_AUTHORIZED_MISSING
+        entry.data["failure_category"] = str(category)
+        entry.data["reason"] = str(reason)
+        entry.data["phase"] = str(phase)
+        entry.data["authorization_source"] = "identifiable_session_failure"
+        self.frozen_manifest_digest = expected_entries_digest(self._expected_payload())
+
     def fail(self, *, source: str, phase: str, category: str, reason: str) -> "InputProcessingError":
         entry = self._entry_for_source(source)
         return InputProcessingError(
@@ -462,6 +540,16 @@ class InputProcessingAccountant:
                     category="unprocessed_admitted_chunk",
                     reason="an admitted chunk never reached a successful processing record",
                 )
+
+        if not self._processed:
+            source = self._expected[0].source if self._expected else ""
+            raise InputProcessingError(
+                chunk_index=(self._expected[0].index if self._expected else None),
+                source=source,
+                phase="finalize",
+                category="no_usable_sessions",
+                reason="no admitted session produced a usable analysis result",
+            )
 
         return {
             "contract_version": INPUT_COMPLETENESS_CONTRACT_VERSION,
@@ -515,22 +603,19 @@ def build_session_index(
         _normalize_source(k): v for k, v in (missing_metadata or {}).items()
     }
 
-    # A time-preserving missing interval is a scientific claim about acquisition
-    # chronology, not a generic filename convenience.  Only timestamped RWD
-    # session folders are validated for this release.  NPM/custom paths may
-    # still run normally; they simply cannot authorize a corrupted session as a
-    # missing chronological interval until a format-specific timing validator
-    # exists.
-    if missing_norm and str(input_format).strip().lower() != "rwd":
+    normalized_order = [_normalize_source(source) for source in ordered_sources]
+    if len(normalized_order) != len(set(normalized_order)):
+        duplicate = next(
+            source
+            for source in normalized_order
+            if normalized_order.count(source) > 1
+        )
         raise InputProcessingError(
             chunk_index=None,
-            source=sorted(missing_norm)[0],
+            source=duplicate,
             phase="freeze",
-            category="unsupported_missing_session_timing",
-            reason=(
-                "approved missing-session continuation is supported only for "
-                "timestamped intermittent RWD session folders"
-            ),
+            category="ambiguous_session_order",
+            reason="the ordered session sequence contains a duplicate source",
         )
 
     expected: list[dict[str, Any]] = []
@@ -550,15 +635,21 @@ def build_session_index(
             entry["disposition"] = DISPOSITION_AUTHORIZED_EXCLUSION
             entry["policy"] = exclusion_policy or POLICY_INCOMPLETE_FINAL_RWD_CHUNK
         elif norm in missing_norm:
-            if start_dt is None:
+            fmt = str(input_format).strip().lower()
+            duration_is_authoritative = (
+                fmt in {"npm", "custom_tabular"}
+                and expected_duration_sec is not None
+                and float(expected_duration_sec) > 0.0
+            )
+            if start_dt is None and not duration_is_authoritative:
                 raise InputProcessingError(
                     chunk_index=index,
                     source=source,
                     phase="freeze",
                     category="unresolvable_missing_session_time",
                     reason=(
-                        "an approved missing session has no validated acquisition "
-                        "timestamp of its own; its chronology cannot be established"
+                        "the missing session has no validated timestamp or ordered "
+                        "format duration from which its chronology can be established"
                     ),
                 )
             # A missing/corrupted source is deliberately not opened; record its
@@ -573,6 +664,9 @@ def build_session_index(
             meta = missing_metadata.get(norm, {})
             entry["failure_category"] = str(meta.get("failure_category", "corrupted_session"))
             entry["reason"] = str(meta.get("reason", "approved corrupted/missing session"))
+            for detail_key in ("failure_reasons", "failure_details"):
+                if detail_key in meta:
+                    entry[detail_key] = meta[detail_key]
             entry["authorization_source"] = str(meta.get("authorization_source", "run_config"))
         else:
             entry.update(source_identity(source))
@@ -690,7 +784,15 @@ def validate_input_completeness(payload: Any) -> str:
             # validated timestamp and an explicit authorization -- never zero,
             # never silently dropped.
             if not str(entry.get("expected_start_time", "")).strip():
-                return f"missing session index {index} has no validated timestamp"
+                fmt = str(payload.get("input_format", "")).strip().lower()
+                duration = entry.get("expected_duration_sec")
+                if not (
+                    fmt in {"npm", "custom_tabular"}
+                    and isinstance(duration, (int, float))
+                    and not isinstance(duration, bool)
+                    and float(duration) > 0.0
+                ):
+                    return f"missing session index {index} has no authoritative timeline placement"
             if not str(entry.get("authorization_source", "")).strip():
                 return f"missing session index {index} has no authorization source"
             missing_indices.add(index)
@@ -737,6 +839,8 @@ def validate_input_completeness(payload: Any) -> str:
     unprocessed = process_indices - processed_indices
     if unprocessed:
         return f"admitted chunks were never processed: {sorted(unprocessed)}"
+    if not processed_indices:
+        return "the input-completeness record contains no usable sessions"
 
     # The explicit missing list must exactly mirror the missing dispositions, so a
     # consumer that reads only the missing list still sees every gap in place.

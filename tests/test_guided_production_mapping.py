@@ -305,7 +305,6 @@ def test_request_and_identity_refusals(input_value, identity, expected):
                 r,
                 acquisition_dataset=_unchecked(
                     r.acquisition_dataset,
-                    exclude_incomplete_final_rwd_chunk=True,
                 ),
             ),
                 None,
@@ -474,7 +473,7 @@ def test_acquisition_typed_fields_accept_real_gui_dataset_contract_fields():
     """4J16k10: the real GUI cache-free dataset-contract snapshot
     (gui/main_window.py _guided_new_analysis_dataset_contract_candidate)
     always emits acquisition_mode, allow_partial_final_window,
-    exclude_incomplete_final_rwd_chunk, input_format, resolved_input_format,
+    input_format, resolved_input_format,
     continuous_window_sec, and continuous_step_sec as typed semantic
     values, in addition to rwd_time_col/uv_suffix/sig_suffix. These are
     duplicates of fields already validated elsewhere in the request, not
@@ -492,9 +491,6 @@ def test_acquisition_typed_fields_accept_real_gui_dataset_contract_fields():
         ),
         contracts.GuidedBackendTypedFieldValue(
             "allow_partial_final_window", "bool", False
-        ),
-        contracts.GuidedBackendTypedFieldValue(
-            "exclude_incomplete_final_rwd_chunk", "bool", False
         ),
         contracts.GuidedBackendTypedFieldValue("input_format", "str", "rwd"),
         contracts.GuidedBackendTypedFieldValue(

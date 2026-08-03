@@ -203,8 +203,6 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "trim_samples_end": CONFIG_DISPOSITION_FIXED,
     "seed": CONFIG_DISPOSITION_FIXED,
     "allow_partial_final_chunk": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
-    "exclude_incomplete_final_rwd_chunk": CONFIG_DISPOSITION_INTENT,
-    "rwd_excluded_source_files": CONFIG_DISPOSITION_INTENT,
     "authorized_missing_sessions": CONFIG_DISPOSITION_APPROVED_MISSING,
     "rwd_contract_validation": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "target_fs_hz": CONFIG_DISPOSITION_INTENT,
@@ -931,28 +929,6 @@ def derive_guided_execution_payloads(
         # 10. Derive config payload
         payload_values = []
         # Populate mapped intent fields
-        payload_values.append(GuidedConfigFieldValue("exclude_incomplete_final_rwd_chunk", intent.acquisition.exclude_incomplete_final_rwd_chunk))
-        excluded_final_sources = []
-        if intent.acquisition.exclude_incomplete_final_rwd_chunk:
-            if not intent.input_source.candidate_files:
-                return _unresolved(
-                    "config_field_unsupported",
-                    "The approved final recording file could not be identified.",
-                )
-            final_candidate = intent.input_source.candidate_files[-1]
-            excluded_final_sources.append(
-                os.path.normpath(
-                    os.path.join(
-                        intent.input_source.source_root_canonical,
-                        *final_candidate.canonical_relative_path.split("/"),
-                    )
-                )
-            )
-        payload_values.append(
-            GuidedConfigFieldValue(
-                "rwd_excluded_source_files", excluded_final_sources
-            )
-        )
         payload_values.append(GuidedConfigFieldValue("target_fs_hz", target_fs_hz_value))
         is_custom_tabular = intent.input_source.source_format == "custom_tabular"
         payload_values.append(

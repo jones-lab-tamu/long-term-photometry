@@ -389,12 +389,6 @@ class GuidedProductionAcquisition:
     recording_start_clock: str | None
     recording_start_clock_source: str
     allow_partial_final_window: bool
-    exclude_incomplete_final_rwd_chunk: bool
-    classification_schema_name: str
-    classification_schema_version: str
-    classifier_version: str
-    classification_status: str
-    not_requested_classification_digest: str
     dataset_snapshot_schema_version: str
     rwd_time_col: str
     uv_suffix: str
@@ -1089,7 +1083,7 @@ REQUEST_FIELD_CLASSIFICATIONS = {
 ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
     {
         "rwd_time_col", "uv_suffix", "sig_suffix", "target_fs_hz", "sessions_per_hour", "session_duration_sec",
-        "acquisition_mode", "allow_partial_final_window", "exclude_incomplete_final_rwd_chunk",
+        "acquisition_mode", "allow_partial_final_window",
         "input_format", "resolved_input_format", "continuous_window_sec", "continuous_step_sec",
         "chunk_duration_sec", "allow_partial_final_chunk",
         "adapter_value_nan_policy",
@@ -1127,7 +1121,6 @@ NPM_ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
         "session_duration_sec",
         "acquisition_mode",
         "allow_partial_final_window",
-        "exclude_incomplete_final_rwd_chunk",
         "input_format",
         "resolved_input_format",
         "continuous_window_sec",
@@ -1439,12 +1432,6 @@ def map_guided_validation_request_to_execution_intent(
                 request.acquisition_dataset.recording_start_clock,
                 request.acquisition_dataset.recording_start_clock_source,
                 request.acquisition_dataset.allow_partial_final_window,
-                request.acquisition_dataset.exclude_incomplete_final_rwd_chunk,
-                request.acquisition_dataset.classification_schema_name,
-                request.acquisition_dataset.classification_schema_version,
-                request.acquisition_dataset.classifier_version,
-                request.acquisition_dataset.classification_status,
-                request.acquisition_dataset.not_requested_classification_digest,
                 request.acquisition_dataset.dataset_snapshot_schema_version,
                 request.acquisition_dataset.rwd_time_col, request.acquisition_dataset.uv_suffix,
                 request.acquisition_dataset.sig_suffix, _typed(request.acquisition_dataset.semantic_values),

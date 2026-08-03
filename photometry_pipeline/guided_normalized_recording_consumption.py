@@ -148,14 +148,17 @@ def compare_requested_and_consumed_normalized_recording(
                 f"{consumed.analysis_branch} analysis session {position} source "
                 "identity does not match the authorized recording"
             )
-        if con.disposition != req.disposition:
+        if not (
+            req.disposition == SESSION_DISPOSITION_PROCESS
+            and con.disposition == SESSION_DISPOSITION_MISSING
+        ) and con.disposition != req.disposition:
             return (
                 f"{consumed.analysis_branch} analysis session {position} disposition "
                 f"{con.disposition!r} does not match the authorized disposition "
                 f"{req.disposition!r}"
             )
 
-        if req.disposition == SESSION_DISPOSITION_PROCESS:
+        if con.disposition == SESSION_DISPOSITION_PROCESS:
             if con.evidence_availability != EVIDENCE_OBSERVED:
                 return (
                     f"{consumed.analysis_branch} analysis session {position} has no "
@@ -234,7 +237,7 @@ def compare_requested_and_consumed_normalized_recording(
                         f"{consumed.analysis_branch} analysis session {position} has no "
                         "consumed timestamp-unit evidence"
                     )
-        elif req.disposition == SESSION_DISPOSITION_EXCLUDED:
+        elif con.disposition == SESSION_DISPOSITION_EXCLUDED:
             if con.cache_chunk_id is not None:
                 return (
                     f"{consumed.analysis_branch} analysis session {position} is the "
@@ -257,7 +260,7 @@ def compare_requested_and_consumed_normalized_recording(
                     f"{consumed.analysis_branch} analysis session {position} excluded "
                     "source size evidence does not match authorization"
                 )
-        elif req.disposition == SESSION_DISPOSITION_MISSING:
+        elif con.disposition == SESSION_DISPOSITION_MISSING:
             if con.cache_chunk_id is not None:
                 return (
                     f"{consumed.analysis_branch} analysis session {position} is an "
@@ -346,12 +349,17 @@ def compare_consumed_normalized_recording_branches(
     for position in sorted(phasic_by_position):
         left = phasic_by_position[position]
         right = tonic_by_position[position]
-        if (
-            left.consumed_source_reference != right.consumed_source_reference
-            or left.disposition != right.disposition
-        ):
+        if left.consumed_source_reference != right.consumed_source_reference:
             return f"cross_branch_session_identity_mismatch:{position}"
-        if left.disposition != SESSION_DISPOSITION_PROCESS:
+        if left.disposition != right.disposition and {
+            left.disposition,
+            right.disposition,
+        } != {SESSION_DISPOSITION_PROCESS, SESSION_DISPOSITION_MISSING}:
+            return f"cross_branch_session_identity_mismatch:{position}"
+        if (
+            left.disposition != SESSION_DISPOSITION_PROCESS
+            or right.disposition != SESSION_DISPOSITION_PROCESS
+        ):
             continue
         if left.resolved_time_column != right.resolved_time_column:
             return f"cross_branch_time_column_mismatch:{position}"

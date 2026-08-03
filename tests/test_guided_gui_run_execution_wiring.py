@@ -877,7 +877,6 @@ def test_rwd_completion_does_not_infer_exclusion_from_selected_policy(
             {"session_id": "2025_01_01-00_30_00"},
         ]
     }
-    window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
 
     _set_ready(window, startup_request)
     window._guided_run_btn.click()

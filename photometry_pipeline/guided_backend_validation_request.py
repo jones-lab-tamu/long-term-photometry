@@ -100,11 +100,6 @@ GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_DISCOVERY_RULE_VERSION = (
 GUIDED_BACKEND_CUSTOM_TABULAR_SOURCE_IGNORED_FILES_POLICY = (
     "ignore_non_csv_and_nested_entries.v1"
 )
-GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME = (
-    "guided_rwd_incomplete_final_chunk_classification"
-)
-GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION = "v1"
-GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION = "not_requested_only.v1"
 GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME = "guided_backend_disposition_policy"
 GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION = "v1"
 
@@ -116,8 +111,6 @@ SOURCE_DATASET_REFUSAL_CATEGORIES = (
     "source_snapshot_unavailable",
     "source_snapshot_stale",
     "source_snapshot_digest_mismatch",
-    "unsupported_incomplete_final_exclusion",
-    "incomplete_final_classification_mismatch",
     "missing_or_stale_dataset_contract",
     "dataset_source_binding_mismatch",
     "invalid_sessions_per_hour",
@@ -408,12 +401,6 @@ class GuidedBackendAcquisitionDatasetRequest:
     timeline_anchor_mode: str
     fixed_daily_anchor_clock: str | None
     allow_partial_final_window: bool
-    exclude_incomplete_final_rwd_chunk: bool
-    classification_schema_name: str
-    classification_schema_version: str
-    classifier_version: str
-    classification_status: str
-    not_requested_classification_digest: str
     dataset_snapshot_schema_version: str
     dataset_status: str
     dataset_current_applied: bool
@@ -497,18 +484,11 @@ class GuidedBackendAcquisitionDatasetRequest:
             raise GuidedBackendValidationRequestContractError(
                 "Unsupported first-subset acquisition policy."
             )
-        if self.classification_status != "not_requested":
-            raise GuidedBackendValidationRequestContractError(
-                "Incomplete-final classification must be not_requested."
-            )
         if self.dataset_status != "applied" or self.dataset_current_applied is not True:
             raise GuidedBackendValidationRequestContractError(
                 "Dataset contract must be currently applied."
             )
         required_names = [
-            "classification_schema_name",
-            "classification_schema_version",
-            "classifier_version",
             "dataset_snapshot_schema_version",
             "rwd_time_col",
             "dataset_source_setup_signature",
@@ -516,10 +496,6 @@ class GuidedBackendAcquisitionDatasetRequest:
         ]
         for name in required_names:
             _require_non_empty(getattr(self, name), name)
-        _require_sha256(
-            self.not_requested_classification_digest,
-            "not_requested_classification_digest",
-        )
         for name in (
             "semantic_values",
             "validation_issue_categories",
@@ -534,7 +510,7 @@ class GuidedBackendAcquisitionDatasetRequest:
 
 @dataclass(frozen=True)
 class GuidedBackendNpmAcquisitionDatasetRequest:
-    """NPM acquisition facts without RWD incomplete-final classifier fields."""
+    """NPM acquisition facts with its parser-owned sampling policy."""
 
     acquisition_mode: str
     sessions_per_hour: int
@@ -1378,15 +1354,6 @@ class GuidedBackendSourceSnapshotFacts:
 
 
 @dataclass(frozen=True)
-class GuidedBackendIncompleteFinalClassificationFacts:
-    available: bool = False
-    classification_status: str = ""
-    classification_digest: str = ""
-    source_candidate_set_digest: str = ""
-    source_candidate_content_digest: str = ""
-
-
-@dataclass(frozen=True)
 class GuidedBackendParserFacts:
     available: bool = False
     schema_name: str = ""
@@ -1429,7 +1396,6 @@ class GuidedBackendAcquisitionDatasetFacts:
     recording_start_clock: str | None = None
     recording_start_clock_source: str = "not_applicable"
     allow_partial_final_window: bool = False
-    exclude_incomplete_final_rwd_chunk: bool = False
     dataset_snapshot_schema_version: str = ""
     dataset_status: str = ""
     dataset_current_applied: bool = False
@@ -1613,9 +1579,6 @@ class GuidedBackendOutputFacts:
 class GuidedBackendValidationMaterializedFacts:
     source_snapshot: GuidedBackendSourceSnapshotFacts = field(
         default_factory=GuidedBackendSourceSnapshotFacts
-    )
-    incomplete_final_classification: GuidedBackendIncompleteFinalClassificationFacts = field(
-        default_factory=GuidedBackendIncompleteFinalClassificationFacts
     )
     parser: GuidedBackendParserFacts = field(
         default_factory=GuidedBackendParserFacts
@@ -1936,14 +1899,6 @@ def compile_guided_backend_validation_request(
             "The first compiler subset requires the no-exclusion final-chunk policy.",
             detail_code="incomplete_final_policy_unsupported",
         )
-    if is_npm and draft.exclude_incomplete_final_rwd_chunk:
-        return _failure(
-            "incomplete_final_policy_not_supported",
-            "incomplete_final",
-            "NPM validation does not support excluded final sessions.",
-            detail_code="npm_exclusion_unsupported",
-        )
-
     source_facts = facts.source_snapshot
     if (
         not source_facts.available
@@ -1957,22 +1912,6 @@ def compile_guided_backend_validation_request(
             "source",
             "A current request-ready source snapshot is required.",
             detail_code="source_snapshot_incomplete",
-        )
-
-    incomplete_facts = facts.incomplete_final_classification
-    if not is_npm and (
-        not incomplete_facts.available
-        or incomplete_facts.classification_status != "not_requested"
-        or incomplete_facts.source_candidate_set_digest
-        != source_facts.source_candidate_set_digest
-        or incomplete_facts.source_candidate_content_digest
-        != source_facts.source_candidate_content_digest
-    ):
-        return _failure(
-            "incomplete_final_policy_not_supported",
-            "incomplete_final",
-            "Incomplete-final facts are unavailable or do not match the source snapshot.",
-            detail_code="incomplete_final_facts_invalid",
         )
 
     parser_facts = facts.parser
@@ -2506,7 +2445,7 @@ def compile_guided_backend_validation_request(
                     schema_name=GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
                     schema_version=GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
                     admitted_dispositions=("process",),
-                    missing_session_policy="unsupported",
+                    missing_session_policy="supported",
                     excluded_session_policy="unsupported",
                     partial_support_owner="parser_contract",
                 ),
@@ -2521,12 +2460,6 @@ def compile_guided_backend_validation_request(
                 recording_start_clock=dataset_facts.recording_start_clock,
                 recording_start_clock_source=dataset_facts.recording_start_clock_source,
                 allow_partial_final_window=dataset_facts.allow_partial_final_window,
-                exclude_incomplete_final_rwd_chunk=dataset_facts.exclude_incomplete_final_rwd_chunk,
-                classification_schema_name=GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME,
-                classification_schema_version=GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION,
-                classifier_version=GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
-                classification_status=incomplete_facts.classification_status,
-                not_requested_classification_digest=incomplete_facts.classification_digest,
                 dataset_snapshot_schema_version=dataset_facts.dataset_snapshot_schema_version,
                 dataset_status=dataset_facts.dataset_status,
                 dataset_current_applied=dataset_facts.dataset_current_applied,
@@ -2802,12 +2735,6 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "timeline_anchor_mode",
         "fixed_daily_anchor_clock",
         "allow_partial_final_window",
-        "exclude_incomplete_final_rwd_chunk",
-        "classification_schema_name",
-        "classification_schema_version",
-        "classifier_version",
-        "classification_status",
-        "not_requested_classification_digest",
         "dataset_snapshot_schema_version",
         "dataset_status",
         "dataset_current_applied",

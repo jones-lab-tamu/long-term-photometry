@@ -80,7 +80,6 @@ class GuidedCanonicalValidationIdentityPayload:
     acquisition_mode: str
     sessions_per_hour: int
     session_duration_sec: float
-    exclude_incomplete_final_rwd_chunk: bool
     timeline_anchor_mode: str
     included_roi_ids: tuple[str, ...]
     execution_mode: str
@@ -323,10 +322,6 @@ def _validate_payload_envelope(
         raise GuidedIdentityError("session_duration_sec must be finite.")
     if payload.session_duration_sec <= 0:
         raise GuidedIdentityError("session_duration_sec must be positive.")
-    if not isinstance(payload.exclude_incomplete_final_rwd_chunk, bool):
-        raise GuidedIdentityError(
-            "exclude_incomplete_final_rwd_chunk must be boolean."
-        )
     if not isinstance(payload.traces_only, bool) or payload.traces_only:
         raise GuidedIdentityError(
             "The first subset requires traces_only to be false."
@@ -394,9 +389,6 @@ def build_canonical_guided_identity_payload_from_request(
         acquisition_mode=request.acquisition_mode,
         sessions_per_hour=request.sessions_per_hour,
         session_duration_sec=request.session_duration_sec,
-        exclude_incomplete_final_rwd_chunk=(
-            request.exclude_incomplete_final_rwd_chunk
-        ),
         timeline_anchor_mode=request.timeline_anchor_mode,
         included_roi_ids=tuple(sorted(roi_ids)),
         execution_mode=request.execution_mode,

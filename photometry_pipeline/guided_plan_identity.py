@@ -109,8 +109,8 @@ def _dataset_contract_pairing_payload(snapshot) -> dict[str, Any]:
     user has confirmed, as it exists on the draft plan today.
 
     contract_values carries rwd_time_col/sig_suffix/uv_suffix (the signal
-    vs. reference channel suffix pairing) and exclude_incomplete_final_rwd_chunk
-    once the user has confirmed detected dataset settings (see
+    vs. reference channel suffix pairing) once the user has confirmed detected
+    dataset settings (see
     _confirm_detected_dataset_settings_via_review_plan_button /
     _infer_dataset_contract_overrides in gui/main_window.py). No ordering
     policy is invented here -- the dict is taken exactly as currently
@@ -186,9 +186,6 @@ def build_guided_new_analysis_draft_plan_identity_payload(
             "continuous_window_sec": plan.continuous_window_sec,
             "continuous_step_sec": plan.continuous_step_sec,
             "allow_partial_final_window": bool(plan.allow_partial_final_window),
-            "exclude_incomplete_final_rwd_chunk": bool(
-                plan.exclude_incomplete_final_rwd_chunk
-            ),
             "approved_missing_sessions": sorted(
                 (
                     _missing_session_approval_payload(approval)

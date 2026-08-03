@@ -794,7 +794,6 @@ def _current_applied_snapshot_for_plan(plan, **overrides):
         continuous_window_sec=plan.continuous_window_sec,
         continuous_step_sec=plan.continuous_step_sec,
         allow_partial_final_window=plan.allow_partial_final_window,
-        exclude_incomplete_final_rwd_chunk=plan.exclude_incomplete_final_rwd_chunk,
         discovered_roi_ids=tuple(plan.discovered_roi_ids),
         included_roi_ids=tuple(plan.included_roi_ids),
         source_setup_signature=plan.source_setup_signature,
@@ -836,7 +835,6 @@ def test_dataset_contract_snapshot_represents_reviewed_applied_planning_state():
         acquisition_mode="intermittent",
         sessions_per_hour=6,
         session_duration_sec=120.0,
-        exclude_incomplete_final_rwd_chunk=True,
         discovered_roi_ids=("ROI1", "ROI2"),
         included_roi_ids=("ROI1",),
         source_setup_signature="setup-1",
@@ -851,7 +849,6 @@ def test_dataset_contract_snapshot_represents_reviewed_applied_planning_state():
             "rwd_time_col": "Time",
             "uv_suffix": "_UV",
             "sig_suffix": "_Signal",
-            "exclude_incomplete_final_rwd_chunk": True,
         },
         format_specific={"excluded_source_files": ["chunk_99.csv"]},
         source_identity=source_identity,
@@ -2165,7 +2162,6 @@ def test_execution_subset_auto_remains_blocked_even_with_concrete_snapshot_resol
         continuous_window_sec=plan.continuous_window_sec,
         continuous_step_sec=plan.continuous_step_sec,
         allow_partial_final_window=plan.allow_partial_final_window,
-        exclude_incomplete_final_rwd_chunk=plan.exclude_incomplete_final_rwd_chunk,
         included_roi_ids=tuple(plan.included_roi_ids),
     )
     plan.dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
@@ -2258,7 +2254,6 @@ def test_rwd_dataset_normalization_best_case_is_ready_and_separates_field_roles(
         contract_values={
             **plan.dataset_contract_snapshot.contract_values,
             "rwd_contract_validation": {"status": "reviewed"},
-            "rwd_excluded_source_files": ["chunk_99.rwd"],
             "unknown_structural_note": "reviewed manually",
         },
     )
@@ -2273,14 +2268,12 @@ def test_rwd_dataset_normalization_best_case_is_ready_and_separates_field_roles(
         "rwd_time_col": "Time",
         "sig_suffix": "_Signal",
         "uv_suffix": "_UV",
-        "exclude_incomplete_final_rwd_chunk": False,
     }
     assert set(normalization["backend_config_values"]) == RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS
     assert normalization["structural_values"]["input_format"] == "rwd"
     assert normalization["structural_values"]["acquisition_mode"] == "intermittent"
     assert "input_format" not in normalization["backend_config_values"]
     assert normalization["provenance_values"]["rwd_contract_validation"] == {"status": "reviewed"}
-    assert normalization["provenance_values"]["rwd_excluded_source_files"] == ["chunk_99.rwd"]
     assert "rwd_contract_validation" not in normalization["backend_config_values"]
     assert normalization["rejected_fields"] == {"unknown_structural_note": "reviewed manually"}
     assert normalization["missing_required_fields"] == []
@@ -2325,7 +2318,6 @@ def test_rwd_dataset_normalization_missing_required_backend_field_blocks(missing
         ({"input_format": "npm"}, {}, "input_format"),
         ({"resolved_input_format": "npm"}, {}, "resolved_input_format"),
         ({"acquisition_mode": "continuous"}, {}, "acquisition_mode"),
-        ({}, {"exclude_incomplete_final_rwd_chunk": True}, "exclude_incomplete_final_rwd_chunk"),
     ],
 )
 def test_rwd_dataset_normalization_inconsistent_duplicate_fields_block(

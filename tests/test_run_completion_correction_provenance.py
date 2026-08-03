@@ -1151,14 +1151,19 @@ def test_completion_verifier_rejects_requested_consumed_mismatch(native_run, tmp
     assert "strategy" in error.lower() or "provenance" in error.lower()
 
 
-def test_real_native_completion_allows_authorized_missing_middle_session(tmp_path):
+def test_real_native_completion_allows_identifiable_missing_middle_session(tmp_path):
     input_root = tmp_path / "missing_input"
     sources = []
     for index in range(3):
         source = input_root / f"2024_01_01-00_0{index}_00" / "fluorescence.csv"
         _write_source(source)
         sources.append(source)
-    sources[1].write_text("BROKEN\n", encoding="utf-8")
+    sources[1].write_text(
+        "TimeStamp,Region0-410,Region0-470,Region1-410,Region1-470\n"
+        "0,2.0,5.0,2.1,6.0\n"
+        '0.1,2.0,"unterminated,2.1,6.0\n',
+        encoding="utf-8",
+    )
     cfg = Config(
         target_fs_hz=10.0,
         chunk_duration_sec=20.0,
@@ -1168,7 +1173,6 @@ def test_real_native_completion_allows_authorized_missing_middle_session(tmp_pat
         lowpass_hz=2.0,
         filter_order=2,
         signal_only_f0_min_window_samples=21,
-        authorized_missing_sessions=[str(sources[1])],
     )
     analysis = tmp_path / "missing_analysis"
     Pipeline(
@@ -1195,6 +1199,9 @@ def test_real_native_completion_allows_authorized_missing_middle_session(tmp_pat
     )
     assert correction_completion_error(str(root), mode) == ""
     _write_terminal_set(root, mode)
+    classification = classify_run_terminal_state(str(root))
+    assert classification.state == TERMINAL_SUCCESS_WITH_MISSING
+    assert classification.missing_session_count == 1
     review = load_completed_phasic_review(root)
     sessions = review.sessions_for_roi("Region0")
     assert [session.disposition for session in sessions] == [
@@ -1203,17 +1210,21 @@ def test_real_native_completion_allows_authorized_missing_middle_session(tmp_pat
         "process",
     ]
     assert [session.chunk_id for session in sessions] == [0, None, 2]
+    assert "Error tokenizing data" in sessions[1].missing_reason
     assert sessions[2].time_sec[0] == 0.0
 
 
-def test_real_native_completion_allows_authorized_final_exclusion(tmp_path):
+def test_real_native_completion_allows_identifiable_final_shortfall(tmp_path):
     input_root = tmp_path / "excluded_input"
     sources = []
     for index in range(3):
         source = input_root / f"2024_01_01-00_0{index}_00" / "fluorescence.csv"
         _write_source(source)
         sources.append(source)
-    sources[-1].write_text("BROKEN\n", encoding="utf-8")
+    import pandas as pd
+
+    short_frame = pd.read_csv(sources[-1]).iloc[:100]
+    short_frame.to_csv(sources[-1], index=False)
     cfg = Config(
         target_fs_hz=10.0,
         chunk_duration_sec=20.0,
@@ -1223,8 +1234,6 @@ def test_real_native_completion_allows_authorized_final_exclusion(tmp_path):
         lowpass_hz=2.0,
         filter_order=2,
         signal_only_f0_min_window_samples=21,
-        exclude_incomplete_final_rwd_chunk=True,
-        rwd_excluded_source_files=[str(sources[-1])],
     )
     analysis = tmp_path / "excluded_analysis"
     Pipeline(cfg, mode="phasic", per_roi_correction=_mixed_map()).run(
@@ -1233,7 +1242,9 @@ def test_real_native_completion_allows_authorized_final_exclusion(tmp_path):
     completeness = json.loads(
         (analysis / "input_processing_completeness.json").read_text(encoding="utf-8")
     )
-    assert completeness["expected"][-1]["disposition"] == "authorized_exclusion"
+    assert completeness["expected"][-1]["disposition"] == "authorized_missing_corrupted"
+    assert completeness["expected"][-1]["failure_category"] == "session_input_shortfall"
+    assert "End Coverage Failure" in completeness["expected"][-1]["reason"]
     assert [record["cache_chunk_id"] for record in completeness["processed"]] == [0, 1]
 
     root = _root_for_case(tmp_path, analysis, "excluded_root")
@@ -1254,7 +1265,8 @@ def test_real_native_completion_allows_authorized_final_exclusion(tmp_path):
     assert correction_completion_error(str(root), mode) == ""
     classification = classify_run_terminal_state(str(root))
     assert classification.state == TERMINAL_SUCCESS_WITH_MISSING
-    assert classification.final_exclusion_count == 1
+    assert classification.missing_session_count == 1
+    assert classification.final_exclusion_count == 0
     with h5py.File(root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5", "r") as handle:
         assert [int(value) for value in handle["meta/chunk_ids"][()]] == [0, 1]
         for roi in ("Region0", "Region1"):
@@ -1263,6 +1275,7 @@ def test_real_native_completion_allows_authorized_final_exclusion(tmp_path):
     assert [session.disposition for session in review.sessions_for_roi("Region0")] == [
         "process",
         "process",
-        "authorized_exclusion",
+        "authorized_missing_corrupted",
     ]
     assert review.sessions_for_roi("Region0")[-1].chunk_id is None
+    assert "End Coverage Failure" in review.sessions_for_roi("Region0")[-1].missing_reason

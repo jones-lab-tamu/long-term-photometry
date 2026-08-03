@@ -56,10 +56,13 @@ def _write_valid(chunk_dir: Path, *, seed: int, flat: bool = False, n: int = 600
 
 def _write_corrupted(chunk_dir: Path):
     chunk_dir.mkdir(parents=True, exist_ok=True)
-    # Valid header, but corrupt data to cause natural pipeline failure during execution
+    # Valid header, but a parser failure to exercise the known session-local
+    # loader boundary during execution.
     (chunk_dir / "fluorescence.csv").write_text(
-        "TimeStamp,Region0-470,Region0-410\n0.0,corrupt_signal,1.0\n0.1,corrupt_signal,1.0\n",
-        encoding="utf-8"
+        "TimeStamp,Region0-470,Region0-410\n"
+        "0.0,1.2,1.0\n"
+        '0.1,"unterminated,1.1\n',
+        encoding="utf-8",
     )
 
 def _build_input(tmp_path: Path, *, corrupted=(), flat=(), n_sessions=3) -> Path:
@@ -565,7 +568,6 @@ def test_gui_verification_boundaries(window, tmp_path: Path):
 def _setup_guided_recording(
     window, tmp_path, input_root, monkeypatch, *,
     strategy_label="Global Linear Regression", analysis_mode="both",
-    exclude_incomplete_final=False,
 ):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
@@ -660,9 +662,6 @@ def _setup_guided_recording(
         window._populate_discovery_ui(discovery)
     window._guided_sessions_per_hour_edit.setText("1")
     window._guided_session_duration_edit.setText("600")
-    window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(
-        exclude_incomplete_final
-    )
     window._guided_dataset_contract_apply_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(
@@ -939,9 +938,12 @@ def test_guided_missing_session_real_gui_rerun_lifecycle(window, tmp_path: Path,
 
     window._guided_load_completed_run_for_review_btn.click()
     assert window._guided_workflow_mode == "open_results"
-    assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
-        "Region0"
-    ) == "Signal-Only F0"
+    assert (
+        window._guided_report_viewer._completed_review_overview[
+            "requested_by_roi"
+        ]["Region0"]["selected_strategy"]
+        == "signal_only_f0"
+    )
     shutil.rmtree(input_root)
 
     reopened = MainWindow(
@@ -954,15 +956,22 @@ def test_guided_missing_session_real_gui_rerun_lifecycle(window, tmp_path: Path,
             staticmethod(lambda *_args, **_kwargs: rerun_result.run_directory),
         )
         reopened._guided_start_open_results_btn.click()
+        _pump_until(
+            qapp,
+            lambda: reopened._guided_start_open_results_loading is False,
+        )
         assert reopened._guided_workflow_mode == "open_results"
-        assert reopened._report_viewer.phasic_review_model.strategy_label_for_roi(
-            "Region0"
-        ) == "Signal-Only F0"
+        assert (
+            reopened._guided_report_viewer._completed_review_overview[
+                "requested_by_roi"
+            ]["Region0"]["selected_strategy"]
+            == "signal_only_f0"
+        )
     finally:
         reopened.close()
 
 
-def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
+def test_guided_identifiable_final_failure_real_signal_only_lifecycle(
     window, tmp_path: Path, monkeypatch, qapp
 ):
     input_root = _build_input(tmp_path, n_sessions=3)
@@ -976,9 +985,7 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
         monkeypatch,
         strategy_label="Signal-Only F0",
         analysis_mode="phasic",
-        exclude_incomplete_final=True,
     )
-    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked()
 
     build_identity = mapping.build_application_build_identity(
         distribution_name="photometry-pipeline",
@@ -1015,7 +1022,7 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
         ).read_text(encoding="utf-8")
     )
     assert completeness["expected"][-1]["index"] == 2
-    assert completeness["expected"][-1]["disposition"] == "authorized_exclusion"
+    assert completeness["expected"][-1]["disposition"] == "authorized_missing_corrupted"
     assert [item["index"] for item in completeness["processed"]] == [0, 1]
     from photometry_pipeline.run_completion_contract import (
         TERMINAL_SUCCESS_WITH_MISSING,
@@ -1023,7 +1030,7 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
     )
     terminal = classify_run_terminal_state(str(run_dir))
     assert terminal.state == TERMINAL_SUCCESS_WITH_MISSING
-    assert terminal.final_exclusion_count == 1
+    assert terminal.final_exclusion_count == 0
     with h5py.File(
         run_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5", "r"
     ) as cache:
@@ -1035,9 +1042,16 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
             ]
 
     window._guided_load_completed_run_for_review_btn.click()
-    assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
-        "Region0"
-    ) == "Signal-Only F0"
+    _pump_until(
+        qapp,
+        lambda: window._guided_completed_review_loading is False,
+    )
+    assert (
+        window._guided_report_viewer._completed_review_overview[
+            "requested_by_roi"
+        ]["Region0"]["selected_strategy"]
+        == "signal_only_f0"
+    )
     shutil.rmtree(input_root)
     reopened = MainWindow(
         settings=QSettings(str(tmp_path / "final-reopen.ini"), QSettings.IniFormat)
@@ -1049,8 +1063,16 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
             staticmethod(lambda *_args, **_kwargs: str(run_dir)),
         )
         reopened._guided_start_open_results_btn.click()
-        assert reopened._report_viewer.phasic_review_model.strategy_label_for_roi(
-            "Region0"
-        ) == "Signal-Only F0"
+        _pump_until(
+            qapp,
+            lambda: reopened._guided_start_open_results_loading is False,
+        )
+        assert reopened._guided_workflow_mode == "open_results"
+        assert (
+            reopened._guided_report_viewer._completed_review_overview[
+                "requested_by_roi"
+            ]["Region0"]["selected_strategy"]
+            == "signal_only_f0"
+        )
     finally:
         reopened.close()

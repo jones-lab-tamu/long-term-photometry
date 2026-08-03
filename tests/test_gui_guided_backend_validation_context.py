@@ -175,7 +175,6 @@ def test_rwd_dataset_contract_candidate_reuses_discovery_contract_cache(
             "rwd_time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
-            "exclude_incomplete_final_rwd_chunk": False,
         },
     }
     monkeypatch.setattr(
@@ -210,7 +209,6 @@ def test_dataset_confirmation_busy_guard_blocks_duplicate_request(
             "rwd_time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
-            "exclude_incomplete_final_rwd_chunk": False,
         },
     }
     candidate = window._guided_new_analysis_dataset_contract_candidate()
@@ -262,7 +260,6 @@ def test_unchanged_dataset_confirmation_does_not_invalidate_current_validation(
             "rwd_time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
-            "exclude_incomplete_final_rwd_chunk": False,
         },
     }
     candidate = window._guided_new_analysis_dataset_contract_candidate()

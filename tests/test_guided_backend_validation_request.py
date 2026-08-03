@@ -17,7 +17,6 @@ from photometry_pipeline.guided_new_analysis_plan import (
 
 _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
-_DIGEST_C = "c" * 64
 _DIGEST_D = "d" * 64
 
 
@@ -75,14 +74,6 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         recording_start_clock="12:00",
         recording_start_clock_source="validated_metadata",
         allow_partial_final_window=False,
-        exclude_incomplete_final_rwd_chunk=False,
-        classification_schema_name=(
-            "guided_rwd_incomplete_final_chunk_classification"
-        ),
-        classification_schema_version="v1",
-        classifier_version="not_requested_only.v1",
-        classification_status="not_requested",
-        not_requested_classification_digest=_DIGEST_C,
         dataset_snapshot_schema_version=(
             "guided_new_analysis_dataset_contract_snapshot.v1"
         ),
@@ -262,15 +253,6 @@ def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
             candidate_files=source.candidate_files,
             stale=False,
         ),
-        incomplete_final_classification=(
-            contracts.GuidedBackendIncompleteFinalClassificationFacts(
-                available=True,
-                classification_status=acquisition.classification_status,
-                classification_digest=acquisition.not_requested_classification_digest,
-                source_candidate_set_digest=source.source_candidate_set_digest,
-                source_candidate_content_digest=source.source_candidate_content_digest,
-            )
-        ),
         parser=contracts.GuidedBackendParserFacts(
             available=True,
             schema_name=parser.schema_name,
@@ -295,9 +277,6 @@ def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
             recording_start_clock=acquisition.recording_start_clock,
             recording_start_clock_source=acquisition.recording_start_clock_source,
             allow_partial_final_window=acquisition.allow_partial_final_window,
-            exclude_incomplete_final_rwd_chunk=(
-                acquisition.exclude_incomplete_final_rwd_chunk
-            ),
             dataset_snapshot_schema_version=(
                 acquisition.dataset_snapshot_schema_version
             ),
@@ -484,8 +463,6 @@ def test_refusal_taxonomy_is_complete_and_duplicate_free():
         "source_snapshot_unavailable",
         "source_snapshot_stale",
         "source_snapshot_digest_mismatch",
-        "unsupported_incomplete_final_exclusion",
-        "incomplete_final_classification_mismatch",
         "missing_or_stale_dataset_contract",
         "dataset_source_binding_mismatch",
         "invalid_sessions_per_hour",
@@ -805,7 +782,6 @@ def test_complete_facts_compile_populated_request_with_identity():
     assert request.acquisition_dataset.acquisition_mode == "intermittent"
     assert request.acquisition_dataset.sessions_per_hour == 6
     assert request.acquisition_dataset.timeline_anchor_mode == "civil"
-    assert request.acquisition_dataset.classification_status == "not_requested"
     assert request.acquisition_dataset.semantic_values is facts.acquisition_dataset.semantic_values
 
     assert request.parser.time_column_candidates == facts.parser.time_column_candidates
@@ -954,7 +930,6 @@ def test_compiler_uses_facts_not_mutable_draft_payload_fields():
         ("incomplete", "incomplete_materialized_facts"),
         ("unresolved", "unresolved_materialized_inputs"),
         ("source", "missing_source_snapshot"),
-        ("incomplete_final", "incomplete_final_policy_not_supported"),
         ("parser", "parser_contract_unavailable"),
         ("parser_unresolved", "parser_unresolved_inputs"),
         ("dataset", "missing_or_stale_dataset_contract"),
@@ -978,14 +953,6 @@ def test_complete_fact_gate_refusals(mutation: str, expected: str):
     elif mutation == "source":
         facts = replace(
             facts, source_snapshot=replace(facts.source_snapshot, available=False)
-        )
-    elif mutation == "incomplete_final":
-        facts = replace(
-            facts,
-            incomplete_final_classification=replace(
-                facts.incomplete_final_classification,
-                classification_status="excluded",
-            ),
         )
     elif mutation == "parser":
         facts = replace(facts, parser=replace(facts.parser, available=False))
@@ -1063,7 +1030,6 @@ def test_complete_fact_gate_refusals(mutation: str, expected: str):
     [
         ("input_format", "npm", "unsupported_source_format"),
         ("acquisition_mode", "continuous", "unsupported_acquisition_mode"),
-        ("exclude_incomplete_final_rwd_chunk", True, None),
         ("allow_partial_final_window", True, "incomplete_final_policy_not_supported"),
     ],
 )
@@ -1156,11 +1122,9 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
 
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
-    # Pinned vector updated: global_tonic_output_mode/global_tonic_timeline_mode
-    # were added to GuidedBackendCorrectionRequest's identity fields (see
-    # _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS).
+    # Pinned vector reflects the current Guided validation identity fields.
     assert first == (
-        "7099b56ae8a47571a72aa0a8e1ee0e3aadbdb89075c0a3bf1cb23db31994a610"
+        "314d119b8b7ddb17db31ae650673fb6a0efbbdacabc7360783b9c3e658143bae"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
@@ -1193,7 +1157,7 @@ def test_npm_acquisition_request_uses_format_neutral_disposition_policy():
         schema_name=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
         schema_version=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
         admitted_dispositions=("process",),
-        missing_session_policy="unsupported",
+        missing_session_policy="supported",
         excluded_session_policy="unsupported",
         partial_support_owner="parser_contract",
     )
@@ -1227,12 +1191,9 @@ def test_npm_acquisition_request_uses_format_neutral_disposition_policy():
 
     assert acquisition.disposition_policy is policy
     assert acquisition.disposition_policy.admitted_dispositions == ("process",)
-    assert acquisition.disposition_policy.missing_session_policy == "unsupported"
+    assert acquisition.disposition_policy.missing_session_policy == "supported"
     assert acquisition.disposition_policy.excluded_session_policy == "unsupported"
     assert acquisition.disposition_policy.partial_support_owner == "parser_contract"
-    assert not hasattr(acquisition, "classification_schema_name")
-    assert not hasattr(acquisition, "classifier_version")
-    assert not hasattr(acquisition, "not_requested_classification_digest")
 
 
 def test_npm_disposition_policy_is_part_of_parent_request_identity():
@@ -1244,7 +1205,7 @@ def test_npm_disposition_policy_is_part_of_parent_request_identity():
         schema_name=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
         schema_version=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
         admitted_dispositions=("process",),
-        missing_session_policy="unsupported",
+        missing_session_policy="supported",
         excluded_session_policy="unsupported",
         partial_support_owner="parser_contract",
     )

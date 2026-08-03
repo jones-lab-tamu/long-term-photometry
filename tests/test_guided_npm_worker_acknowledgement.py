@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import photometry_pipeline.guided_npm_worker_acknowledgement as ack_module
+import photometry_pipeline.guided_npm_authorized_adapter as adapter_module
 import photometry_pipeline.guided_npm_worker_launch as launch_module
 import photometry_pipeline.guided_npm_worker_entry as entry_module
 from photometry_pipeline.config import Config
@@ -498,6 +499,53 @@ def test_real_pipeline_hook_is_once_after_all_sources_and_before_pass2(monkeypat
     assert len(observed) == 1
     assert tuple(item.source_path for item in observed[0].consumed_source_records) == runtime.authorized_input.ordered_session_paths
     assert observed[0].numerical_dispatch_status == "entered"
+
+
+def test_real_guided_npm_pipeline_continues_after_identifiable_parse_failure(
+    monkeypatch, tmp_path
+):
+    runtime = _mixed_gap_runtime(tmp_path)
+    original_loader = adapter_module.load_npm_authorized_bytes
+
+    def fail_middle_session(source_path, content, config, chunk_id, **kwargs):
+        if chunk_id == 1:
+            import pandas as pd
+
+            raise pd.errors.ParserError("identifiable parser failure")
+        return original_loader(source_path, content, config, chunk_id, **kwargs)
+
+    monkeypatch.setattr(
+        adapter_module, "load_npm_authorized_bytes", fail_middle_session
+    )
+    pipeline = Pipeline(
+        runtime.config,
+        mode=runtime.mode,
+        per_roi_correction=runtime.per_roi_correction,
+        per_roi_feature_config=runtime.per_roi_feature_config,
+        per_roi_feature_provenance=runtime.per_roi_feature_provenance,
+    )
+    observed = []
+    pipeline.run_guided_npm_authorized(
+        runtime,
+        runtime.authorized_input.run_directory_path,
+        traces_only=True,
+        on_consumed_authority_verified=observed.append,
+    )
+
+    assert len(observed) == 1
+    assert tuple(
+        record.chronological_position
+        for record in observed[0].consumed_source_records
+    ) == (0, 1, 2)
+    completeness = json.loads(
+        (
+            Path(runtime.authorized_input.run_directory_path)
+            / "input_processing_completeness.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert [item["index"] for item in completeness["processed"]] == [0, 2]
+    assert completeness["missing"][0]["index"] == 1
+    assert completeness["missing"][0]["reason"] == "identifiable parser failure"
 
 
 def test_consumed_evidence_binds_actual_not_nominal_three_session_chronology(monkeypatch, tmp_path):
