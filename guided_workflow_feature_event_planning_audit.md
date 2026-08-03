@@ -381,7 +381,6 @@ Required future tests:
 
 ## Files Inspected
 
-- `guided_workflow_long_duration_audit.md`
 - `guided_workflow_run_plan_contract.md`
 - `photometry_pipeline/guided_run_plan.py`
 - `tests/test_guided_run_plan_contract.py`
@@ -399,4 +398,3 @@ Required future tests:
 - `tests/test_peak_detection_hardening.py`
 - feature, pipeline, applied-dF/F, and plotting tests located by searching for
   feature/event Config fields and `features.csv`.
-

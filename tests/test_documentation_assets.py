@@ -11,7 +11,7 @@ BUNDLED_DATASET = REPO_ROOT / "examples" / "data" / "synthetic_photometry_basic"
 BUNDLED_CONFIG = BUNDLED_DATASET / "tutorial_config.yaml"
 
 DOC_PATHS = [
-    REPO_ROOT / "docs" / "quickstart_gui_synthetic.md",
+    REPO_ROOT / "docs" / "guided_scientist_guide.md",
     REPO_ROOT / "docs" / "input_formats.md",
     REPO_ROOT / "docs" / "correction_and_dynamic_fit.md",
     REPO_ROOT / "docs" / "event_detection.md",
@@ -20,6 +20,7 @@ DOC_PATHS = [
 ]
 
 README_LINKS = [
+    "docs/guided_scientist_guide.md",
     "docs/input_formats.md",
     "docs/correction_and_dynamic_fit.md",
     "docs/event_detection.md",
@@ -50,25 +51,32 @@ def test_bundled_synthetic_tutorial_config_uses_conservative_event_defaults():
     assert cfg["peak_min_width_sec"] == 0.3
 
 
-def test_key_documentation_files_exist_and_reference_bundled_dataset():
+def test_key_documentation_files_exist_and_describe_current_workflow():
     for path in DOC_PATHS:
         assert path.exists(), path
         text = path.read_text(encoding="utf-8")
         assert len(text.strip()) > 200
 
-    quickstart = (REPO_ROOT / "docs" / "quickstart_gui_synthetic.md").read_text(encoding="utf-8")
-    assert "examples/data/synthetic_photometry_basic" in quickstart
-    assert "VALIDATE-ONLY: OK" in quickstart
-    assert "not biological validation" in quickstart.lower()
+    guide = (REPO_ROOT / "docs" / "guided_scientist_guide.md").read_text(encoding="utf-8")
+    assert "# Guided Scientist Guide" in guide
+    assert "software-ready" in guide.lower()
+    assert "not biological validation" in guide.lower()
+    for stale in (
+        "docs/quickstart_gui_synthetic.md",
+        "docs/synthetic_demo_datasets.md",
+        "docs/tutorial_first_run_with_demo_dataset.md",
+        "gui/README.md",
+    ):
+        assert not (REPO_ROOT / stale).exists(), stale
 
 
-def test_nonnegative_slope_constraint_docs_are_diagnostic_not_correction_fix():
+def test_correction_docs_keep_diagnostic_scope():
     doc_text = "\n".join(path.read_text(encoding="utf-8") for path in DOC_PATHS)
     lower = doc_text.lower()
 
     assert "prevent negative slopes" not in lower
     assert "advanced diagnostic" in lower
-    assert "not a general correction improvement" in lower
+    assert "diagnostic-only" in lower or "diagnostic only" in lower
     assert "unconstrained" in lower
 
 
@@ -80,6 +88,7 @@ def test_readme_documentation_links_point_to_existing_local_paths():
         assert rel in readme
         assert (REPO_ROOT / rel).exists(), rel
 
+    assert "guided scientist guide" in lower
     assert "guided is the recommended workflow" in lower
     assert re.search(r"full control.*expert.*backward-compatible", lower, re.DOTALL)
 
@@ -115,6 +124,142 @@ def test_readme_documentation_links_point_to_existing_local_paths():
     assert "--sessions-per-hour" not in lower
     assert "manifest.json" not in lower
     assert not re.search(r"one\s+csv(?:\s+file)?\s*=\s*one\s+session", lower)
+
+
+def test_guided_scientist_guide_covers_current_visible_workflow():
+    guide = (REPO_ROOT / "docs" / "guided_scientist_guide.md").read_text(
+        encoding="utf-8"
+    )
+    lower = guide.lower()
+
+    assert "# Guided Scientist Guide" in guide
+    assert "| RWD | Supported | Supported |" in guide
+    assert "| Neurophotometrics | Supported | Not currently supported |" in guide
+    assert "| CSV files | Supported | Supported |" in guide
+    guide_steps = (
+        "1. Start",
+        "2. Select data",
+        "3. Recording structure",
+        "4. Correction approach",
+        "5. Feature detection",
+        "6. Review plan",
+        "7. Run",
+        "8. Review",
+    )
+    assert [guide.index(step) for step in guide_steps] == sorted(
+        guide.index(step) for step in guide_steps
+    )
+    assert re.search(
+        r"continuous\s+neurophotometrics\s+recordings?\s+are\s+not\s+currently\s+supported",
+        lower,
+    )
+    assert re.search(
+        r"do\s+not\s+force\s+a\s+continuous\s+recording\s+through\s+the\s+repeated-session\s+option",
+        lower,
+    )
+    assert "supported repeated-session organization" not in lower
+    assert "one candidate csv file defaults to a continuous" in lower
+    assert "multiple candidate csv files default to repeated sessions" in lower
+    for label in (
+        "Time column",
+        "Time units",
+        "ROI name",
+        "Signal column",
+        "Reference column",
+        "Add ROI",
+        "Select ROIs",
+        "Sessions per hour",
+        "Session duration (s)",
+        "Continuous analysis window (s)",
+        "Allow partial final analysis window",
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+        "Signal-Only F0",
+        "Decision-Support Audit",
+        "Default",
+        "Custom",
+        "Review plan",
+        "Check my setup",
+        "Run Guided Analysis",
+        "Verification",
+        "Phasic dFF",
+        "Phasic Summary",
+    ):
+        assert label in guide
+
+    for control in (
+        "Event signal",
+        "Signal excursion polarity",
+        "Peak threshold method",
+        "Peak threshold k",
+        "Peak threshold percentile",
+        "Peak threshold absolute",
+        "Peak min distance (sec)",
+        "Peak min prominence k",
+        "Peak min width (sec)",
+        "Peak pre-filter",
+        "Event AUC baseline",
+    ):
+        assert f"**{control}**" in guide
+
+    assert "Tools -> Generate Guided Demo Dataset" in guide
+    assert "preview segment" in lower
+    assert "complete selected recording set" in lower
+    assert "executable per-roi production choice" in lower
+    assert "repeated/session neurophotometrics route" in lower
+    assert "continuous rwd route" in lower
+    assert "not a current guided run production route" not in lower
+    for warning_pattern in (
+        r"flattens\s+most\s+plausible\s+signal\s+variation",
+        r"inverted\s+responses",
+        r"exaggerates\s+features\s+that\s+are\s+not\s+apparent\s+in\s+the\s+source\s+channels",
+        r"behaves\s+very\s+differently\s+across\s+representative\s+preview\s+segments",
+    ):
+        assert re.search(warning_pattern, lower)
+    assert re.search(
+        r"do\s+not\s+continue\s+when\s+the\s+signal/reference\s+mapping\s+appears\s+wrong",
+        lower,
+    )
+    assert "software-ready" in lower
+    assert "scientific readiness" in lower
+    assert "programming is not required" in lower
+    assert "full control remains" in lower
+    assert re.search(r"outside\s+the\s+ordinary\s+path", lower)
+    assert re.search(
+        r"do not continue if the detected source.*does not match the experiment",
+        lower,
+        re.DOTALL,
+    )
+
+    for rel in (
+        "input_formats.md",
+        "continuous_recordings.md",
+        "correction_and_dynamic_fit.md",
+        "event_detection.md",
+    ):
+        assert f"]({rel})" in guide
+        assert (REPO_ROOT / "docs" / rel).exists(), rel
+
+    assert re.search(r"Intermittent\s+CSV\s+demo", guide)
+    assert re.search(r"Continuous\s+CSV\s+demo", guide)
+    for forbidden in (
+        "custom_tabular",
+        "tuning_prep",
+        "run_full_pipeline_deliverables.py",
+        "MANIFEST.json",
+        "status.json",
+        "Validate Only",
+        "Run Pipeline",
+        "python gui/main.py",
+    ):
+        assert forbidden.lower() not in lower
+    assert "one csv file per recording session" not in lower
+    assert not re.search(
+        r"one\s+csv(?:\s+file)?\s*(?:=|equals?)\s*one\s+session",
+        lower,
+    )
+    assert "CLI" not in guide
 
 
 def test_synthetic_generator_cli_docs_clarify_long_demo_wrapper_and_config_contract():
@@ -158,7 +303,7 @@ def test_bundled_synthetic_dataset_validate_only_smoke(tmp_path):
     assert "VALIDATE-ONLY: OK" in result.stdout
 
 
-def test_bundled_synthetic_dataset_full_run_outputs_match_quickstart(tmp_path):
+def test_bundled_synthetic_dataset_full_run_outputs_match_pipeline_contract(tmp_path):
     out_dir = tmp_path / "full_run"
     cmd = [
         sys.executable,
@@ -204,7 +349,7 @@ def test_docs_preserve_scope_and_safety_claims():
     correction = (REPO_ROOT / "docs" / "correction_and_dynamic_fit.md").read_text(encoding="utf-8").lower()
     continuous = (REPO_ROOT / "docs" / "continuous_recordings.md").read_text(encoding="utf-8").lower()
     batch = (REPO_ROOT / "docs" / "batch_processing.md").read_text(encoding="utf-8").lower()
-    quickstart = (REPO_ROOT / "docs" / "quickstart_gui_synthetic.md").read_text(encoding="utf-8").lower()
+    guide = (REPO_ROOT / "docs" / "guided_scientist_guide.md").read_text(encoding="utf-8").lower()
 
     assert "isosbestic/reference correction is part of the standard phasic preprocessing workflow" in correction
     assert "default behavior is `unconstrained`" in correction
@@ -217,4 +362,4 @@ def test_docs_preserve_scope_and_safety_claims():
     assert "does not perform group statistics" in batch
     assert "group averaging" in batch
     assert "simultaneous multi-recording visualization" in batch
-    assert "not biological validation" in quickstart
+    assert "not biological validation" in guide

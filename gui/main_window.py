@@ -4125,7 +4125,7 @@ class MainWindow(QMainWindow):
         csv_layout.setSpacing(8)
 
         self._guided_csv_status_label = QLabel(
-            "Select a folder containing one CSV file per recording session."
+            "Select a folder containing one continuous CSV recording or multiple CSV session files."
         )
         self._guided_csv_status_label.setObjectName("guidedCsvInterpretationStatus")
         self._guided_csv_status_label.setProperty("guidedSecondaryText", True)
@@ -4757,7 +4757,7 @@ class MainWindow(QMainWindow):
 
         if not folder or not os.path.isdir(folder):
             self._guided_csv_status_label.setText(
-                "Select a folder containing one CSV file per recording session."
+                "Select a folder containing one continuous CSV recording or multiple CSV session files."
             )
             self._invalidate_guided_csv_interpretation("CSV source changed")
             return

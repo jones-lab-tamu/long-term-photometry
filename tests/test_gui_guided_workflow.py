@@ -464,6 +464,16 @@ def test_guided_workflow_stepper_has_expected_steps(window):
     ]
 
 
+def test_guided_csv_helper_text_covers_continuous_and_repeated_files(window):
+    assert window._guided_csv_status_label.text() == (
+        "Select a folder containing one continuous CSV recording or multiple "
+        "CSV session files."
+    )
+    assert "one CSV file per recording session" not in (
+        window._guided_csv_status_label.text()
+    )
+
+
 def test_guided_workflow_stepper_switches_placeholder_panels(window):
     expected_panels = [
         "guidedStepStart",

@@ -130,7 +130,6 @@ Secondary utility work, including saved-plan restore/adoption, should remain def
 
 - `Get-Content -Raw C:\Users\Jeff\Desktop\task68.txt`
 - `git status --short`
-- `Get-Content -Raw guided_full_contract_wiring_audit.md`
 - `Get-Content -Raw C:\Users\Jeff\Desktop\guided_full_app_workflow_contract_draft.md`
 - Multiple read-only `rg` inspections over `tools`, `gui`, `photometry_pipeline`, and `tests`
 - Multiple read-only line-range inspections of `tools/run_full_pipeline_deliverables.py`, `gui/main_window.py`, `gui/run_spec.py`, `photometry_pipeline/pipeline.py`, `photometry_pipeline/preview/correction_preview.py`, and `photometry_pipeline/signal_only_f0_diagnostics`

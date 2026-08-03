@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -553,26 +554,18 @@ def test_main_window_tools_menu_has_guided_demo_without_full_control_handoff(qap
 
 def test_docs_present_guided_demo_as_normal_gui_path():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    quickstart = (REPO_ROOT / "docs" / "quickstart_gui_synthetic.md").read_text(
-        encoding="utf-8"
-    )
-    demo_docs = (REPO_ROOT / "docs" / "synthetic_demo_datasets.md").read_text(
+    guide = (REPO_ROOT / "docs" / "guided_scientist_guide.md").read_text(
         encoding="utf-8"
     )
 
-    assert "docs/synthetic_dataset_generator_cli.md" in readme
-    assert "Tools -> Generate Guided Demo Dataset" in quickstart
-    assert "long_term_photometry_guided_demo" in quickstart
-    assert "Set as Current Input" not in quickstart
-    assert "Intermittent recording, 48 hours" in demo_docs
-    assert "Continuous recording, 48 hours" in demo_docs
-    # Both demos are generic CSV; the docs must say so and must distinguish
-    # the folder of session files from the single continuous file.
-    assert "plain generic CSV" in demo_docs
-    assert "folder of session" in demo_docs
-    assert "single file" in demo_docs
-    assert "not visible GUI demo choices" in demo_docs
-    assert "long_term_photometry_continuous_demo" in quickstart
+    assert "docs/guided_scientist_guide.md" in readme
+    assert "Tools -> Generate Guided Demo Dataset" in guide
+    assert re.search(r"Intermittent\s+CSV\s+demo", guide)
+    assert re.search(r"Continuous\s+CSV\s+demo", guide)
+    assert "not biological validation" in guide.lower()
+    assert "Set as Current Input" not in guide
+    assert "Intermittent recording, 48 hours" not in guide
+    assert "Continuous recording, 48 hours" not in guide
 
 
 def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(

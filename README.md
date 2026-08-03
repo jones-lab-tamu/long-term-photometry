@@ -10,6 +10,9 @@ Guided is the recommended workflow for new analyses. Full Control remains
 available for expert users and backward-compatible workflows, but it is not
 required for the ordinary scientist-facing path.
 
+For a complete scientist-facing walkthrough, see the
+[Guided Scientist Guide](docs/guided_scientist_guide.md).
+
 ## What the application does
 
 - Analyzes repeated session-based recordings or one continuous recording.

@@ -471,7 +471,6 @@ Recommended sequence:
 
 ## 14. Files inspected for this contract
 
-- `guided_workflow_long_duration_audit.md`
 - `gui/main_window.py`
 - `gui/run_spec.py`
 - `gui/knobs_registry.py`

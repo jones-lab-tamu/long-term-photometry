@@ -5,7 +5,7 @@
 - It is intended for users who can export or convert data from another acquisition system into the required table shape.
 - It is not native Doric, TDT, or generic TXT support.
 - It does not infer arbitrary vendor column names.
-- For synthetic RWD/NPM demo datasets intended for GUI walkthroughs and regression testing, see `docs/synthetic_demo_datasets.md`.
+- For the scientist-facing GUI walkthrough, see `guided_scientist_guide.md`. For generator details used by regression tests, see `synthetic_dataset_generator_cli.md`.
 
 ## Required file structure
 - One CSV file represents one session/chunk.

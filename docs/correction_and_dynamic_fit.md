@@ -2,6 +2,21 @@
 
 Isosbestic/reference correction is part of the standard phasic preprocessing workflow. The advanced controls exist to inspect and tune how correction is performed; they do not mean correction is optional for normal phasic analysis.
 
+## Current Guided scope
+
+In the scientist-facing Guided workflow, the visible Correction approach cards
+are the current choice surface. Robust Global Event-Reject Fit is the
+recommended starting point, Adaptive Event-Gated Fit is a candidate, and Global
+Linear Regression is a baseline comparison that is not recommended for most
+long-duration recordings. Signal-Only F0 is available for diagnostic comparison,
+and the current production execution path also accepts it as an
+explicit per-ROI strategy for repeated/session Neurophotometrics and continuous
+RWD runs, including supported mixed per-ROI plans. Those routes carry the
+confirmed strategy through production authorization and into Pipeline. The
+proposal and policy sections below describe diagnostic or future evidence; they
+do not add hidden correction routes or silently choose the correction used by a
+run.
+
 ## Dynamic fit modes
 
 Configured by `dynamic_fit_mode`:
@@ -92,7 +107,12 @@ These diagnostics are provenance outputs only. They do not alter correction, dF/
 
 ## Signal-only F0 candidate diagnostics
 
-The signal-only F0 candidate is a diagnostic-only lower-envelope estimate computed from the signal channel alone. It does not use the isosbestic/reference channel and does not replace the applied dynamic isosbestic correction.
+The signal-only F0 candidate described in this diagnostic section is a
+lower-envelope estimate computed from the signal channel alone. It does not use
+the isosbestic/reference channel, and generating the candidate for preview or
+QC does not itself replace applied dynamic isosbestic correction. A separate,
+explicitly authorized Signal-Only F0 production strategy on the supported
+routes above uses the signal-derived production baseline for that ROI.
 
 The candidate uses configurable rolling lower-quantile and smoothing windows to estimate a conservative baseline-like F0 trace from the signal. Its QC fields report support, lower-state coverage, relationship to the observed signal, above-signal fraction before and after conservative capping, tracking score, robust ranges, viability, confidence, and diagnostic flags. Signal-state diagnostics provide contextual flags for sustained, edge, or partial high-state behavior, but signal-only F0 candidate generation is not restricted to locked-high cases; ordinary chunks with untrustworthy dynamic reference correction can also be evaluated.
 

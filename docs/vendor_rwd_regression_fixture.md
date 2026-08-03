@@ -7,7 +7,8 @@ Fixture classes on this page:
 - realism-stress fixtures: pipeline-usable datasets with intentionally irregular timing/session structure
 
 Both fixture types write `generation_manifest.yaml`.
-For the full cross-format synthetic dataset guide, including NPM fixtures and tutorial/demo datasets, see `docs/synthetic_demo_datasets.md`.
+For generator details covering cross-format synthetic datasets, NPM fixtures,
+and tutorial/demo datasets, see `synthetic_dataset_generator_cli.md`.
 
 ## 1) Clean RWD fixture
 From repo root:

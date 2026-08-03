@@ -404,7 +404,6 @@ Rules:
 - `Get-Content -Raw C:\Users\Jeff\Desktop\task69.txt`
 - `git status --short`
 - `Get-Content -Raw guided_diagnostic_cache_followup.md`
-- `Get-Content -Raw guided_full_contract_wiring_audit.md`
 - `Get-Content -Raw C:\Users\Jeff\Desktop\guided_full_app_workflow_contract_draft.md`
 
 No runtime code was changed and no tests were run because this was design-only.

@@ -1,6 +1,6 @@
 # Continuous Recordings
 
-Continuous recording support is available for supported continuous source formats. Current continuous paths include RWD and strict `custom_tabular`. NPM/interleaved continuous input is not currently implemented.
+Continuous recording support is available for supported continuous source formats. Current Guided continuous paths include RWD and explicitly mapped CSV input. The separate strict `custom_tabular` conversion path remains available for its own contract. NPM/interleaved continuous input is not currently implemented.
 
 ## Required settings
 
@@ -9,9 +9,14 @@ Key settings:
 - `continuous_window_sec`
 - `continuous_step_sec`
 - `allow_partial_final_window`
-- source format: `rwd` or `custom_tabular`
+- source format: RWD or explicitly mapped Guided CSV, or the strict `custom_tabular` conversion path
 
 In this version, `continuous_step_sec` must equal `continuous_window_sec`.
+
+For Guided CSV, choose one recording CSV for continuous analysis and map its
+time, signal, and reference columns in Select data. With automatic structure,
+one candidate CSV defaults to continuous and multiple candidate CSV files
+default to repeated sessions.
 
 ## How continuous data are loaded
 
