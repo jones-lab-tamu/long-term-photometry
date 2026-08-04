@@ -3781,7 +3781,10 @@ def main():
             # The Tonic Results view reads this plot, so it is produced here,
             # immediately after the summary it renders.
             tonic_plot_results = generate_tonic_session_plots(
-                run_dir, summary_path=tonic_summary_path, rois=regions
+                run_dir,
+                summary_path=tonic_summary_path,
+                tonic_out_dir=tonic_out,
+                rois=regions,
             )
             for plot_result in tonic_plot_results:
                 manifest['deliverables'].setdefault(plot_result['roi'], {})

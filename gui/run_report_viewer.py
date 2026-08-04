@@ -81,6 +81,7 @@ from photometry_pipeline.tonic_session_plot import (
     TONIC_SESSION_PLOT_FILENAME,
     METHOD_SIGNAL_ONLY,
     tonic_method_by_roi,
+    tonic_method_label,
 )
 
 
@@ -1619,20 +1620,26 @@ class RunReportViewer(QWidget):
         self.region_changed.emit(self._selected_region())
 
     def _refresh_tonic_method_note(self) -> None:
-        """Explain the signal-only tonic fallback for the selected ROI only.
+        """State the tonic method for the selected ROI, and explain a fallback.
 
-        Shown once per affected ROI, never per session, and never for an ROI
-        whose tonic used the primary global-isosbestic method.
+        Both facts come straight from that ROI's own rows in
+        tonic_session_summary.csv. One line per ROI, never per session; the
+        fallback sentence is added only for an ROI that actually fell back, so
+        it is never duplicated.
         """
         record = self._tonic_method_by_roi.get(self._selected_region() or "", {})
-        if str(record.get("tonic_method", "")) != METHOD_SIGNAL_ONLY:
+        method = str(record.get("tonic_method", ""))
+        label = tonic_method_label(method)
+        if not label:
             self._tonic_method_note_label.setText("")
             self._tonic_method_note_label.setVisible(False)
             return
-        text = TONIC_FALLBACK_NOTE
-        reason = str(record.get("fallback_reason", "") or "")
-        if reason:
-            text += f" (reason: {reason})"
+        text = f"Tonic method: {label}."
+        if method == METHOD_SIGNAL_ONLY:
+            text += f" {TONIC_FALLBACK_NOTE}"
+            reason = str(record.get("fallback_reason", "") or "")
+            if reason:
+                text += f" (reason: {reason})"
         self._tonic_method_note_label.setText(text)
         self._tonic_method_note_label.setVisible(True)
 
@@ -1649,7 +1656,17 @@ class RunReportViewer(QWidget):
         unaffected by later ROI/image changes handled elsewhere
         (_on_region_changed / _refresh_correction_summary never touch this
         label).
+
+        Suppressed entirely for a run that carries the session-level tonic
+        summary: session shape and tonic timeline no longer govern that
+        calculation, so repeating them here would describe settings the result
+        never consumed. Those runs state their real method per ROI instead
+        (_refresh_tonic_method_note). Older runs keep the original line.
         """
+        if self._tonic_method_by_roi:
+            self._tonic_settings_summary_label.setText("")
+            self._tonic_settings_summary_label.setVisible(False)
+            return
         tonic_settings = self._completed_review_overview.get("tonic_settings", {})
         tonic_summary_text = format_tonic_settings_summary(tonic_settings)
         if tonic_summary_text:

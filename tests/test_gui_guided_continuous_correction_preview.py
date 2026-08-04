@@ -899,16 +899,34 @@ def test_continuous_recording_structure_hides_session_display_controls(
     assert not window._guided_allow_partial_final_window_cb.isHidden()
 
 
-def test_intermittent_recording_structure_keeps_session_display_controls(
+def test_intermittent_recording_structure_also_hides_session_display_controls(
     window, qapp, tmp_path
 ):
+    """Session shape and tonic timeline no longer govern repeated-session tonic.
+
+    Repeated-session tonic is now one value per session on the real recording
+    timeline, which consults neither setting, so the whole group is hidden here
+    too rather than left visible and misleading. The genuine repeated-session
+    timing controls stay visible.
+    """
     folder = _intermittent_folder(tmp_path / "sessions")
     _select_data(window, qapp, folder)
     window._sync_guided_recording_visibility()
 
-    assert not window._guided_tonic_settings_group.isHidden()
-    assert not window._guided_tonic_output_mode_combo.isHidden()
-    assert not window._guided_tonic_timeline_mode_combo.isHidden()
+    group = window._guided_tonic_settings_group
+    assert group.isHidden()
+    for control in (
+        window._guided_tonic_output_mode_combo,
+        window._guided_tonic_output_mode_help_label,
+        window._guided_tonic_timeline_mode_combo,
+        window._guided_tonic_timeline_mode_help_label,
+        window._guided_tonic_gap_free_note_label,
+        window._guided_tonic_gap_free_blocked_label,
+    ):
+        assert _is_inside(control, group)
+        assert not control.isVisible()
+
+    # Unrelated repeated-session controls are untouched.
     assert not window._guided_sessions_per_hour_edit.isHidden()
     assert not window._guided_session_duration_edit.isHidden()
     assert window._guided_continuous_window_sec_spin.isHidden()

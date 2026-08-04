@@ -119,21 +119,24 @@ def test_fallback_explanation_appears_once_for_a_fallback_roi(qapp):
     viewer._refresh_tonic_method_note()
 
     text = viewer._tonic_method_note_label.text()
-    assert text.startswith(TONIC_FALLBACK_NOTE)
+    assert text.startswith("Tonic method: Tonic F, signal-only bleach corrected.")
+    assert TONIC_FALLBACK_NOTE in text
     assert "nonpositive_global_slope" in text
-    # Exactly one note for the ROI -- never repeated per session.
+    # Exactly one explanation for the ROI -- never repeated per session.
     assert text.count(TONIC_FALLBACK_NOTE) == 1
     assert not viewer._tonic_method_note_label.isHidden()
 
 
-def test_primary_method_shows_no_fallback_note(qapp):
+def test_primary_method_states_its_method_without_a_fallback_warning(qapp):
     viewer = _viewer_with_roi("Region0", METHOD_GLOBAL_ISOSBESTIC)
     viewer._refresh_tonic_method_note()
 
-    assert viewer._tonic_method_note_label.text() == ""
+    text = viewer._tonic_method_note_label.text()
+    assert text == "Tonic method: Global-isosbestic ΔF/F₀."
+    assert TONIC_FALLBACK_NOTE not in text
 
 
-def test_note_clears_when_switching_from_fallback_to_primary_roi(qapp):
+def test_note_switches_method_between_rois(qapp):
     viewer = RunReportViewer()
     viewer._tonic_method_by_roi = {
         "Region0": {"tonic_method": METHOD_SIGNAL_ONLY, "fallback_reason": "global_fit_failed"},
@@ -150,4 +153,42 @@ def test_note_clears_when_switching_from_fallback_to_primary_roi(qapp):
 
     viewer._region_combo.setCurrentText("Region1")
     viewer._refresh_tonic_method_note()
-    assert viewer._tonic_method_note_label.text() == ""
+    assert viewer._tonic_method_note_label.text() == (
+        "Tonic method: Global-isosbestic ΔF/F₀."
+    )
+
+
+def test_stale_tonic_settings_lines_are_suppressed_for_new_runs(qapp):
+    """Session shape / tonic timeline no longer govern the result, so they go."""
+    viewer = RunReportViewer()
+    viewer._completed_review_overview = {
+        "tonic_settings": {
+            "tonic_output_mode": "flatten_session_bleach_preserve_session_baseline",
+            "tonic_timeline_mode": "real_elapsed_time",
+            "timeline_anchor_mode": "fixed_daily_anchor",
+        }
+    }
+    viewer._tonic_method_by_roi = {
+        "Region0": {"tonic_method": METHOD_GLOBAL_ISOSBESTIC, "fallback_reason": ""}
+    }
+    viewer._refresh_tonic_settings_summary()
+
+    text = viewer._tonic_settings_summary_label.text()
+    assert text == ""
+    assert "Tonic timeline" not in text
+    assert "Session shape" not in text
+
+
+def test_older_run_without_the_summary_keeps_its_original_line(qapp):
+    """No migration code: a run predating the summary is untouched."""
+    viewer = RunReportViewer()
+    viewer._completed_review_overview = {
+        "tonic_settings": {
+            "tonic_output_mode": "flatten_session_bleach_preserve_session_baseline",
+            "tonic_timeline_mode": "real_elapsed_time",
+        }
+    }
+    viewer._tonic_method_by_roi = {}
+    viewer._refresh_tonic_settings_summary()
+
+    assert viewer._tonic_settings_summary_label.text() != ""

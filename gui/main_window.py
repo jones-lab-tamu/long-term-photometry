@@ -4530,6 +4530,10 @@ class MainWindow(QMainWindow):
         )
         self._refresh_guided_tonic_settings_help()
 
+        # No longer governs any tonic calculation (see the visibility rule in
+        # _sync_guided_recording_visibility). Kept as backend state only,
+        # never shown.
+        self._guided_tonic_settings_group.setVisible(False)
         form.addRow("", self._guided_tonic_settings_group)
 
         self._guided_recording_structure_help_label = QLabel("")
@@ -6456,14 +6460,18 @@ class MainWindow(QMainWindow):
             getattr(self, "_guided_sessions_per_hour_edit", None),
             getattr(self, "_guided_session_duration_label", None),
             getattr(self, "_guided_session_duration_edit", None),
-            # Session shape and timeline describe how repeated recording
-            # sessions and the gaps between them are shown. One uninterrupted
-            # recording has neither, and continuous analysis does not consult
-            # them, so they are not shown there (CR1-F1-D).
-            getattr(self, "_guided_tonic_settings_group", None),
         ):
             if widget is not None:
                 widget.setVisible(not continuous)
+        # Session shape and timeline once governed how the repeated-session
+        # tonic trace was assembled. Repeated-session tonic is now one value per
+        # session on the real recording timeline, which consults neither, and
+        # continuous analysis never consulted them either. The whole section is
+        # therefore hidden rather than left visible and misleading. The backend
+        # fields are untouched so existing plan/contract shapes still resolve.
+        tonic_settings_group = getattr(self, "_guided_tonic_settings_group", None)
+        if tonic_settings_group is not None:
+            tonic_settings_group.setVisible(False)
         # The intermittent explanation describes a structure the scientist
         # stated. While the choice is still automatic the auto explanation
         # answers instead, so this one is not shown as though it were decided.
