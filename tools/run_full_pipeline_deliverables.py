@@ -3755,6 +3755,37 @@ def main():
         _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
 
+        # ============================================================
+        # 7.6 Session-level tonic summary (repeated-session runs only)
+        # ============================================================
+        # One tonic value per ROI per authoritative session, computed from the
+        # raw signal/reference channels already in the tonic cache. This is
+        # independent of the per-ROI phasic correction map, so the selected
+        # phasic correction strategy cannot change it. Additive only: the
+        # existing tonic_df_timeseries.csv / tonic_overview.png deliverables and
+        # their completion contracts are untouched here.
+        if run_tonic_mode and not tune_prep_light_mode and not continuous_mode and regions:
+            from photometry_pipeline.tonic_session_summary import (
+                TONIC_SESSION_SUMMARY_FILENAME,
+                write_tonic_session_summary,
+            )
+
+            tonic_summary_path = os.path.join(run_dir, TONIC_SESSION_SUMMARY_FILENAME)
+            tonic_summary_result = write_tonic_session_summary(
+                tonic_out, tonic_summary_path, rois=regions
+            )
+            manifest['tonic_session_summary'] = {
+                'relative_path': TONIC_SESSION_SUMMARY_FILENAME,
+                'row_count': tonic_summary_result['row_count'],
+                'tonic_method_by_roi': tonic_summary_result['tonic_method_by_roi'],
+            }
+            emitter.emit(
+                "tonic",
+                "done",
+                "Session-level tonic summary written",
+                payload=manifest['tonic_session_summary'],
+            )
+
         # Removed: Section 7.5 "Guided Post-Phasic Applied-dF/F
         # Orchestration" used to run here unconditionally for every
         # invocation of this wrapper (Guided current-native, Guided
