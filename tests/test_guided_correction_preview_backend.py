@@ -75,15 +75,176 @@ def test_worker_safe_report_generation_uses_only_plain_snapshot(tmp_path):
 
     assert returned is result
     assert Path(result["visual_preview_path"]).is_file()
+    assert result["visual_preview_paths"] == [result["visual_preview_path"]]
+    assert result["visual_preview_methods"] == ["global_linear_regression"]
     assert Path(result["user_report_path"]).is_file()
     assert result["visual_trace_labels"] == [
         "Raw signal",
         "Reference/control signal",
-        "Global Linear Regression",
+        "Fit-input signal",
+        "Fitted reference",
+        "Corrected dF/F",
+    ]
+    assert result["visual_panel_titles"] == [
+        "Inputs",
+        "Fitted reference: Global Linear Regression",
+        "Corrected dF/F: Global Linear Regression",
     ]
     assert "Global Linear Regression" in Path(
         result["user_report_path"]
     ).read_text(encoding="utf-8")
+
+
+def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "preview"
+    result = run_guided_local_correction_preview(
+        source,
+        output_dir,
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=GUIDED_REFERENCE_PREVIEW_METHODS,
+        include_signal_only_f0_preview=True,
+        preview_id="ordered_strategy_images",
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    captured_axes = []
+    original_subplots = plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = original_subplots(*args, **kwargs)
+        captured_axes.append(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plt, "subplots", capture_subplots)
+    labels = {
+        "robust_global_event_reject": "Robust Global Event-Reject Fit",
+        "adaptive_event_gated_regression": "Adaptive Event-Gated Fit",
+        "global_linear_regression": "Global Linear Regression",
+        "signal_only_f0": "Signal-Only F0",
+    }
+    generate_guided_correction_preview_reports(
+        result,
+        report_inputs={
+            "preview_output_dir": str(output_dir),
+            "method_labels": labels,
+            "selected_roi": "CH1",
+            "selected_chunk_index": 0,
+            "selected_segment_label": "session-0",
+            "max_plot_points": 800,
+            "figure_dpi": 80,
+        },
+    )
+
+    expected_methods = [*GUIDED_REFERENCE_PREVIEW_METHODS, "signal_only_f0"]
+    assert result["visual_preview_methods"] == expected_methods
+    assert len(result["visual_preview_paths"]) == 4
+    assert all(Path(path).is_file() for path in result["visual_preview_paths"])
+    assert [Path(path).stem.rsplit("_", 1)[-1] for path in result["visual_preview_paths"]] == [
+        "reject",
+        "regression",
+        "regression",
+        "f0",
+    ]
+    assert len(captured_axes) == 4
+
+    def sampled(values):
+        values = np.asarray(values)
+        stride = max(1, int(np.ceil(values.size / 800)))
+        return values[::stride]
+
+    for method, axes in zip(expected_methods, captured_axes):
+        axes = list(np.asarray(axes).reshape(-1))
+        assert len(axes) == 3
+        label = labels[method]
+        assert axes[0].get_title() == "Inputs"
+        assert axes[2].get_title() == f"Corrected dF/F: {label}"
+        assert [line.get_label() for line in axes[0].lines] == [
+            "Raw signal",
+            "Reference/control signal",
+        ]
+        evidence = (
+            result["signal_only_f0_preview_evidence"]
+            if method == "signal_only_f0"
+            else result["method_statuses"][method][
+                "local_preview_dff_evidence"
+            ]
+        )
+        if method == "signal_only_f0":
+            assert axes[1].get_title() == "F0 baseline: Signal-Only F0"
+            assert "Fitted reference" not in axes[1].get_title()
+            assert [line.get_label() for line in axes[1].lines] == [
+                "Raw signal",
+                "Signal-Only F0 baseline",
+            ]
+            np.testing.assert_allclose(
+                axes[0].lines[0].get_ydata(),
+                sampled(evidence["signal_raw"]),
+                equal_nan=True,
+            )
+            np.testing.assert_allclose(
+                axes[0].lines[1].get_ydata(),
+                sampled(evidence["reference_raw"]),
+                equal_nan=True,
+            )
+            np.testing.assert_allclose(
+                axes[1].lines[1].get_ydata(),
+                sampled(evidence["signal_only_f0_uncapped"]),
+                equal_nan=True,
+            )
+            np.testing.assert_allclose(
+                axes[2].lines[0].get_ydata(),
+                sampled(evidence["preview_dff"]),
+                equal_nan=True,
+            )
+            continue
+
+        trace = correction_preview_module._load_guided_preview_trace(
+            Path(result["method_statuses"][method]["trace_csv"])
+        )
+        assert axes[1].get_title() == f"Fitted reference: {label}"
+        assert [line.get_label() for line in axes[1].lines] == [
+            "Fit-input signal",
+            "Fitted reference",
+        ]
+        np.testing.assert_allclose(
+            axes[0].lines[0].get_ydata(), sampled(trace["sig_raw"]), equal_nan=True
+        )
+        np.testing.assert_allclose(
+            axes[0].lines[1].get_ydata(), sampled(trace["uv_raw"]), equal_nan=True
+        )
+        np.testing.assert_allclose(
+            axes[1].lines[0].get_ydata(),
+            sampled(evidence["fit_input_signal"]),
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            axes[1].lines[1].get_ydata(), sampled(trace["fit_ref"]), equal_nan=True
+        )
+        np.testing.assert_allclose(
+            axes[2].lines[0].get_ydata(),
+            sampled(evidence["preview_dff"]),
+            equal_nan=True,
+        )
 
 
 def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():

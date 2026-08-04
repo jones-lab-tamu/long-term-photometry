@@ -164,6 +164,7 @@ from photometry_pipeline.preview.correction_preview import (
     resolve_completed_run_preview_source,
     compute_guided_local_preview_dff_trace_in_memory,
     generate_guided_correction_preview_reports,
+    render_guided_correction_preview_visuals,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
@@ -3788,6 +3789,7 @@ class MainWindow(QMainWindow):
         self._guided_correction_preview_thread = None
         self._guided_correction_preview_worker = None
         self._guided_correction_preview_context = None
+        self._guided_preview_visual_index = 0
         self._guided_completed_review_loading = False
         self._guided_completed_review_load_thread = None
         self._guided_completed_review_load_worker = None
@@ -8230,6 +8232,32 @@ class MainWindow(QMainWindow):
         )
         self._guided_preview_visual_status_label.setWordWrap(True)
         preview_layout.addWidget(self._guided_preview_visual_status_label)
+        preview_navigation = QHBoxLayout()
+        self._guided_preview_previous_btn = QPushButton("<")
+        self._guided_preview_previous_btn.setObjectName(
+            "guidedCorrectionPreviewPreviousButton"
+        )
+        self._guided_preview_previous_btn.clicked.connect(
+            self._on_guided_preview_previous
+        )
+        self._guided_preview_visual_item_label = QLabel("")
+        self._guided_preview_visual_item_label.setObjectName(
+            "guidedCorrectionPreviewCurrentItem"
+        )
+        self._guided_preview_visual_item_label.setAlignment(Qt.AlignCenter)
+        self._guided_preview_next_btn = QPushButton(">")
+        self._guided_preview_next_btn.setObjectName(
+            "guidedCorrectionPreviewNextButton"
+        )
+        self._guided_preview_next_btn.clicked.connect(
+            self._on_guided_preview_next
+        )
+        preview_navigation.addWidget(self._guided_preview_previous_btn)
+        preview_navigation.addWidget(
+            self._guided_preview_visual_item_label, 1
+        )
+        preview_navigation.addWidget(self._guided_preview_next_btn)
+        preview_layout.addLayout(preview_navigation)
         self._guided_preview_visual_label = QLabel()
         self._guided_preview_visual_label.setObjectName(
             "guidedCorrectionPreviewVisual"
@@ -8270,6 +8298,9 @@ class MainWindow(QMainWindow):
         )
         self._guided_preview_review_label.setVisible(False)
         self._guided_preview_visual_status_label.setVisible(False)
+        self._guided_preview_previous_btn.setVisible(False)
+        self._guided_preview_visual_item_label.setVisible(False)
+        self._guided_preview_next_btn.setVisible(False)
         self._guided_preview_visual_label.setVisible(False)
         self._guided_preview_open_btn.setVisible(False)
 
@@ -9809,263 +9840,25 @@ class MainWindow(QMainWindow):
         self._refresh_guided_preview_enablement()
 
     def _format_guided_preview_result(self, result: dict[str, object]) -> str:
-        lines = ["Preview-only correction comparison."]
-        summary_path = str(result.get("preview_summary_path", "") or "")
-        if summary_path and os.path.isfile(summary_path):
-            try:
-                with open(summary_path, "r", encoding="utf-8") as f:
-                    summary = json.load(f)
-                plot_info = summary.get("comparison_plot")
-                if isinstance(plot_info, dict) and plot_info.get("implemented") is False:
-                    lines.append(f"Comparison plot: deferred ({plot_info.get('reason', '')})")
-            except Exception:
-                pass
-        return "\n".join(lines)
+        return "Preview-only correction strategy images."
 
     def _guided_preview_method_label(self, method: str) -> str:
+        if str(method) == "signal_only_f0":
+            return "Signal-Only F0"
         return GUIDED_CORRECTION_PREVIEW_METHOD_LABELS.get(str(method), str(method))
 
     def _render_guided_correction_preview_visual(
         self, result: dict[str, object]
     ) -> str:
-        output_text = str(result.get("preview_output_dir") or "").strip()
-        method_statuses = result.get("method_statuses", {})
-        if not output_text or not isinstance(method_statuses, dict):
-            return ""
-        traces: dict[str, dict[str, list[float]]] = {}
-        trace_sources: dict[str, str] = {}
-        columns = ("time_sec", "sig_raw", "uv_raw", "fit_ref", "delta_f")
-        for method, raw_status in method_statuses.items():
-            status = raw_status if isinstance(raw_status, dict) else {}
-            trace_path = Path(str(status.get("trace_csv") or ""))
-            if not trace_path.is_file():
-                continue
-            series = {column: [] for column in columns}
-            try:
-                with trace_path.open(
-                    "r", encoding="utf-8", newline=""
-                ) as handle:
-                    for row in csv.DictReader(handle):
-                        for column in columns:
-                            try:
-                                series[column].append(float(row[column]))
-                            except (KeyError, TypeError, ValueError):
-                                series[column].append(float("nan"))
-            except Exception:
-                continue
-            if series["time_sec"]:
-                traces[str(method)] = series
-                trace_sources[str(method)] = str(trace_path)
-        result["visual_trace_sources"] = trace_sources
-        result["visual_trace_sample_counts"] = {
-            method: len(series["time_sec"])
-            for method, series in traces.items()
-        }
-        signal_f0 = result.get("signal_only_f0_preview_evidence")
-        signal_f0_valid = bool(
-            isinstance(signal_f0, dict)
-            and signal_f0.get("valid") is True
-            and len(signal_f0.get("time_sec", ()))
-            == len(signal_f0.get("preview_dff", ()))
-            and len(signal_f0.get("time_sec", ())) > 0
+        paths = render_guided_correction_preview_visuals(
+            result,
+            method_labels=dict(GUIDED_CORRECTION_PREVIEW_METHOD_LABELS),
+            max_plot_points=800,
+            figure_dpi=80,
         )
-        if signal_f0_valid:
-            result["visual_trace_sample_counts"]["signal_only_f0"] = len(
-                signal_f0["time_sec"]
-            )
-        # Keep full-resolution CSV evidence, but bound the display-only plot.
-        # Matplotlib can otherwise spend tens of seconds rasterizing several
-        # 12,000-point traces on the real NPM preview path.
-        max_plot_points = 800
-        plot_traces: dict[str, dict[str, list[float]]] = {}
-        for method, series in traces.items():
-            stride = max(1, math.ceil(len(series["time_sec"]) / max_plot_points))
-            plot_traces[method] = {
-                key: values[::stride] for key, values in series.items()
-            }
-        signal_f0_plot = signal_f0
-        if signal_f0_valid:
-            stride = max(
-                1,
-                math.ceil(len(signal_f0["time_sec"]) / max_plot_points),
-            )
-            signal_f0_plot = {
-                key: value[::stride]
-                if isinstance(value, (list, tuple, np.ndarray))
-                else value
-                for key, value in signal_f0.items()
-            }
-        dynamic_labels = [
-            self._guided_preview_method_label(method) for method in traces
-        ]
-        if traces:
-            panel_titles = [
-                "Source segment",
-                "Dynamic-fit corrected signal comparison",
-                "Dynamic-fit fitted reference comparison",
-            ]
-            trace_labels = [
-                "Raw signal",
-                "Reference/control signal",
-                *dynamic_labels,
-            ]
-        else:
-            panel_titles = []
-            trace_labels = []
-        if signal_f0_valid:
-            panel_titles.extend(
-                [
-                    "Signal-Only F0 baseline",
-                    "Signal-Only F0-corrected dF/F preview",
-                ]
-            )
-            trace_labels.extend(
-                ["Signal-only F0 baseline", "Signal-only dF/F"]
-            )
-            if not traces:
-                trace_labels.insert(0, "Raw signal")
-        result["visual_panel_titles"] = panel_titles
-        result["visual_trace_labels"] = trace_labels
-        if not traces and not signal_f0_valid:
-            return ""
-        try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            from matplotlib import pyplot as plt
-
-            with matplotlib.rc_context({"figure.dpi": 80}):
-                if not traces:
-                    figure, axes = plt.subplots(
-                        2, 1, figsize=(7.5, 5.5), sharex=True
-                    )
-                    axes[0].plot(
-                        signal_f0_plot["time_sec"],
-                        signal_f0_plot["signal_raw"],
-                        label="Raw signal",
-                        linewidth=1.2,
-                    )
-                    axes[0].plot(
-                        signal_f0_plot["time_sec"],
-                        signal_f0_plot["signal_only_f0_uncapped"],
-                        label="Signal-only F0 baseline",
-                        linewidth=1.1,
-                    )
-                    axes[0].set_title("Signal-Only F0 baseline")
-                    axes[0].set_ylabel("Signal")
-                    axes[0].legend(loc="best", fontsize="small")
-                    axes[1].plot(
-                        signal_f0_plot["time_sec"],
-                        signal_f0_plot["preview_dff"],
-                        label="Signal-only dF/F",
-                        linewidth=1.1,
-                    )
-                    axes[1].set_title(
-                        "Signal-Only F0-corrected dF/F preview"
-                    )
-                    axes[1].set_ylabel("dF/F")
-                    axes[1].set_xlabel("Time (seconds)")
-                    axes[1].legend(loc="best", fontsize="small")
-                else:
-                    panel_count = 5 if signal_f0_valid else 3
-                    figure, axes = plt.subplots(
-                        panel_count,
-                        1,
-                        figsize=(7.5, 10.0 if signal_f0_valid else 6.5),
-                        sharex=True,
-                    )
-                    first = next(iter(plot_traces.values()))
-                    axes[0].plot(
-                        first["time_sec"],
-                        first["sig_raw"],
-                        label="Raw signal",
-                        linewidth=1.2,
-                    )
-                    axes[0].plot(
-                        first["time_sec"],
-                        first["uv_raw"],
-                        label="Reference/control signal",
-                        linewidth=1.0,
-                        alpha=0.8,
-                    )
-                    axes[0].set_title("Source segment")
-                    axes[0].set_ylabel("Signal")
-                    axes[0].legend(loc="best")
-                    for method, series in plot_traces.items():
-                        label = self._guided_preview_method_label(method)
-                        axes[1].plot(
-                            series["time_sec"],
-                            series["delta_f"],
-                            label=label,
-                            linewidth=1.1,
-                        )
-                        axes[2].plot(
-                            series["time_sec"],
-                            series["fit_ref"],
-                            label=label,
-                            linewidth=1.1,
-                        )
-                    axes[1].set_title(
-                        "Dynamic-fit corrected signal comparison"
-                    )
-                    axes[1].set_ylabel("Corrected signal")
-                    axes[1].legend(loc="best", fontsize="small")
-                    axes[2].set_title(
-                        "Dynamic-fit fitted reference comparison"
-                    )
-                    axes[2].set_ylabel("Fitted reference")
-                    axes[2].legend(loc="best", fontsize="small")
-                    if signal_f0_valid:
-                        axes[3].plot(
-                            signal_f0_plot["time_sec"],
-                            signal_f0_plot["signal_raw"],
-                            label="Raw signal",
-                            linewidth=1.2,
-                        )
-                        axes[3].plot(
-                            signal_f0_plot["time_sec"],
-                            signal_f0_plot["signal_only_f0_uncapped"],
-                            label="Signal-only F0 baseline",
-                            linewidth=1.1,
-                        )
-                        axes[3].set_title("Signal-Only F0 baseline")
-                        axes[3].set_ylabel("Signal")
-                        axes[3].legend(loc="best", fontsize="small")
-                        axes[4].plot(
-                            signal_f0_plot["time_sec"],
-                            signal_f0_plot["preview_dff"],
-                            label="Signal-only dF/F",
-                            linewidth=1.1,
-                        )
-                        axes[4].set_title(
-                            "Signal-Only F0-corrected dF/F preview"
-                        )
-                        axes[4].set_ylabel("dF/F")
-                        axes[4].legend(loc="best", fontsize="small")
-                    axes[-1].set_xlabel("Time (seconds)")
-                figure.suptitle(
-                    "Correction preview — "
-                    f"ROI {result.get('roi', '')}, "
-                    f"segment {result.get('chunk_index', '')}"
-                )
-                # Fixed margins avoid tight_layout's additional renderer pass.
-                figure.subplots_adjust(
-                    left=0.11,
-                    right=0.97,
-                    bottom=0.07,
-                    top=0.94,
-                    hspace=0.46,
-                )
-                visual_path = (
-                    Path(output_text) / "correction_preview_visual.png"
-                )
-                # tight_layout above already fits labels; bbox_inches="tight"
-                # triggers a second expensive full render on the real NPM plot.
-                figure.savefig(visual_path)
-                plt.close(figure)
-        except Exception:
-            return ""
-        return str(visual_path)
+        result["visual_preview_paths"] = paths
+        result["visual_preview_path"] = paths[0] if paths else ""
+        return paths[0] if paths else ""
 
     def _write_guided_correction_preview_report(
         self, result: dict[str, object]
@@ -10194,7 +9987,7 @@ class MainWindow(QMainWindow):
             f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
             f"<p><strong>Preview segment:</strong> "
             f"{html.escape(str(result.get('preview_segment_label') or result.get('chunk_index', '')))}</p>"
-            f"<p><strong>Methods compared:</strong> "
+            f"<p><strong>Selected correction strategies:</strong> "
             f"{html.escape(method_names)}</p>"
             "<p>This report is for correction-method review only. Opening it "
             "does not confirm a strategy or start the final analysis.</p>"
@@ -10334,6 +10127,37 @@ class MainWindow(QMainWindow):
         self._guided_preview_visual_display_width = scaled.width()
         self._guided_preview_visual_viewport_width = viewport_width
 
+    def _set_guided_preview_visual_index(self, index: int) -> None:
+        if getattr(self, "_guided_preview_result_stale", False):
+            return
+        preview = getattr(self, "_guided_preview_last_result", {}) or {}
+        raw_paths = preview.get("visual_preview_paths")
+        paths = (
+            [str(path) for path in raw_paths if str(path)]
+            if isinstance(raw_paths, (list, tuple))
+            else []
+        )
+        if not paths:
+            fallback_path = str(preview.get("visual_preview_path") or "")
+            if fallback_path:
+                paths = [fallback_path]
+        if not paths:
+            return
+        self._guided_preview_visual_index = max(
+            0, min(int(index), len(paths) - 1)
+        )
+        self._refresh_guided_preview_review_affordances()
+
+    def _on_guided_preview_previous(self) -> None:
+        self._set_guided_preview_visual_index(
+            getattr(self, "_guided_preview_visual_index", 0) - 1
+        )
+
+    def _on_guided_preview_next(self) -> None:
+        self._set_guided_preview_visual_index(
+            getattr(self, "_guided_preview_visual_index", 0) + 1
+        )
+
     def _on_open_guided_correction_preview(self) -> None:
         result = getattr(self, "_guided_preview_last_result", {}) or {}
         path = str(
@@ -10367,32 +10191,14 @@ class MainWindow(QMainWindow):
         show_summary = preview_ready and not preview_stale
         if hasattr(self, "_guided_preview_review_label"):
             if show_summary:
-                methods = preview.get("method_statuses", {})
-                method_ids = (
-                    list(methods)
-                    if isinstance(methods, dict) and methods
-                    else self._selected_guided_preview_methods()
-                )
-                method_labels = [
-                    self._guided_preview_method_label(str(method))
-                    for method in method_ids
-                ]
-                signal_f0_evidence = preview.get(
-                    "signal_only_f0_preview_evidence"
-                )
-                if (
-                    isinstance(signal_f0_evidence, dict)
-                    and signal_f0_evidence.get("valid") is True
-                ):
-                    method_labels.append("Signal-Only F0")
-                method_text = ", ".join(method_labels)
                 segment_label = str(
                     preview.get("preview_segment_label")
                     or preview.get("chunk_index", "")
                 )
                 self._guided_preview_review_label.setText(
-                    f"Preview for {preview.get('roi', '')}, segment "
-                    f"{segment_label}. Methods compared: {method_text}."
+                    f"Preview generated for {preview.get('roi', '')}, segment "
+                    f"{segment_label}. Use the arrows below to review the "
+                    "selected correction strategies."
                     + (
                         ""
                         if preview.get("user_report_path")
@@ -10410,9 +10216,24 @@ class MainWindow(QMainWindow):
             self._guided_preview_open_btn.setEnabled(
                 preview_ready and not preview_stale
             )
-            visual_path = str(
-                preview.get("visual_preview_path") or ""
+            raw_paths = preview.get("visual_preview_paths")
+            visual_paths = (
+                [str(path) for path in raw_paths if str(path)]
+                if isinstance(raw_paths, (list, tuple))
+                else []
             )
+            if not visual_paths:
+                fallback_path = str(preview.get("visual_preview_path") or "")
+                if fallback_path:
+                    visual_paths = [fallback_path]
+            visual_index = int(
+                getattr(self, "_guided_preview_visual_index", 0)
+            )
+            if visual_paths:
+                visual_index = max(0, min(visual_index, len(visual_paths) - 1))
+            self._guided_preview_visual_index = visual_index
+            visual_path = visual_paths[visual_index] if visual_paths else ""
+            preview["visual_preview_path"] = visual_path
             visual_ready = bool(
                 show_summary
                 and visual_path
@@ -10424,14 +10245,48 @@ class MainWindow(QMainWindow):
                     self._guided_preview_visual_source_pixmap = pixmap
                     self._fit_guided_preview_visual_to_page()
                     self._guided_preview_visual_status_label.setText(
-                        "Use the plot below to choose the correction "
-                        f"method for {preview.get('roi', '')}."
+                        "Use the arrows below to review the selected "
+                        f"correction strategies for {preview.get('roi', '')}."
+                    )
+                    preview_methods = preview.get("visual_preview_methods")
+                    if not isinstance(preview_methods, (list, tuple)):
+                        preview_methods = []
+                    current_method = (
+                        str(preview_methods[visual_index])
+                        if visual_index < len(preview_methods)
+                        else ""
+                    )
+                    current_label = self._guided_preview_method_label(
+                        current_method
+                    ) if current_method else "Correction preview"
+                    self._guided_preview_visual_item_label.setText(
+                        f"{visual_index + 1} of {len(visual_paths)} — "
+                        f"{current_label}"
+                    )
+                    self._guided_preview_visual_item_label.setVisible(True)
+                    self._guided_preview_previous_btn.setVisible(
+                        len(visual_paths) > 1
+                    )
+                    self._guided_preview_next_btn.setVisible(
+                        len(visual_paths) > 1
+                    )
+                    self._guided_preview_previous_btn.setEnabled(
+                        visual_index > 0
+                    )
+                    self._guided_preview_next_btn.setEnabled(
+                        visual_index < len(visual_paths) - 1
                     )
                 else:
                     visual_ready = False
             if not visual_ready:
                 self._guided_preview_visual_source_pixmap = QPixmap()
                 self._guided_preview_visual_label.setPixmap(QPixmap())
+                self._guided_preview_visual_item_label.setText("")
+                self._guided_preview_visual_item_label.setVisible(False)
+                self._guided_preview_previous_btn.setVisible(False)
+                self._guided_preview_next_btn.setVisible(False)
+                self._guided_preview_previous_btn.setEnabled(False)
+                self._guided_preview_next_btn.setEnabled(False)
                 # Only show a plot-load error when the preview is genuinely
                 # ready and current but the image itself failed to load --
                 # not when the preview is simply stale/not generated yet,
@@ -10618,6 +10473,7 @@ class MainWindow(QMainWindow):
         self._refresh_guided_generated_outputs_summary()
 
     def _clear_guided_preview_result_widgets(self) -> None:
+        self._guided_preview_visual_index = 0
         if hasattr(self, "_guided_preview_artifacts_label"):
             self._guided_preview_artifacts_label.setText("No preview artifacts generated.")
         if hasattr(self, "_guided_preview_method_table"):
@@ -10626,6 +10482,17 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("")
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText("")
+        if hasattr(self, "_guided_preview_visual_item_label"):
+            self._guided_preview_visual_item_label.setText("")
+            self._guided_preview_visual_item_label.setVisible(False)
+        for button_name in (
+            "_guided_preview_previous_btn",
+            "_guided_preview_next_btn",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setVisible(False)
+                button.setEnabled(False)
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
             self._guided_local_signal_f0_preview_label.setText("")
             self._guided_local_signal_f0_preview_label.setVisible(False)
@@ -10983,16 +10850,6 @@ class MainWindow(QMainWindow):
             lines.append(f"Warnings: {'; '.join(str(x) for x in warnings)}")
         if errors:
             lines.append(f"Errors: {'; '.join(str(x) for x in errors)}")
-        summary_path = str(result.get("preview_summary_path", "") or "")
-        if summary_path and os.path.isfile(summary_path):
-            try:
-                with open(summary_path, "r", encoding="utf-8") as f:
-                    summary = json.load(f)
-                plot_info = summary.get("comparison_plot")
-                if isinstance(plot_info, dict) and plot_info.get("implemented") is False:
-                    lines.append(f"Comparison plot: deferred ({plot_info.get('reason', '')})")
-            except Exception:
-                pass
         lines.append("Strategy recommendation: none")
         return "\n".join(lines)
 
@@ -11267,6 +11124,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._guided_preview_has_result = True
         self._guided_preview_result_stale = False
+        self._guided_preview_visual_index = 0
         if source_type == "completed_run":
             result["completed_run_dir"] = os.path.realpath(source_id)
         elif source_type == "diagnostic_cache":

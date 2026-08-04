@@ -4280,7 +4280,7 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
     assert "needs_review" not in table_text
     assert "Errors/warnings: none reported" in window._guided_preview_messages_label.text()
     text = window._guided_preview_result_label.text()
-    assert "Preview-only correction comparison." in text
+    assert "Preview-only correction strategy images." in text
     assert "Strategy recommendation" not in text
     preview_dir = run_dir / "_guided_workflow" / "previews"
     assert preview_dir.exists()
@@ -6818,23 +6818,53 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert runner.argv is None
     assert window._guided_diagnostic_cache_record is None
     assert Path(result["visual_preview_path"]).is_file()
+    assert result["visual_preview_methods"] == [
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+        "global_linear_regression",
+        "signal_only_f0",
+    ]
+    assert len(result["visual_preview_paths"]) == 4
     assert result["visual_panel_titles"] == [
-        "Source segment",
-        "Dynamic-fit corrected signal comparison",
-        "Dynamic-fit fitted reference comparison",
-        "Signal-Only F0 baseline",
-        "Signal-Only F0-corrected dF/F preview",
+        "Inputs",
+        "Fitted reference: Robust Global Event-Reject Fit",
+        "Corrected dF/F: Robust Global Event-Reject Fit",
     ]
     assert result["visual_trace_labels"] == [
         "Raw signal",
         "Reference/control signal",
-        "Robust Global Event-Reject Fit",
-        "Adaptive Event-Gated Fit",
-        "Global Linear Regression",
-        "Signal-only F0 baseline",
-        "Signal-only dF/F",
+        "Fit-input signal",
+        "Fitted reference",
+        "Corrected dF/F",
     ]
     assert window._guided_preview_visual_label.pixmap().isNull() is False
+    assert window._guided_preview_visual_item_label.text() == (
+        "1 of 4 — Robust Global Event-Reject Fit"
+    )
+    assert window._guided_preview_previous_btn.isHidden() is False
+    assert window._guided_preview_previous_btn.isEnabled() is False
+    assert window._guided_preview_next_btn.isEnabled() is True
+    window._refresh_guided_preview_enablement()
+    assert window._guided_preview_previous_btn.isEnabled() is False
+    assert window._guided_preview_next_btn.isEnabled() is True
+    first_preview_path = result["visual_preview_path"]
+    for _ in range(len(result["visual_preview_paths"]) - 1):
+        window._guided_preview_next_btn.click()
+    assert result["visual_preview_path"] == result["visual_preview_paths"][-1]
+    assert window._guided_preview_visual_item_label.text() == (
+        "4 of 4 — Signal-Only F0"
+    )
+    assert window._guided_preview_previous_btn.isEnabled() is True
+    assert window._guided_preview_next_btn.isEnabled() is False
+    window._refresh_guided_preview_enablement()
+    assert window._guided_preview_previous_btn.isEnabled() is True
+    assert window._guided_preview_next_btn.isEnabled() is False
+    for _ in range(len(result["visual_preview_paths"]) - 1):
+        window._guided_preview_previous_btn.click()
+    assert result["visual_preview_path"] == first_preview_path
+    assert window._guided_preview_visual_item_label.text() == (
+        "1 of 4 — Robust Global Event-Reject Fit"
+    )
     provenance = json.loads(
         Path(result["preview_provenance_path"]).read_text(encoding="utf-8")
     )
@@ -6860,8 +6890,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_local_signal_f0_preview_label.text() == ""
     assert window._guided_local_signal_f0_preview_label.isHidden() is True
     review_text = window._guided_preview_review_label.text()
-    assert "segment 2025_01_01-02_00_00" in review_text
-    assert "Signal-Only F0" in review_text
+    assert "Preview generated for CH1, segment 2025_01_01-02_00_00." in review_text
+    assert "Use the arrows below" in review_text
+    assert "Methods compared:" not in review_text
     preview_dir = Path(result["preview_output_dir"])
     assert not (preview_dir / "status.json").exists()
     assert not (preview_dir / "run_report.json").exists()
@@ -6950,6 +6981,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window._guided_preview_generate_btn.click()
     ch2_result = window._guided_preview_last_result
     assert ch2_result["roi"] == "CH2"
+    assert ch2_result["visual_preview_path"] == ch2_result["visual_preview_paths"][0]
+    assert window._guided_preview_visual_item_label.text() == (
+        "1 of 4 — Robust Global Event-Reject Fit"
+    )
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["evidence_label"].text() == (
         "Local preview, segment 2025_01_01-02_00_00"
@@ -7273,15 +7308,27 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "valid"
     ] is True
     assert Path(signal_only_result["visual_preview_path"]).is_file()
+    assert signal_only_result["visual_preview_methods"] == ["signal_only_f0"]
+    assert signal_only_result["visual_preview_paths"] == [
+        signal_only_result["visual_preview_path"]
+    ]
     assert signal_only_result["visual_panel_titles"] == [
-        "Signal-Only F0 baseline",
-        "Signal-Only F0-corrected dF/F preview",
+        "Inputs",
+        "F0 baseline: Signal-Only F0",
+        "Corrected dF/F: Signal-Only F0",
     ]
     assert signal_only_result["visual_trace_labels"] == [
         "Raw signal",
-        "Signal-only F0 baseline",
-        "Signal-only dF/F",
+        "Reference/control signal",
+        "Raw signal",
+        "Signal-Only F0 baseline",
+        "Corrected dF/F",
     ]
+    assert window._guided_preview_visual_item_label.text() == (
+        "1 of 1 — Signal-Only F0"
+    )
+    assert window._guided_preview_previous_btn.isHidden() is True
+    assert window._guided_preview_next_btn.isHidden() is True
     rows = window._guided_local_preview_confirmation_rows
     ch2_combo = rows["CH2"]["strategy_combo"]
     assert ch2_combo.findData("signal_only_f0") >= 0
@@ -7470,9 +7517,9 @@ def test_correction_preview_ready_has_openable_review_summary(
     assert opened == []
 
     text = window._guided_preview_review_label.text()
-    assert "Preview for CH1, segment 0." in text
-    assert "Methods compared:" in text
-    assert "Robust Global Event-Reject Fit" in text
+    assert "Preview generated for CH1, segment 0." in text
+    assert "Methods compared:" not in text
+    assert "Use the arrows below" in text
     assert window._guided_preview_open_btn.text() == "Open exported report"
     assert window._guided_preview_technical_details_group.isHidden() is True
     assert window._guided_preview_technical_toggle_btn.text() == (
@@ -7484,28 +7531,29 @@ def test_correction_preview_ready_has_openable_review_summary(
     assert "Correction preview" in report_text
     assert "ROI:</strong> CH1" in report_text
     assert "Preview segment:</strong> 0" in report_text
-    assert "Methods compared:" in report_text
+    assert "Selected correction strategies:" in report_text
     assert "First 12 trace samples" in report_text
     assert '"comparison_plot"' not in report_text
     visual_path = Path(result["visual_preview_path"])
-    assert visual_path.name == "correction_preview_visual.png"
+    assert visual_path.name == "correction_preview_visual_robust_global_event_reject.png"
     assert visual_path.is_file()
+    assert len(result["visual_preview_paths"]) == 3
     assert set(result["visual_trace_sources"]) == {
         "robust_global_event_reject",
         "adaptive_event_gated_regression",
         "global_linear_regression",
     }
     assert result["visual_panel_titles"] == [
-        "Source segment",
-        "Dynamic-fit corrected signal comparison",
-        "Dynamic-fit fitted reference comparison",
+        "Inputs",
+        "Fitted reference: Robust Global Event-Reject Fit",
+        "Corrected dF/F: Robust Global Event-Reject Fit",
     ]
     assert result["visual_trace_labels"] == [
         "Raw signal",
         "Reference/control signal",
-        "Robust Global Event-Reject Fit",
-        "Adaptive Event-Gated Fit",
-        "Global Linear Regression",
+        "Fit-input signal",
+        "Fitted reference",
+        "Corrected dF/F",
     ]
     assert all(
         count > 0
@@ -7517,7 +7565,7 @@ def test_correction_preview_ready_has_openable_review_summary(
         320, window._guided_preview_visual_viewport_width - 72
     )
     visual_text = window._guided_preview_visual_status_label.text()
-    assert "Use the plot below to choose the correction method for CH1." == (
+    assert "Use the arrows below to review the selected correction strategies for CH1." == (
         visual_text
     )
 
