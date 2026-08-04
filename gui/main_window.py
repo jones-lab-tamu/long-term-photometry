@@ -14695,13 +14695,6 @@ class MainWindow(QMainWindow):
             )
         included = ", ".join(plan.included_roi_ids) or "none"
         excluded = ", ".join(plan.excluded_roi_ids) or "none"
-        tonic_settings = plan.tonic_settings_contract
-        tonic_summary = (
-            "\nTonic session shape: "
-            f"{self._guided_tonic_output_mode_label(tonic_settings.tonic_output_mode)}\n"
-            "Tonic timeline: "
-            f"{self._guided_tonic_timeline_mode_label(tonic_settings.tonic_timeline_mode)}"
-        )
         timeline_summary = "\n" + "\n".join(
             self._guided_timeline_review_lines(plan)
         )
@@ -14730,7 +14723,6 @@ class MainWindow(QMainWindow):
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
             f"{timeline_summary}"
-            f"{tonic_summary}"
         )
 
         self._guided_review_feature_detection_summary_label.setText(

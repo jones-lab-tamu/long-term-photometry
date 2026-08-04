@@ -90,15 +90,7 @@ def _render_review_checkpoint(window, plan):
     window._refresh_guided_review_plan_checkpoint(plan, readiness, subset)
 
 
-def test_review_plan_displays_default_tonic_settings(window):
-    plan = _complete_new_analysis_plan_for_gui()
-    _render_review_checkpoint(window, plan)
-    text = window._guided_review_analysis_summary_label.text()
-    assert "Tonic session shape: Preserve session shape" in text
-    assert "Tonic timeline: Real elapsed time" in text
-
-
-def test_review_plan_displays_non_default_tonic_settings(window):
+def test_review_plan_analysis_summary_omits_obsolete_tonic_settings(window):
     plan = _complete_new_analysis_plan_for_gui(
         tonic_settings_contract=GuidedNewAnalysisTonicSettingsContract(
             tonic_output_mode="flatten_session_bleach_preserve_session_baseline",
@@ -107,5 +99,21 @@ def test_review_plan_displays_non_default_tonic_settings(window):
     )
     _render_review_checkpoint(window, plan)
     text = window._guided_review_analysis_summary_label.text()
-    assert "Tonic session shape: Remove within-session bleaching trend" in text
-    assert "Tonic timeline: Gap-free elapsed time" in text
+    assert "Tonic session shape:" not in text
+    assert "Tonic timeline:" not in text
+    assert "Dataset/input folder: C:/raw/input" in text
+    assert "Input format: RWD" in text
+    assert "Recording structure: Repeated sessions" in text
+    assert "Sessions discovered: not available" in text
+    assert "Included ROIs: CH1" in text
+    assert "Excluded ROIs: none" in text
+    assert "Time display: Fixed daily anchor" in text
+    assert "Start of plotted day: 07:00" in text
+    assert "Clock time at recording start: required" in text
+    assert "Session spacing remains based on validated session timestamps." in text
+    assert plan.tonic_settings_contract.tonic_output_mode == (
+        "flatten_session_bleach_preserve_session_baseline"
+    )
+    assert plan.tonic_settings_contract.tonic_timeline_mode == (
+        "gap_free_elapsed_time"
+    )
