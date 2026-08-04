@@ -9,13 +9,13 @@ are the current choice surface. Robust Global Event-Reject Fit is the
 recommended starting point, Adaptive Event-Gated Fit is a candidate, and Global
 Linear Regression is a baseline comparison that is not recommended for most
 long-duration recordings. Signal-Only F0 is available for diagnostic comparison,
-and the current production execution path also accepts it as an
-explicit per-ROI strategy for repeated/session Neurophotometrics and continuous
-RWD runs, including supported mixed per-ROI plans. Those routes carry the
-confirmed strategy through production authorization and into Pipeline. The
-proposal and policy sections below describe diagnostic or future evidence; they
-do not add hidden correction routes or silently choose the correction used by a
-run.
+and the current production execution path also accepts it as an explicit
+per-ROI strategy for repeated RWD, NPM, and CSV recordings, plus continuous RWD
+and CSV recordings, including supported mixed per-ROI plans. Continuous NPM is
+not currently supported. Those routes carry the confirmed strategy through
+production authorization and into Pipeline. The proposal and policy sections
+below describe diagnostic or future evidence; they do not add hidden correction
+routes or silently choose the correction used by a run.
 
 ## Dynamic fit modes
 
