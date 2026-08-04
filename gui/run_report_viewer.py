@@ -76,6 +76,12 @@ from photometry_pipeline.completed_continuous_rwd_review import (
     load_continuous_window_summary,
 )
 from photometry_pipeline.continuous_outputs import CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
+from photometry_pipeline.tonic_session_plot import (
+    TONIC_FALLBACK_NOTE,
+    TONIC_SESSION_PLOT_FILENAME,
+    METHOD_SIGNAL_ONLY,
+    tonic_method_by_roi,
+)
 
 
 NATIVE_CSV_PREVIEW_ROW_LIMIT = 5000
@@ -163,6 +169,7 @@ class RunReportViewer(QWidget):
         self._phasic_review_error = ""
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
+        self._tonic_method_by_roi: Dict[str, Dict[str, str]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
         self._external_tab_image_overrides: Dict[Tuple[str, str], List[str]] = {}
         self._active_image_path = ""
@@ -200,6 +207,15 @@ class RunReportViewer(QWidget):
         self._selected_feature_settings_label.setWordWrap(True)
         self._selected_feature_settings_label.setVisible(False)
         root.addWidget(self._selected_feature_settings_label)
+
+        # Shown only for an ROI whose tonic result had to use the signal-only
+        # fallback, so the scientist is never left reading raw-fluorescence
+        # tonic values as if they were dF/F0. One line, once per ROI.
+        self._tonic_method_note_label = QLabel("")
+        self._tonic_method_note_label.setObjectName("completedRunTonicMethodNote")
+        self._tonic_method_note_label.setWordWrap(True)
+        self._tonic_method_note_label.setVisible(False)
+        root.addWidget(self._tonic_method_note_label)
 
         self._tonic_settings_summary_label = QLabel("")
         self._tonic_settings_summary_label.setObjectName(
@@ -637,8 +653,11 @@ class RunReportViewer(QWidget):
         self._selected_feature_settings_label.setVisible(False)
         self._tonic_settings_summary_label.setText("")
         self._tonic_settings_summary_label.setVisible(False)
+        self._tonic_method_note_label.setText("")
+        self._tonic_method_note_label.setVisible(False)
         self._region_paths = {}
         self._region_tab_images = {}
+        self._tonic_method_by_roi = {}
         self._tab_indices = {}
         self._external_tab_image_overrides = {}
         self._active_image_path = ""
@@ -738,6 +757,14 @@ class RunReportViewer(QWidget):
                 continue
             self._region_paths[name] = reg_path
             self._region_tab_images[name] = self._discover_region_tab_images(reg_path)
+
+        # Which tonic method each ROI actually used. Empty for a run that
+        # predates the session-level tonic summary; that run then simply has no
+        # tonic plot to discover and needs no migration handling.
+        try:
+            self._tonic_method_by_roi = tonic_method_by_roi(out_dir)
+        except Exception:
+            self._tonic_method_by_roi = {}
 
         if not self._region_paths:
             if parse_err:
@@ -842,6 +869,7 @@ class RunReportViewer(QWidget):
             self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
             self._refresh_applied_dff_display()
         self._refresh_correction_summary()
+        self._refresh_tonic_method_note()
         title = "Results workspace"
         if self._completed_review_overview:
             # Use the scientist-facing format name (CSV files, RWD, NPM), not
@@ -1511,15 +1539,20 @@ class RunReportViewer(QWidget):
     def _discover_tonic_images(self, summary_dir: str) -> List[str]:
         """
         Tonic tab contract.
-        Anchor on tonic_overview.png with narrowly bounded expansion.
+
+        Anchored on the session-level tonic plot (one point per session, in the
+        ROI's own tonic method and units). tonic_overview.png is deliberately
+        NOT discovered: it renders the full phasic-correction residual trace,
+        which is not a tonic result. That file is still produced because the
+        completion contract requires it, but no scientist-facing tab shows it.
         """
         if not os.path.isdir(summary_dir):
             return []
         candidates = [
-            os.path.join(summary_dir, "tonic_overview.png"),
+            os.path.join(summary_dir, TONIC_SESSION_PLOT_FILENAME),
         ]
         for name in os.listdir(summary_dir):
-            if name.startswith("tonic_overview_") and name.endswith(".png"):
+            if name.startswith("tonic_session_summary_") and name.endswith(".png"):
                 candidates.append(os.path.join(summary_dir, name))
         return self._dedupe_sorted_existing(candidates)
 
@@ -1581,8 +1614,27 @@ class RunReportViewer(QWidget):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
         self._refresh_correction_summary()
+        self._refresh_tonic_method_note()
         self._refresh_inline_actions()
         self.region_changed.emit(self._selected_region())
+
+    def _refresh_tonic_method_note(self) -> None:
+        """Explain the signal-only tonic fallback for the selected ROI only.
+
+        Shown once per affected ROI, never per session, and never for an ROI
+        whose tonic used the primary global-isosbestic method.
+        """
+        record = self._tonic_method_by_roi.get(self._selected_region() or "", {})
+        if str(record.get("tonic_method", "")) != METHOD_SIGNAL_ONLY:
+            self._tonic_method_note_label.setText("")
+            self._tonic_method_note_label.setVisible(False)
+            return
+        text = TONIC_FALLBACK_NOTE
+        reason = str(record.get("fallback_reason", "") or "")
+        if reason:
+            text += f" (reason: {reason})"
+        self._tonic_method_note_label.setText(text)
+        self._tonic_method_note_label.setVisible(True)
 
     def _refresh_tonic_settings_summary(self) -> None:
         """Show the consumed tonic-settings summary whenever the compact

@@ -152,7 +152,7 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
 
         # Canonical expected
         open(os.path.join(summary, "phasic_correction_impact.png"), "wb").close()
-        open(os.path.join(summary, "tonic_overview.png"), "wb").close()
+        open(os.path.join(summary, "tonic_session_summary.png"), "wb").close()
         open(os.path.join(summary, "phasic_auc_timeseries.png"), "wb").close()
         open(os.path.join(summary, "phasic_peak_rate_timeseries.png"), "wb").close()
         open(os.path.join(summary, "continuous_tonic_trace_overview.png"), "wb").close()
@@ -165,6 +165,9 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         # Should be ignored by tightened rules
         open(os.path.join(summary, "my_verification_notes.png"), "wb").close()
         open(os.path.join(summary, "tonic_anything.png"), "wb").close()
+        # Still produced for the completion contract, but it is the full phasic
+        # residual trace, not a tonic result, so no tab may discover it.
+        open(os.path.join(summary, "tonic_overview.png"), "wb").close()
         open(os.path.join(summary, "phasic_random_timeseries_plot.png"), "wb").close()
         open(os.path.join(day_plots, "phasic_sig_iso_day_extra.png"), "wb").close()
 
@@ -172,7 +175,12 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         tab_map = viewer._discover_region_tab_images(tmpdir)
 
         assert [os.path.basename(p) for p in tab_map["Verification"]] == ["phasic_correction_impact.png"]
-        assert [os.path.basename(p) for p in tab_map["Tonic"]] == ["tonic_overview.png"]
+        assert [os.path.basename(p) for p in tab_map["Tonic"]] == [
+            "tonic_session_summary.png"
+        ]
+        assert "tonic_overview.png" not in [
+            os.path.basename(p) for paths in tab_map.values() for p in paths
+        ]
         assert [os.path.basename(p) for p in tab_map["Phasic Summary"]] == [
             "phasic_auc_timeseries.png",
             "phasic_peak_rate_timeseries.png",

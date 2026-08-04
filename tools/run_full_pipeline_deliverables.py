@@ -3765,6 +3765,10 @@ def main():
         # existing tonic_df_timeseries.csv / tonic_overview.png deliverables and
         # their completion contracts are untouched here.
         if run_tonic_mode and not tune_prep_light_mode and not continuous_mode and regions:
+            from photometry_pipeline.tonic_session_plot import (
+                TONIC_SESSION_PLOT_FILENAME,
+                generate_tonic_session_plots,
+            )
             from photometry_pipeline.tonic_session_summary import (
                 TONIC_SESSION_SUMMARY_FILENAME,
                 write_tonic_session_summary,
@@ -3774,10 +3778,25 @@ def main():
             tonic_summary_result = write_tonic_session_summary(
                 tonic_out, tonic_summary_path, rois=regions
             )
+            # The Tonic Results view reads this plot, so it is produced here,
+            # immediately after the summary it renders.
+            tonic_plot_results = generate_tonic_session_plots(
+                run_dir, summary_path=tonic_summary_path, rois=regions
+            )
+            for plot_result in tonic_plot_results:
+                manifest['deliverables'].setdefault(plot_result['roi'], {})
+                roi_files = manifest['deliverables'][plot_result['roi']].setdefault(
+                    'files', []
+                )
+                roi_files.append(f"summary/{TONIC_SESSION_PLOT_FILENAME}")
+                manifest['deliverables'][plot_result['roi']]['files'] = sorted(
+                    set(roi_files)
+                )
             manifest['tonic_session_summary'] = {
                 'relative_path': TONIC_SESSION_SUMMARY_FILENAME,
                 'row_count': tonic_summary_result['row_count'],
                 'tonic_method_by_roi': tonic_summary_result['tonic_method_by_roi'],
+                'plots': [item['relative_path'] for item in tonic_plot_results],
             }
             emitter.emit(
                 "tonic",
