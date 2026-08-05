@@ -10,12 +10,14 @@ import pytest
 import yaml
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QPushButton
 
+import gui.synthetic_demo_generator as synthetic_demo_generator
 from gui.main_window import MainWindow
 from gui.run_report_parser import classify_completed_run_candidate
 from photometry_pipeline.completed_run_review import load_completed_review_overview
 from photometry_pipeline.config import Config
 from photometry_pipeline.discovery import discover_inputs
 from photometry_pipeline.io.adapters import load_chunk
+from photometry_pipeline.input_processing_completeness import resolve_session_start_time
 from photometry_pipeline.preview.correction_preview import (
     run_guided_local_correction_preview,
 )
@@ -27,10 +29,18 @@ from gui.synthetic_demo_generator import (
     GUIDED_DEMO_ROWS_PER_SESSION,
     GUIDED_DEMO_SESSION_COUNT,
     GUIDED_DEMO_SESSIONS_PER_DAY,
+    GUIDED_DEMO_TONIC_AMPLITUDE_AU,
+    GUIDED_DEMO_TONIC_OFFSET_AU,
+    GUIDED_DEMO_TONIC_PERIOD_HOURS,
+    GUIDED_DEMO_TONIC_PHASE_HOURS,
+    GUIDED_DEMO_TONIC_TRUTH_FILENAME,
+    _guided_demo_event_rate_modulation,
     build_long_duration_demo_command,
     copy_fast_quickstart_demo,
     generate_guided_csv_demo,
     guided_demo_readme_text,
+    guided_demo_session_filename,
+    guided_demo_session_start_time,
     long_duration_tutorial_config_text,
     write_long_duration_demo_config,
 )
@@ -145,9 +155,18 @@ def test_fixed_guided_demo_production_contract(tmp_path: Path):
 
     csv_files = sorted(result.input_dir.glob("session_*.csv"))
     assert [path.name for path in csv_files] == [
-        f"session_{index:04d}.csv"
-        for index in range(1, GUIDED_DEMO_SESSION_COUNT + 1)
+        guided_demo_session_filename(index)
+        for index in range(GUIDED_DEMO_SESSION_COUNT)
     ]
+    session_starts = [resolve_session_start_time(str(path)) for path in csv_files]
+    assert session_starts == [
+        guided_demo_session_start_time(index)
+        for index in range(GUIDED_DEMO_SESSION_COUNT)
+    ]
+    assert all(
+        later > earlier
+        for earlier, later in zip(session_starts, session_starts[1:])
+    )
     assert all(
         sum(1 for _ in path.open("r", encoding="utf-8"))
         == GUIDED_DEMO_ROWS_PER_SESSION + 1
@@ -190,6 +209,96 @@ def test_fixed_guided_demo_production_contract(tmp_path: Path):
     assert len(discovery["sessions"]) == GUIDED_DEMO_SESSION_COUNT
     assert [roi["roi_id"] for roi in discovery["rois"]] == ["ROI1", "ROI2"]
 
+    truth = json.loads(
+        (result.input_dir / GUIDED_DEMO_TONIC_TRUTH_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    records = truth["records"]
+    assert len(records) == 2 * GUIDED_DEMO_SESSION_COUNT
+    assert truth["component"] == "signal_only"
+    assert truth["time_units"] == "elapsed recording hours"
+    for roi_index, roi_id in enumerate(("ROI1", "ROI2")):
+        roi_records = [record for record in records if record["roi_id"] == roi_id]
+        assert len(roi_records) == GUIDED_DEMO_SESSION_COUNT
+        assert [record["session_index"] for record in roi_records] == list(
+            range(GUIDED_DEMO_SESSION_COUNT)
+        )
+        assert {
+            record["tonic_period_hours"] for record in roi_records
+        } == {24.0}
+        assert {
+            record["tonic_amplitude_au"] for record in roi_records
+        } == {GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index]}
+        assert {record["tonic_phase_hours"] for record in roi_records} == {7.0}
+        elapsed_hours = np.array(
+            [record["elapsed_hours"] for record in roi_records], dtype=float
+        )
+        expected = GUIDED_DEMO_TONIC_OFFSET_AU[roi_index] + (
+            GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+            * np.cos(
+                2.0
+                * np.pi
+                * (
+                    elapsed_hours
+                    - GUIDED_DEMO_TONIC_PHASE_HOURS[roi_index]
+                )
+                / GUIDED_DEMO_TONIC_PERIOD_HOURS[roi_index]
+            )
+        )
+        assert np.allclose(
+            [record["tonic_value_au"] for record in roi_records], expected
+        )
+        for cycle_start in (0.0, 24.0):
+            cycle = (elapsed_hours >= cycle_start) & (elapsed_hours < cycle_start + 24.0)
+            cycle_hours = elapsed_hours[cycle]
+            cycle_values = expected[cycle]
+            assert cycle_hours[int(np.argmax(cycle_values))] == pytest.approx(
+                cycle_start + 7.0
+            )
+            assert cycle_hours[int(np.argmin(cycle_values))] == pytest.approx(
+                cycle_start + 19.0
+            )
+    assert GUIDED_DEMO_TONIC_PERIOD_HOURS == (24.0, 24.0)
+    assert GUIDED_DEMO_TONIC_PHASE_HOURS == (7.0, 7.0)
+
+
+def test_guided_demo_tonic_is_added_to_signal_only(tmp_path: Path, monkeypatch):
+    session_index = 4
+    rng = np.random.default_rng(2026)
+    with_tonic = synthetic_demo_generator._guided_demo_session_arrays(
+        session_index,
+        rows_per_session=400,
+        fs_hz=GUIDED_DEMO_FS_HZ,
+        rng=rng,
+    )
+    expected_tonic = [
+        synthetic_demo_generator._guided_demo_tonic_value(session_index, roi_index)
+        for roi_index in range(2)
+    ]
+
+    monkeypatch.setattr(
+        synthetic_demo_generator,
+        "_guided_demo_tonic_value",
+        lambda _session_index, _roi_index: 0.0,
+    )
+    without_tonic = synthetic_demo_generator._guided_demo_session_arrays(
+        session_index,
+        rows_per_session=400,
+        fs_hz=GUIDED_DEMO_FS_HZ,
+        rng=np.random.default_rng(2026),
+    )
+
+    for roi_index, (signal_column, reference_column) in enumerate(_ROI_COLUMNS):
+        assert np.allclose(
+            with_tonic[:, signal_column] - without_tonic[:, signal_column],
+            expected_tonic[roi_index],
+        )
+        assert np.allclose(
+            with_tonic[:, reference_column] - without_tonic[:, reference_column],
+            0.0,
+        )
+
 
 def test_guided_demo_is_reproducible_with_fixed_seed(tmp_path: Path):
     first_parent = tmp_path / "first"
@@ -201,8 +310,8 @@ def test_guided_demo_is_reproducible_with_fixed_seed(tmp_path: Path):
         second_parent, _session_count=2, _rows_per_session=400
     )
     assert first.success and second.success
-    for index in range(1, 3):
-        name = f"session_{index:04d}.csv"
+    for index in range(2):
+        name = guided_demo_session_filename(index)
         assert (first.input_dir / name).read_bytes() == (
             second.input_dir / name
         ).read_bytes()
@@ -445,7 +554,7 @@ def test_guided_demo_real_correction_preview_keeps_transients_for_both_rois(
     generated = generate_guided_csv_demo(tmp_path / "source_parent", _session_count=1)
     assert generated.success, generated.message
     config_path = _write_guided_demo_config(tmp_path)
-    source = generated.input_dir / "session_0001.csv"
+    source = generated.input_dir / guided_demo_session_filename(0)
 
     for roi in ("ROI1", "ROI2"):
         result = run_guided_local_correction_preview(
@@ -494,13 +603,45 @@ def test_guided_demo_readme_contains_required_setup_instructions():
         "Time unit: seconds",
         "`ROI1_Signal` with `ROI1_Reference`",
         "`ROI2_Signal` with `ROI2_Reference`",
+        "two ROIs",
+        "explicit signal-only tonic rhythms with known ground truth",
+        "rhythmic phasic activity",
+        "shared optical nuisance",
+        "realistic noise",
         "Confirm the displayed natural filename order",
         "Fixed daily anchor",
         "`07:00`",
-        "`12:00:00`",
+        "Clock time at recording start: `00:00:00`",
+        "base phasic modulation share a daily peak at `07:00`",
         "Do not draw biological conclusions",
     ):
         assert required in text
+
+
+def test_guided_demo_phasic_rate_alignment_matches_tonic_extrema():
+    """Both intermittent ROI rates peak at 07:00 and trough at 19:00."""
+    sessions_per_day = GUIDED_DEMO_SESSIONS_PER_DAY
+    modulation_by_roi = []
+    for roi_index in (0, 1):
+        day_one = np.array(
+            [
+                _guided_demo_event_rate_modulation(session_index, roi_index)
+                for session_index in range(sessions_per_day)
+            ]
+        )
+        day_two = np.array(
+            [
+                _guided_demo_event_rate_modulation(
+                    session_index + sessions_per_day, roi_index
+                )
+                for session_index in range(sessions_per_day)
+            ]
+        )
+        assert np.allclose(day_one, day_two)
+        assert int(np.argmax(day_one)) == 7 * 2  # 07:00
+        assert int(np.argmin(day_one)) == 19 * 2  # 19:00
+        modulation_by_roi.append(day_one)
+    assert np.array_equal(modulation_by_roi[0], modulation_by_roi[1])
 
 
 def test_dialog_has_one_fixed_guided_flow_and_no_rwd_presets(qapp):
@@ -578,8 +719,8 @@ def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(
     assert generated.success, generated.message
     source_files = sorted(generated.input_dir.glob("session_*.csv"))
     assert [path.name for path in source_files] == [
-        "session_0001.csv",
-        "session_0002.csv",
+        guided_demo_session_filename(0),
+        guided_demo_session_filename(1),
     ]
 
     config_path = _write_guided_demo_config(tmp_path)
@@ -591,8 +732,8 @@ def test_generated_guided_csv_bounded_real_pipeline_and_completed_loading(
     )
     assert discovery["resolved_format"] == "CUSTOM_TABULAR"
     assert [session["session_id"] for session in discovery["sessions"]] == [
-        "session_0001",
-        "session_0002",
+        Path(guided_demo_session_filename(0)).stem,
+        Path(guided_demo_session_filename(1)).stem,
     ]
     assert [roi["roi_id"] for roi in discovery["rois"]] == ["ROI1", "ROI2"]
     first_chunk = load_chunk(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -35,6 +37,12 @@ GUIDED_DEMO_SESSION_DURATION_SEC = 600.0
 GUIDED_DEMO_FS_HZ = 20
 GUIDED_DEMO_ROWS_PER_SESSION = 12000
 GUIDED_DEMO_SEED = 2026
+GUIDED_DEMO_TONIC_TRUTH_FILENAME = "tonic_truth.json"
+GUIDED_DEMO_FIRST_SESSION_START = datetime(2025, 1, 1, 0, 0, 0)
+GUIDED_DEMO_TONIC_OFFSET_AU = (0.0, 0.0)
+GUIDED_DEMO_TONIC_AMPLITUDE_AU = (4.0, 4.5)
+GUIDED_DEMO_TONIC_PERIOD_HOURS = (24.0, 24.0)
+GUIDED_DEMO_TONIC_PHASE_HOURS = (7.0, 7.0)
 GUIDED_DEMO_HEADERS = (
     "ElapsedSeconds",
     "ROI1_Signal",
@@ -49,6 +57,7 @@ _EVENT_RATE_PER_MIN = (3.2, 2.6)  # ROI1, ROI2 baseline transient rate
 _EVENT_RATE_MODULATION = (0.55, 0.38)  # recording-scale swing of the rate
 _EVENT_AMPLITUDE_MODULATION = (0.22, 0.14)  # recording-scale swing of amplitude
 _EVENT_ROI_PHASE_OFFSET = 0.9  # ROI2 activity lags ROI1 across the recording
+_EVENT_MAX_ABUNDANCE_HOUR = 7.0
 _EVENT_MEDIAN_AMPLITUDE = (1.9, 2.15)
 _EVENT_RISE_SEC = (0.08, 0.26)
 _EVENT_DECAY_SEC = (0.45, 2.4)
@@ -107,20 +116,103 @@ Select this containing folder in Guided Mode.
 - Session duration: 600 seconds
 - Time column: `ElapsedSeconds`
 - Time unit: seconds
-- Confirm the displayed natural filename order
+- Confirm the displayed natural filename order; session filenames include authoritative start timestamps
 - ROI1 mapping: `ROI1_Signal` with `ROI1_Reference`
 - ROI2 mapping: `ROI2_Signal` with `ROI2_Reference`
 
 Recommended timeline display:
 - Fixed daily anchor
 - Start of plotted day: `07:00`
-- Clock time at recording start: `12:00:00`
+- Clock time at recording start: `00:00:00`
 
-The signals contain deterministic bleaching, shared optical variation, noise,
-occasional common-mode artifacts, and irregular calcium-like transients for
+The tonic rhythms and base phasic modulation share a daily peak at `07:00`
+and trough at `19:00`.
+
+The two ROIs contain explicit signal-only tonic rhythms with known ground truth,
+rhythmic phasic activity, shared optical nuisance, and realistic noise for
 demonstrating the workflow.
 Do not draw biological conclusions from this dataset.
 """
+
+
+def guided_demo_session_start_time(session_index: int) -> datetime:
+    """Return the deterministic authoritative start time for one demo session."""
+    return GUIDED_DEMO_FIRST_SESSION_START + timedelta(
+        hours=float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_HOUR)
+    )
+
+
+def guided_demo_session_filename(session_index: int) -> str:
+    """Return one naturally ordered session filename with its start timestamp."""
+    start = guided_demo_session_start_time(session_index)
+    return (
+        f"session_{int(session_index) + 1:04d}_"
+        f"{start:%Y_%m_%d-%H_%M_%S}.csv"
+    )
+
+
+def _guided_demo_tonic_value(session_index: int, roi_index: int) -> float:
+    """Return the exact signal-only tonic component for one session and ROI."""
+    elapsed_hours = float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_HOUR)
+    return float(
+        GUIDED_DEMO_TONIC_OFFSET_AU[roi_index]
+        + GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+        * np.cos(
+            2.0
+            * np.pi
+            * (elapsed_hours - GUIDED_DEMO_TONIC_PHASE_HOURS[roi_index])
+            / GUIDED_DEMO_TONIC_PERIOD_HOURS[roi_index]
+        )
+    )
+
+
+def _guided_demo_tonic_truth_payload(session_count: int) -> dict:
+    records = []
+    for session_index in range(int(session_count)):
+        session_start = guided_demo_session_start_time(session_index)
+        elapsed_hours = float(
+            (session_start - GUIDED_DEMO_FIRST_SESSION_START).total_seconds()
+            / 3600.0
+        )
+        session_id = Path(guided_demo_session_filename(session_index)).stem
+        for roi_index, roi_id in enumerate(("ROI1", "ROI2")):
+            records.append(
+                {
+                    "roi_id": roi_id,
+                    "session_id": session_id,
+                    "session_index": int(session_index),
+                    "authoritative_session_start_time": session_start.isoformat(),
+                    "elapsed_hours": elapsed_hours,
+                    "tonic_value_au": _guided_demo_tonic_value(
+                        session_index, roi_index
+                    ),
+                    "tonic_offset_au": GUIDED_DEMO_TONIC_OFFSET_AU[roi_index],
+                    "tonic_period_hours": GUIDED_DEMO_TONIC_PERIOD_HOURS[roi_index],
+                    "tonic_amplitude_au": GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index],
+                    "tonic_phase_hours": GUIDED_DEMO_TONIC_PHASE_HOURS[roi_index],
+                }
+            )
+    return {
+        "schema": "guided_csv_demo_tonic_truth.v1",
+        "component": "signal_only",
+        "value_units": "raw fluorescence AU",
+        "time_units": "elapsed recording hours",
+        "equation": (
+            "tonic_offset_au + tonic_amplitude_au * cos(2*pi*"
+            "(elapsed_hours - tonic_phase_hours) / tonic_period_hours)"
+        ),
+        "records": records,
+    }
+
+
+def _guided_demo_event_rate_modulation(session_index: int, roi_index: int) -> float:
+    """Return the signed daily phasic rate modulation for one session and ROI."""
+    recording_phase = 2.0 * np.pi * (
+        float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_DAY)
+        + 0.25
+        - _EVENT_MAX_ABUNDANCE_HOUR / 24.0
+    )
+    return float(np.sin(recording_phase))
 
 
 def _slow_variation(
@@ -205,11 +297,6 @@ def _guided_demo_session_arrays(
 ) -> np.ndarray:
     time_sec = np.arange(rows_per_session, dtype=np.float64) / float(fs_hz)
     duration_sec = float(rows_per_session) / float(fs_hz)
-    # One activity cycle per nominal day, so a multi-day demo shows a daily
-    # pattern rather than one slow arc across the whole recording.
-    recording_phase = (
-        2.0 * np.pi * float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_DAY)
-    )
     # Each session is an independent recording on the same rig.
     session_scale = 1.0 + 0.03 * float(rng.normal())
 
@@ -227,14 +314,16 @@ def _guided_demo_session_arrays(
         artifact_reference_scale = float(rng.uniform(0.78, 1.06))
 
         # Calcium-like transients, more active in one half of the recording.
-        activity_phase = recording_phase - roi_index * _EVENT_ROI_PHASE_OFFSET
+        activity_modulation = _guided_demo_event_rate_modulation(
+            session_index, roi_index
+        )
         rate_per_min = (
             _EVENT_RATE_PER_MIN[roi_index]
-            * (1.0 + _EVENT_RATE_MODULATION[roi_index] * np.sin(activity_phase))
+            * (1.0 + _EVENT_RATE_MODULATION[roi_index] * activity_modulation)
             * float(np.exp(rng.normal(0.0, 0.16)))
         )
-        amplitude_scale = 1.0 + _EVENT_AMPLITUDE_MODULATION[roi_index] * np.sin(
-            activity_phase
+        amplitude_scale = 1.0 + _EVENT_AMPLITUDE_MODULATION[roi_index] * (
+            activity_modulation
         )
         start_times = _event_start_times(
             rng, duration_sec, max(0.25, rate_per_min) / 60.0
@@ -282,6 +371,10 @@ def _guided_demo_session_arrays(
             + signal_wander
             + rng.normal(0.0, 0.22, rows_per_session)
         )
+        # The known tonic is a session-level signal-only component.  It is
+        # deliberately absent from the reference/control channel and from all
+        # shared, phasic, and nuisance terms above.
+        signal += _guided_demo_tonic_value(session_index, roi_index)
         columns.extend([signal, reference])
     return np.column_stack(columns)
 
@@ -645,7 +738,8 @@ def _validate_guided_demo_folder(
 ) -> None:
     csv_files = sorted(folder.glob("session_*.csv"))
     expected_names = [
-        f"session_{index:04d}.csv" for index in range(1, session_count + 1)
+        guided_demo_session_filename(index)
+        for index in range(int(session_count))
     ]
     if [path.name for path in csv_files] != expected_names:
         raise RuntimeError("Generated session file set is incomplete.")
@@ -693,6 +787,21 @@ def _validate_guided_demo_folder(
             or not np.isclose(last_values[0], expected_last)
         ):
             raise RuntimeError(f"Generated timestamps are invalid: {path.name}")
+    truth_path = folder / GUIDED_DEMO_TONIC_TRUTH_FILENAME
+    if not truth_path.is_file():
+        raise RuntimeError("Generated tonic truth is missing.")
+    try:
+        truth = json.loads(truth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Generated tonic truth is not valid JSON.") from exc
+    records = truth.get("records") if isinstance(truth, dict) else None
+    if (
+        not isinstance(truth, dict)
+        or truth.get("schema") != "guided_csv_demo_tonic_truth.v1"
+        or not isinstance(records, list)
+        or len(records) != int(session_count) * 2
+    ):
+        raise RuntimeError("Generated tonic truth is incomplete.")
     if not (folder / "README.md").is_file():
         raise RuntimeError("Generated README is missing.")
 
@@ -735,7 +844,7 @@ def generate_guided_csv_demo(
                     f"Generated values are not finite for session {session_index + 1}."
                 )
             np.savetxt(
-                temporary_folder / f"session_{session_index + 1:04d}.csv",
+                temporary_folder / guided_demo_session_filename(session_index),
                 values,
                 delimiter=",",
                 header=",".join(GUIDED_DEMO_HEADERS),
@@ -744,6 +853,15 @@ def generate_guided_csv_demo(
             )
             if progress is not None:
                 progress(session_index + 1, int(_session_count))
+        (temporary_folder / GUIDED_DEMO_TONIC_TRUTH_FILENAME).write_text(
+            json.dumps(
+                _guided_demo_tonic_truth_payload(int(_session_count)),
+                indent=2,
+                sort_keys=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         (temporary_folder / "README.md").write_text(
             guided_demo_readme_text(), encoding="utf-8"
         )
