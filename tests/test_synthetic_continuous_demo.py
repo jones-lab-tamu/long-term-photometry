@@ -1,5 +1,7 @@
 """The fixed Guided continuous demo, through the real continuous authorities."""
 
+import json
+
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication, QComboBox
@@ -15,6 +17,12 @@ from gui.synthetic_demo_generator import (
     GUIDED_CONTINUOUS_DEMO_FOLDER_NAME,
     GUIDED_CONTINUOUS_DEMO_FS_HZ,
     GUIDED_CONTINUOUS_DEMO_HEADERS,
+    GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU,
+    GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS,
+    GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS,
+    GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME,
+    _continuous_event_rate_modulation,
+    _guided_continuous_demo_tonic_value,
     generate_guided_continuous_demo,
     guided_continuous_demo_readme_text,
 )
@@ -99,7 +107,11 @@ def test_continuous_demo_writes_one_uninterrupted_recording(continuous_demo):
     assert source.is_file()
     # One recording file, not a per-session folder tree.
     assert sorted(path.name for path in folder.iterdir()) == sorted(
-        ["README.md", GUIDED_CONTINUOUS_DEMO_FILE_NAME]
+        [
+            "README.md",
+            GUIDED_CONTINUOUS_DEMO_FILE_NAME,
+            GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME,
+        ]
     )
     with source.open(encoding="utf-8") as handle:
         header = handle.readline().rstrip("\n").rstrip("\r")
@@ -140,10 +152,70 @@ def test_continuous_demo_readme_states_the_fixed_contract():
         "`ROI2_Signal` with `ROI2_Reference`",
         "Fixed daily anchor",
         "`07:00`",
-        "`12:00:00`",
+        "`00:00:00`",
+        "`19:00`",
+        "repeats on the second day",
+        "Phasic activity is highest",
+        "`tonic_truth.json`",
         "Do not draw biological conclusions",
     ):
         assert required in text
+
+
+def test_continuous_demo_writes_tonic_truth(continuous_demo):
+    truth_path = continuous_demo.input_dir / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+
+    assert truth["recording_start"] == "00:00:00"
+    assert truth["duration_hours"] == pytest.approx(1.0)
+    assert truth["sampling_rate_hz"] == GUIDED_CONTINUOUS_DEMO_FS_HZ
+    assert truth["tonic_signal_only"] is True
+    assert "cos" in truth["tonic_equation"]
+    assert "07:00" in truth["phasic_alignment"]
+    assert "19:00" in truth["phasic_alignment"]
+    assert [roi["roi_id"] for roi in truth["rois"]] == ["ROI1", "ROI2"]
+    for roi_index, roi in enumerate(truth["rois"]):
+        assert roi["tonic_period_hours"] == pytest.approx(
+            GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS[roi_index]
+        )
+        assert roi["tonic_amplitude_au"] == pytest.approx(
+            GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+        )
+        assert roi["tonic_peak_phase_hours"] == pytest.approx(
+            GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS[roi_index]
+        )
+        assert roi["expected_first_day_peak_clock"] == "07:00"
+        assert roi["expected_first_day_trough_clock"] == "19:00"
+
+
+def test_continuous_tonic_truth_has_two_aligned_daily_cycles():
+    hours = np.arange(0.0, 48.0001, 0.25)
+    for roi_index in (0, 1):
+        tonic = _guided_continuous_demo_tonic_value(hours * 3600.0, roi_index)
+        first_day = tonic[:96]
+        second_day = tonic[96:192]
+        assert hours[int(np.argmax(first_day))] == pytest.approx(7.0)
+        assert hours[int(np.argmin(first_day))] == pytest.approx(19.0)
+        assert hours[96 + int(np.argmax(second_day))] == pytest.approx(31.0)
+        assert hours[96 + int(np.argmin(second_day))] == pytest.approx(43.0)
+        assert np.allclose(first_day, second_day)
+
+    assert GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS[0] == pytest.approx(
+        GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS[1]
+    )
+
+
+def test_continuous_phasic_modulation_is_aligned_and_shared():
+    hours = np.arange(0.0, 48.0001, 0.25)
+    modulation = _continuous_event_rate_modulation(hours * 3600.0)
+    first_day = modulation[:96]
+    second_day = modulation[96:192]
+
+    assert hours[int(np.argmax(first_day))] == pytest.approx(7.0)
+    assert hours[int(np.argmin(first_day))] == pytest.approx(19.0)
+    assert hours[96 + int(np.argmax(second_day))] == pytest.approx(31.0)
+    assert hours[96 + int(np.argmin(second_day))] == pytest.approx(43.0)
+    assert np.allclose(first_day, second_day)
 
 
 def test_continuous_demo_refuses_existing_folder_and_cleans_up(tmp_path):
@@ -182,6 +254,55 @@ def test_continuous_demo_is_byte_reproducible(tmp_path):
     assert (first.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME).read_bytes() == (
         second.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME
     ).read_bytes()
+    assert (
+        first.input_dir / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME
+    ).read_bytes() == (
+        second.input_dir / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME
+    ).read_bytes()
+
+
+def test_continuous_tonic_is_added_to_signal_only(tmp_path, monkeypatch):
+    import gui.synthetic_demo_generator as generator
+
+    original_amplitudes = generator.GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU
+    monkeypatch.setattr(
+        generator, "GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU", (0.0, 0.0)
+    )
+    without_tonic = generate_guided_continuous_demo(
+        tmp_path / "without", _duration_sec=1200.0
+    )
+    monkeypatch.setattr(
+        generator,
+        "GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU",
+        original_amplitudes,
+    )
+    with_tonic = generate_guided_continuous_demo(
+        tmp_path / "with", _duration_sec=1200.0
+    )
+    assert without_tonic.success and with_tonic.success
+
+    baseline = np.loadtxt(
+        without_tonic.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME,
+        delimiter=",",
+        skiprows=1,
+    )
+    actual = np.loadtxt(
+        with_tonic.input_dir / GUIDED_CONTINUOUS_DEMO_FILE_NAME,
+        delimiter=",",
+        skiprows=1,
+    )
+    np.testing.assert_array_equal(baseline[:, _CH1_REFERENCE], actual[:, _CH1_REFERENCE])
+    np.testing.assert_array_equal(baseline[:, _CH2_REFERENCE], actual[:, _CH2_REFERENCE])
+    for roi_index, signal_column in enumerate((_CH1_SIGNAL, _CH2_SIGNAL)):
+        expected = _guided_continuous_demo_tonic_value(
+            actual[:, _TIME], roi_index
+        )
+        np.testing.assert_allclose(
+            actual[:, signal_column] - baseline[:, signal_column],
+            expected,
+            rtol=0.0,
+            atol=2.1e-6,
+        )
 
 
 # --------------------------------------------------------------------------

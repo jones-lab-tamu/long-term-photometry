@@ -56,7 +56,6 @@ GUIDED_DEMO_HEADERS = (
 _EVENT_RATE_PER_MIN = (3.2, 2.6)  # ROI1, ROI2 baseline transient rate
 _EVENT_RATE_MODULATION = (0.55, 0.38)  # recording-scale swing of the rate
 _EVENT_AMPLITUDE_MODULATION = (0.22, 0.14)  # recording-scale swing of amplitude
-_EVENT_ROI_PHASE_OFFSET = 0.9  # ROI2 activity lags ROI1 across the recording
 _EVENT_MAX_ABUNDANCE_HOUR = 7.0
 _EVENT_MEDIAN_AMPLITUDE = (1.9, 2.15)
 _EVENT_RISE_SEC = (0.08, 0.26)
@@ -78,6 +77,11 @@ GUIDED_CONTINUOUS_DEMO_FS_HZ = 8
 GUIDED_CONTINUOUS_DEMO_DURATION_SEC = 48 * 3600.0
 GUIDED_CONTINUOUS_DEMO_BLOCK_SEC = 600.0
 GUIDED_CONTINUOUS_DEMO_FILE_NAME = "continuous_recording.csv"
+GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME = "tonic_truth.json"
+GUIDED_CONTINUOUS_DEMO_TONIC_OFFSET_AU = (0.0, 0.0)
+GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU = (4.0, 4.5)
+GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS = (24.0, 24.0)
+GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS = (7.0, 7.0)
 GUIDED_CONTINUOUS_DEMO_HEADERS = (
     "ElapsedSeconds",
     "ROI1_Signal",
@@ -166,6 +170,67 @@ def _guided_demo_tonic_value(session_index: int, roi_index: int) -> float:
     )
 
 
+def _guided_continuous_demo_tonic_value(
+    elapsed_seconds: np.ndarray | float, roi_index: int
+) -> np.ndarray:
+    """Return the exact signal-only tonic component for continuous time."""
+    elapsed_hours = np.asarray(elapsed_seconds, dtype=np.float64) / 3600.0
+    return (
+        GUIDED_CONTINUOUS_DEMO_TONIC_OFFSET_AU[roi_index]
+        + GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+        * np.cos(
+            2.0
+            * np.pi
+            * (
+                elapsed_hours
+                - GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS[roi_index]
+            )
+            / GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS[roi_index]
+        )
+    )
+
+
+def _guided_continuous_demo_tonic_truth_payload(
+    duration_sec: float, fs_hz: int
+) -> dict:
+    rois = []
+    for roi_index, roi_id in enumerate(("ROI1", "ROI2")):
+        rois.append(
+            {
+                "roi_id": roi_id,
+                "tonic_period_hours": GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS[
+                    roi_index
+                ],
+                "tonic_amplitude_au": GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[
+                    roi_index
+                ],
+                "tonic_offset_au": GUIDED_CONTINUOUS_DEMO_TONIC_OFFSET_AU[
+                    roi_index
+                ],
+                "tonic_peak_phase_hours": GUIDED_CONTINUOUS_DEMO_TONIC_PHASE_HOURS[
+                    roi_index
+                ],
+                "expected_first_day_peak_clock": "07:00",
+                "expected_first_day_trough_clock": "19:00",
+            }
+        )
+    return {
+        "recording_start": "00:00:00",
+        "duration_hours": float(duration_sec) / 3600.0,
+        "sampling_rate_hz": int(fs_hz),
+        "tonic_equation": (
+            "offset_au + amplitude_au * cos(2*pi*"
+            "(elapsed_hours - peak_phase_hours) / period_hours)"
+        ),
+        "tonic_signal_only": True,
+        "rois": rois,
+        "phasic_alignment": (
+            "Both ROIs share the same daily phasic maximum near 07:00 and "
+            "minimum near 19:00 as the tonic rhythm."
+        ),
+    }
+
+
 def _guided_demo_tonic_truth_payload(session_count: int) -> dict:
     records = []
     for session_index in range(int(session_count)):
@@ -213,6 +278,19 @@ def _guided_demo_event_rate_modulation(session_index: int, roi_index: int) -> fl
         - _EVENT_MAX_ABUNDANCE_HOUR / 24.0
     )
     return float(np.sin(recording_phase))
+
+
+def _continuous_event_rate_modulation(
+    elapsed_seconds: np.ndarray | float,
+) -> np.ndarray:
+    """Return the shared continuous daily phasic modulation."""
+    elapsed_days = np.asarray(elapsed_seconds, dtype=np.float64) / _CONTINUOUS_DAY_SEC
+    phase = 2.0 * np.pi * (
+        elapsed_days
+        + 0.25
+        - _EVENT_MAX_ABUNDANCE_HOUR / 24.0
+    )
+    return np.sin(phase)
 
 
 def _slow_variation(
@@ -400,11 +478,15 @@ recording option.
 Recommended timeline display:
 - Fixed daily anchor
 - Start of plotted day: `07:00`
-- Clock time at recording start: `12:00:00`
+- Clock time at recording start: `00:00:00`
 
-The signals contain deterministic bleaching, shared optical variation, noise,
-occasional common-mode artifacts, and irregular calcium-like transients for
-demonstrating the workflow.
+The signal-only tonic rhythm peaks near `07:00` and troughs near `19:00`, then
+repeats on the second day. Phasic activity is highest near the same phase.
+`tonic_truth.json` is validation ground truth, not an analysis input.
+
+The signals also contain deterministic bleaching, shared optical variation,
+noise, occasional common-mode artifacts, and irregular calcium-like transients
+for demonstrating the workflow.
 Do not draw biological conclusions from this dataset.
 """
 
@@ -429,15 +511,11 @@ def _continuous_event_schedule(
     )
     candidates = np.cumsum(intervals)
     candidates = candidates[candidates < usable_sec]
-    phase = (
-        2.0 * np.pi * candidates / _CONTINUOUS_DAY_SEC
-        - roi_index * _EVENT_ROI_PHASE_OFFSET
-    )
-    keep = rng.random(candidates.size) < (1.0 + depth * np.sin(phase)) / (1.0 + depth)
+    modulation = _continuous_event_rate_modulation(candidates)
+    keep = rng.random(candidates.size) < (1.0 + depth * modulation) / (1.0 + depth)
     start_times = candidates[keep]
-    amplitude_scale = 1.0 + _EVENT_AMPLITUDE_MODULATION[roi_index] * np.sin(
-        2.0 * np.pi * start_times / _CONTINUOUS_DAY_SEC
-        - roi_index * _EVENT_ROI_PHASE_OFFSET
+    amplitude_scale = 1.0 + _EVENT_AMPLITUDE_MODULATION[roi_index] * (
+        _continuous_event_rate_modulation(start_times)
     )
     amplitudes = np.clip(
         amplitude_scale
@@ -568,6 +646,28 @@ def _validate_guided_continuous_demo_folder(
         raise RuntimeError("Generated continuous recording is incomplete.")
     if previous is None or abs((previous + expected_step) - total_samples * expected_step) > 1e-6:
         raise RuntimeError("Generated continuous duration is invalid.")
+    truth_path = folder / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME
+    if not truth_path.is_file():
+        raise RuntimeError("Generated continuous tonic truth is missing.")
+    try:
+        truth = json.loads(truth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Generated continuous tonic truth is not valid JSON.") from exc
+    rois = truth.get("rois") if isinstance(truth, dict) else None
+    if (
+        not isinstance(truth, dict)
+        or truth.get("recording_start") != "00:00:00"
+        or truth.get("sampling_rate_hz") != int(fs_hz)
+        or not np.isclose(
+            float(truth.get("duration_hours", np.nan)),
+            total_samples / float(fs_hz) / 3600.0,
+        )
+        or truth.get("tonic_signal_only") is not True
+        or not isinstance(rois, list)
+        or [item.get("roi_id") for item in rois if isinstance(item, dict)]
+        != ["ROI1", "ROI2"]
+    ):
+        raise RuntimeError("Generated continuous tonic truth is incomplete.")
     if not (folder / "README.md").is_file():
         raise RuntimeError("Generated README is missing.")
 
@@ -651,7 +751,7 @@ def generate_guided_continuous_demo(
                     block_time, fs_hz, artifact_schedule
                 )
                 columns = [block_time]
-                for state in roi_state:
+                for roi_index, state in enumerate(roi_state):
                     events = _render_continuous_events(
                         block_time, fs_hz, state["events"]
                     )
@@ -671,6 +771,11 @@ def generate_guided_continuous_demo(
                         + np.interp(block_time, wander_times, state["signal_wander"])
                         + rng.normal(0.0, 0.22, block_time.size)
                     )
+                    # Keep the known tonic separate from phasic events,
+                    # shared nuisance, motion-like artifacts, and reference.
+                    signal += _guided_continuous_demo_tonic_value(
+                        block_time, roi_index
+                    )
                     columns.extend([signal, reference])
                 values = np.column_stack(columns)
                 if not np.isfinite(values).all():
@@ -686,6 +791,15 @@ def generate_guided_continuous_demo(
                 )
                 if progress is not None:
                     progress(block_index + 1, block_count)
+        (temporary_folder / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME).write_text(
+            json.dumps(
+                _guided_continuous_demo_tonic_truth_payload(duration_sec, fs_hz),
+                indent=2,
+                sort_keys=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         (temporary_folder / "README.md").write_text(
             guided_continuous_demo_readme_text(), encoding="utf-8"
         )
