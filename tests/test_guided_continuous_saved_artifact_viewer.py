@@ -420,6 +420,13 @@ def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
             assert f"Plotted-day start: {timeline['fixed_daily_anchor_clock']}" in tonic_metadata
         if timeline.get("recording_start_clock"):
             assert f"Recording start: {timeline['recording_start_clock']}" in tonic_metadata
+        tonic_record = next(
+            record
+            for record in viewer.available_artifacts()
+            if str(record.get("relative_path", "")).endswith("tonic_overview.png")
+        )
+        assert f"Tonic method: {tonic_record['tonic_method_label']}" in tonic_metadata
+        assert f"Units: {tonic_record['tonic_units_label']}" in tonic_metadata
         assert "Artifact" not in tonic_metadata
 
         _select_native_tab(viewer, "Phasic Summary")

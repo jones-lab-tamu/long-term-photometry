@@ -1,65 +1,12 @@
-"""CR1-D3a: integrate the established tonic computation with the continuous-
-RWD correction-run lifecycle.
+"""Native Guided continuous tonic publication.
 
-This module extends the existing D2 run lifecycle
-(:mod:`photometry_pipeline.guided_continuous_rwd_correction_run`) with the
-existing production tonic contract, not a descriptive-summary substitute for
-it.
-
-The established tonic scientific contract (inspected directly in
-``photometry_pipeline/core/tonic_dff.py`` and ``photometry_pipeline/
-pipeline.py``) has two distinct routes:
-
-* a *legacy* route (``Pipeline.mode == "tonic"`` and ``per_roi_correction is
-  None``): a recording-global robust isosbestic fit
-  (``core.tonic_dff.compute_global_iso_fit_robust``) applied per session
-  (``apply_global_fit`` + ``compute_session_tonic_df_from_global``);
-* the *native* per-ROI-correction route, which every Guided continuous-RWD
-  correction (C4b) uses: ``pipeline.py``'s own ``_apply_standard_analysis``
-  dispatches tonic to the *exact same* call as phasic --
-  ``regression.fit_chunk_dynamic(chunk, config, mode="phasic",
-  per_roi_correction=dispatch_map)`` (see ``pipeline.py`` around
-  ``_apply_standard_analysis``, comment: "Native tonic consumes the same
-  canonical per-session correction engine as phasic"). C4b
-  (``guided_continuous_rwd_segment_correction.py``) calls this identical
-  function with the identical argument shape
-  (``regression.fit_chunk_dynamic(chunk, config, mode="phasic",
-  per_roi_correction={spec.roi_id: spec})``) to produce every corrected
-  segment's ``delta_f``.
-
-Because every Guided continuous-RWD recording is corrected with an explicit
-per-ROI strategy (never the uniform/legacy route), the established tonic
-computation for this backend *is* C4b's own per-segment ``delta_f`` -- not a
-different or additional fit. This module does not re-invoke
-``regression.fit_chunk_dynamic`` a second time (that would recompute an
-already-established, already-validated result at real cost for no scientific
-difference); it reuses the already-computed values D1 already validated and
-persisted, and republishes them through the existing, unmodified tonic
-trace-cache writer (``Hdf5TraceCacheWriter(path, "tonic", config)``) so the
-run produces the actual artifact the application ordinarily treats as proof
-tonic analysis ran: ``_analysis/tonic_out/tonic_trace_cache.h5``, alongside
-the same ``run_report.json``/``config_used.yaml`` pair every tonic Pipeline
-run writes (``core.reporting.generate_run_report``, reused unmodified). The
-existing continuous window-summary generator
-(``continuous_outputs.generate_continuous_tonic_summary``) is then called,
-unmodified, against that genuine tonic-mode cache -- exactly as the classic
-continuous pipeline already does.
-
-Fitting is chunk-local by established design in native/per-ROI-correction
-mode (each 600-second correction segment is fit independently, exactly as
-C4b already does and as phasic already does); there is no continuous-wide
-model to carry across storage-chunk boundaries in this route, and no
-boundary risk to solve, because the destination signal (a percentile/mean/
-median descriptive summary) has no thresholding or refractory state to reset.
-
-Phasic remains unimplemented (see the CR1-D3a inspection report): its
-continuous integration would require running peak/event detection for the
-first time and inherits an acknowledged, unaddressed chunk-boundary
-threshold/refractory-reset risk this module does not attempt to solve.
-
-Scope: this integrates exactly one downstream path (tonic). It does not run
-or modify phasic/feature analysis, does not connect to the GUI or worker,
-and does not enable Guided continuous Run.
+The correction pass still supplies the accepted continuous raw-channel cache
+used by the native workflow, but tonic values are computed independently from
+those raw signal/reference channels. Each ROI receives one recording-wide
+robust isosbestic fit and one method for the entire recording. The existing
+saved continuous output windows are then summarized with the settled P2 tonic
+rule; an invalid primary fit uses the recording-level signal-only bleach
+fallback. The selected phasic correction strategy is never tonic authority.
 """
 
 from __future__ import annotations
@@ -67,12 +14,18 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable, Iterable, Iterator
 
 import numpy as np
+import pandas as pd
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.continuous_outputs import generate_continuous_tonic_summary
+from photometry_pipeline.continuous_outputs import _window_metadata_row
+from photometry_pipeline.core.tonic_dff import (
+    apply_global_fit,
+    compute_global_iso_fit_robust,
+)
+from photometry_pipeline.core.tonic_output import _fit_exponential_bleach_trend
 from photometry_pipeline.core.reporting import generate_run_report
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.guided_continuous_rwd_block_plan import (
@@ -153,6 +106,55 @@ _TOOL_NAME = "photometry_pipeline.guided_continuous_rwd_tonic_run"
 TONIC_ANALYSIS_RELATIVE_DIR = os.path.join("_analysis", "tonic_out")
 TONIC_CACHE_FILENAME = "tonic_trace_cache.h5"
 
+TONIC_PERCENTILE = 2.0
+MIN_FITTED_ISOSBESTIC = 1e-9
+GLOBAL_FIT_MAX_POINTS = 200_000
+
+TONIC_METHOD_GLOBAL_ISOSBESTIC = "Global-isosbestic ΔF/F₀"
+TONIC_METHOD_SIGNAL_ONLY = "Signal-only bleach corrected"
+TONIC_UNITS_FRACTIONAL = "fractional ΔF/F₀"
+TONIC_UNITS_RAW_AU = "raw fluorescence AU"
+
+TONIC_STATUS_VALID = "valid"
+TONIC_STATUS_NO_FINITE = "no_finite_samples"
+TONIC_STATUS_INVALID_DENOMINATOR = "invalid_denominator"
+TONIC_STATUS_UNAVAILABLE = "tonic_unavailable"
+
+TONIC_SUMMARY_COLUMNS = [
+    "roi",
+    "source_file",
+    "chunk_id",
+    "window_index",
+    "window_start_sec",
+    "window_end_sec",
+    "window_duration_sec",
+    "elapsed_hour_start",
+    "elapsed_hour_mid",
+    "tonic_value",
+    "tonic_status",
+    "tonic_method",
+    "units",
+    "tonic_percentile",
+    "tonic_fallback",
+    "tonic_mean",
+    "tonic_median",
+    "tonic_min",
+    "tonic_max",
+    "tonic_p05",
+    "tonic_p95",
+    "tonic_n_finite",
+    "tonic_nan_fraction",
+    "global_slope",
+    "global_intercept",
+    "global_fit_n_used",
+    "fallback_reason",
+    "is_partial_final_window",
+    "original_file_duration_sec",
+    "continuous_window_sec",
+    "continuous_step_sec",
+    "acquisition_mode",
+]
+
 
 class GuidedContinuousRwdTonicRunError(RuntimeError):
     """A narrow refusal while executing or publishing one continuous-RWD
@@ -199,82 +201,654 @@ def _write_tonic_trace_cache(
     included_roi_ids: tuple[str, ...],
     config: Config,
     window_timing: dict | None = None,
-) -> None:
-    """Republish C4b's already-established per-segment ``delta_f`` (the
-    native tonic result -- see module docstring) through the existing,
-    unmodified tonic-mode ``Hdf5TraceCacheWriter``, one storage chunk (all
-    canonical ROIs) at a time.
+) -> dict[str, Any]:
+    """Compute and publish the native continuous tonic result.
 
-    No correction mathematics runs here: every array is read back verbatim
-    from the already-validated D1 corrected cache and copied into the tonic
-    cache's ``deltaF`` field via the writer's own existing dispatch
-    (``mode="tonic"``). Bounded to one chunk's arrays across all ROIs at a
-    time, never the full recording.
+    Raw signal/reference arrays are read from the accepted continuous cache.
+    The corrected ``delta_f`` arrays are deliberately not read: the native
+    tonic result is computed once per ROI from the full recording and then
+    written through the existing tonic-cache plumbing. The cache's historical
+    ``deltaF`` field carries the authoritative per-sample tonic trace so older
+    cache readers still have a bounded trace to display; the summary table and
+    saved Results image carry its explicit method and units.
     """
+    method_by_roi: dict[str, dict[str, Any]] = {}
+    for roi_id in included_roi_ids:
+        method_by_roi[roi_id] = _prepare_native_roi_tonic_method(
+            roi_id,
+            _native_cache_roi_window_factory(
+                corrected_cache_path,
+                included_roi_ids=included_roi_ids,
+                window_timing=window_timing,
+                roi=roi_id,
+            ),
+        )
+
+    writer = Hdf5TraceCacheWriter(tonic_cache_path, "tonic", config)
+    rows_by_roi: dict[str, list[dict[str, Any]]] = {
+        roi_id: [] for roi_id in included_roi_ids
+    }
+    chunk_ids: list[int] = []
+    try:
+        for chunk_id, windows_by_roi in _load_native_tonic_windows(
+            corrected_cache_path,
+            included_roi_ids=included_roi_ids,
+            window_timing=window_timing,
+        ):
+            sig_cols = []
+            uv_cols = []
+            tonic_cols = []
+            time_sec = None
+            fs_hz = None
+            source_file = ""
+            window_meta: dict[str, Any] = {}
+            tonic_trace: np.ndarray | None = None
+            for roi_id in included_roi_ids:
+                window = windows_by_roi[roi_id]
+                if time_sec is None:
+                    time_sec = np.asarray(window["time_sec"], dtype=np.float64)
+                    fs_hz = float(window["fs_hz"])
+                    source_file = str(window["meta"].get("source_file", ""))
+                    meta = window["meta"]
+                    window_meta = {
+                        "acquisition_mode": "continuous",
+                        "window_index": float(meta["window_index"]),
+                        "window_start_sec": float(meta["window_start_sec"]),
+                        "window_end_sec": float(meta["window_end_sec"]),
+                        "window_duration_sec": float(meta["window_duration_sec"]),
+                        "is_partial_final_window": bool(
+                            meta.get("is_partial_final_window", False)
+                        ),
+                    }
+                    for key in ("original_file_duration_sec",):
+                        value = meta.get(key)
+                        if value is not None and np.isfinite(float(value)):
+                            window_meta[key] = float(value)
+                    if window_timing is not None:
+                        window_meta.update(
+                            {
+                                "continuous_window_sec": float(
+                                    window_timing["window_length_sec"]
+                                ),
+                                "continuous_step_sec": float(
+                                    window_timing["window_step_sec"]
+                                ),
+                            }
+                        )
+                sig_cols.append(np.asarray(window["sig"], dtype=np.float64))
+                uv_cols.append(np.asarray(window["uv"], dtype=np.float64))
+                row, tonic_trace = _build_native_tonic_window_result(
+                    roi_id,
+                    window,
+                    method_by_roi[roi_id],
+                )
+                rows_by_roi[roi_id].append(row)
+                tonic_cols.append(tonic_trace)
+
+            chunk = Chunk(
+                chunk_id=int(chunk_id),
+                source_file=source_file,
+                format="rwd",
+                time_sec=time_sec,
+                uv_raw=np.column_stack(uv_cols),
+                sig_raw=np.column_stack(sig_cols),
+                delta_f=np.column_stack(tonic_cols),
+                fs_hz=float(fs_hz),
+                channel_names=list(included_roi_ids),
+                metadata=window_meta,
+            )
+            writer.add_chunk(chunk, chunk_id=int(chunk_id), source_file=source_file)
+            chunk_ids.append(int(chunk_id))
+            # Drop the completed window's raw and tonic arrays before asking
+            # the cache generator for the next output window.
+            del chunk, windows_by_roi, sig_cols, uv_cols, tonic_cols
+            del time_sec, fs_hz, source_file, window_meta, tonic_trace
+        if not chunk_ids:
+            raise GuidedContinuousRwdTonicRunError(
+                "The accepted continuous cache contains no tonic output windows."
+            )
+        for roi_id in included_roi_ids:
+            if not any(
+                row["tonic_status"] == TONIC_STATUS_VALID
+                for row in rows_by_roi[roi_id]
+            ):
+                raise GuidedContinuousRwdTonicRunError(
+                    f"Native tonic produced no valid output for ROI {roi_id!r}."
+                )
+        writer.finalize()
+    except Exception:
+        writer.abort()
+        raise
+
+    results_by_roi = {
+        roi_id: {
+            "rows": rows_by_roi[roi_id],
+            "tonic_method": method_by_roi[roi_id]["tonic_method"],
+            "units": method_by_roi[roi_id]["units"],
+            "tonic_fallback": bool(method_by_roi[roi_id]["tonic_fallback"]),
+            "fallback_reason": method_by_roi[roi_id]["fallback_reason"],
+        }
+        for roi_id in included_roi_ids
+    }
+    return {
+        "by_roi": results_by_roi,
+        "method_by_roi": {
+            roi_id: result["tonic_method"]
+            for roi_id, result in results_by_roi.items()
+        },
+        "units_by_roi": {
+            roi_id: result["units"]
+            for roi_id, result in results_by_roi.items()
+        },
+        "fallback_by_roi": {
+            roi_id: bool(result["tonic_fallback"])
+            for roi_id, result in results_by_roi.items()
+        },
+        "fallback_reason_by_roi": {
+            roi_id: str(result["fallback_reason"])
+            for roi_id, result in results_by_roi.items()
+        },
+    }
+
+
+def _load_native_tonic_windows(
+    corrected_cache_path: str,
+    *,
+    included_roi_ids: tuple[str, ...],
+    window_timing: dict[str, Any] | None,
+) -> Iterator[tuple[int, dict[str, dict[str, Any]]]]:
+    """Yield one existing persisted continuous output window at a time."""
     source_cache = open_phasic_cache(corrected_cache_path)
     try:
-        chunk_ids = list_cache_chunk_ids(source_cache)
-        writer = Hdf5TraceCacheWriter(tonic_cache_path, "tonic", config)
-        try:
-            for chunk_id in chunk_ids:
-                sig_cols = []
-                uv_cols = []
-                delta_cols = []
-                time_sec = None
-                fs_hz = None
-                source_file = ""
-                window_meta: dict[str, float] = {}
-                for roi_id in included_roi_ids:
-                    attrs = load_cache_chunk_attrs(source_cache, roi_id, int(chunk_id))
-                    t, sig, uv, delta_f = load_cache_chunk_fields(
-                        source_cache, roi_id, int(chunk_id),
-                        ["time_sec", "sig_raw", "uv_raw", "delta_f"],
-                    )
-                    if time_sec is None:
-                        time_sec = np.asarray(t, dtype=np.float64)
-                        fs_hz = float(attrs["fs_hz"])
-                        source_file = str(attrs.get("source_file", ""))
-                        window_meta = {
-                            "acquisition_mode": "continuous",
-                            "window_index": float(attrs["window_index"]),
-                            "window_start_sec": float(attrs["window_start_sec"]),
-                            "window_end_sec": float(attrs["window_end_sec"]),
-                            "window_duration_sec": float(attrs["window_duration_sec"]),
-                        }
-                        if window_timing is not None:
-                            window_meta.update(
-                                {
-                                    "continuous_window_sec": float(
-                                        window_timing["window_length_sec"]
-                                    ),
-                                    "continuous_step_sec": float(
-                                        window_timing["window_step_sec"]
-                                    ),
-                                }
-                            )
-                    sig_cols.append(np.asarray(sig, dtype=np.float64))
-                    uv_cols.append(np.asarray(uv, dtype=np.float64))
-                    delta_cols.append(np.asarray(delta_f, dtype=np.float64))
-
-                chunk = Chunk(
-                    chunk_id=int(chunk_id),
-                    source_file=source_file,
-                    format="rwd",
-                    time_sec=time_sec,
-                    uv_raw=np.column_stack(uv_cols),
-                    sig_raw=np.column_stack(sig_cols),
-                    delta_f=np.column_stack(delta_cols),
-                    fs_hz=float(fs_hz),
-                    channel_names=list(included_roi_ids),
-                    metadata=window_meta,
+        chunk_ids = [int(chunk_id) for chunk_id in list_cache_chunk_ids(source_cache)]
+        if not chunk_ids:
+            raise GuidedContinuousRwdTonicRunError(
+                "The accepted continuous cache contains no tonic output windows."
+            )
+        for chunk_id in chunk_ids:
+            windows_by_roi: dict[str, dict[str, Any]] = {}
+            canonical_time: np.ndarray | None = None
+            for roi_id in included_roi_ids:
+                attrs = load_cache_chunk_attrs(source_cache, roi_id, chunk_id)
+                time_sec, sig_raw, uv_raw = load_cache_chunk_fields(
+                    source_cache,
+                    roi_id,
+                    chunk_id,
+                    ["time_sec", "sig_raw", "uv_raw"],
                 )
-                writer.add_chunk(chunk, chunk_id=int(chunk_id), source_file=source_file)
-            writer.finalize()
-        except Exception:
-            writer.abort()
-            raise
+                time_sec = np.asarray(time_sec, dtype=np.float64).reshape(-1)
+                sig_raw = np.asarray(sig_raw, dtype=np.float64).reshape(-1)
+                uv_raw = np.asarray(uv_raw, dtype=np.float64).reshape(-1)
+                if (
+                    time_sec.size == 0
+                    or sig_raw.shape != time_sec.shape
+                    or uv_raw.shape != time_sec.shape
+                ):
+                    raise GuidedContinuousRwdTonicRunError(
+                        f"Native tonic raw window shape mismatch for ROI {roi_id!r}, "
+                        f"chunk {chunk_id}."
+                    )
+                if canonical_time is None:
+                    canonical_time = time_sec
+                elif not np.array_equal(canonical_time, time_sec):
+                    raise GuidedContinuousRwdTonicRunError(
+                        f"Native tonic raw window timestamps disagree across ROIs "
+                        f"for chunk {chunk_id}."
+                    )
+                meta = _window_metadata_row(
+                    attrs, roi=roi_id, chunk_id=chunk_id
+                )
+                if window_timing is not None:
+                    if not np.isfinite(float(meta["continuous_window_sec"])):
+                        meta["continuous_window_sec"] = float(
+                            window_timing["window_length_sec"]
+                        )
+                    if not np.isfinite(float(meta["continuous_step_sec"])):
+                        meta["continuous_step_sec"] = float(
+                            window_timing["window_step_sec"]
+                        )
+                windows_by_roi[roi_id] = {
+                    "chunk_id": chunk_id,
+                    "time_sec": time_sec,
+                    "sig": sig_raw,
+                    "uv": uv_raw,
+                    "fs_hz": float(attrs["fs_hz"]),
+                    "meta": meta,
+                }
+            yield chunk_id, windows_by_roi
+            del windows_by_roi
     finally:
         source_cache.close()
+
+
+def _native_cache_roi_window_factory(
+    corrected_cache_path: str,
+    *,
+    included_roi_ids: tuple[str, ...],
+    window_timing: dict[str, Any] | None,
+    roi: str,
+) -> Callable[[], Iterator[dict[str, Any]]]:
+    """Return a fresh bounded cache traversal for one ROI."""
+    def factory() -> Iterator[dict[str, Any]]:
+        for _chunk_id, windows_by_roi in _load_native_tonic_windows(
+            corrected_cache_path,
+            included_roi_ids=included_roi_ids,
+            window_timing=window_timing,
+        ):
+            yield windows_by_roi[roi]
+
+    return factory
+
+
+def _tonic_distribution_stats(values: np.ndarray) -> dict[str, float]:
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return {
+            "tonic_mean": np.nan,
+            "tonic_median": np.nan,
+            "tonic_min": np.nan,
+            "tonic_max": np.nan,
+            "tonic_p05": np.nan,
+            "tonic_p95": np.nan,
+        }
+    return {
+        "tonic_mean": float(np.mean(finite)),
+        "tonic_median": float(np.median(finite)),
+        "tonic_min": float(np.min(finite)),
+        "tonic_max": float(np.max(finite)),
+        "tonic_p05": float(np.percentile(finite, 5.0)),
+        "tonic_p95": float(np.percentile(finite, 95.0)),
+    }
+
+
+def _tonic_row(
+    roi: str,
+    window: dict[str, Any],
+    *,
+    method: str,
+    units: str,
+    fallback: bool,
+    fallback_reason: str,
+) -> dict[str, Any]:
+    row = dict(window["meta"])
+    row.update(
+        {
+            "roi": str(roi),
+            "tonic_value": np.nan,
+            "tonic_status": TONIC_STATUS_UNAVAILABLE,
+            "tonic_method": method,
+            "units": units,
+            "tonic_percentile": TONIC_PERCENTILE,
+            "tonic_fallback": bool(fallback),
+            "tonic_n_finite": 0,
+            "tonic_nan_fraction": np.nan,
+            "global_slope": np.nan,
+            "global_intercept": np.nan,
+            "global_fit_n_used": np.nan,
+            "fallback_reason": fallback_reason,
+        }
+    )
+    row.update(_tonic_distribution_stats(np.asarray([], dtype=float)))
+    return row
+
+
+def _global_fit_sample_positions(n_pairs: int) -> np.ndarray:
+    """Match the bounded deterministic sampling in the existing robust fit."""
+    n_pairs = int(n_pairs)
+    if n_pairs <= GLOBAL_FIT_MAX_POINTS:
+        return np.arange(max(0, n_pairs), dtype=np.int64)
+    step = n_pairs / float(GLOBAL_FIT_MAX_POINTS)
+    positions = np.arange(0, n_pairs, step).astype(np.int64)
+    positions = np.unique(positions)
+    return positions[positions < n_pairs]
+
+
+def _count_finite_pairs(
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+) -> int:
+    total = 0
+    for window in window_factory():
+        sig = np.asarray(window["sig"], dtype=float)
+        uv = np.asarray(window["uv"], dtype=float)
+        total += int(np.count_nonzero(np.isfinite(sig) & np.isfinite(uv)))
+        del sig, uv, window
+    return total
+
+
+def _collect_global_fit_sample(
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+    selected_positions: np.ndarray,
+    total_pairs: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collect only the bounded paired sample consumed by the robust fit."""
+    sample_size = int(selected_positions.size)
+    sample_sig = np.empty(sample_size, dtype=np.float64)
+    sample_uv = np.empty(sample_size, dtype=np.float64)
+    fill = 0
+    pair_offset = 0
+    for window in window_factory():
+        sig = np.asarray(window["sig"], dtype=float)
+        uv = np.asarray(window["uv"], dtype=float)
+        finite_indices = np.flatnonzero(np.isfinite(sig) & np.isfinite(uv))
+        n_finite = int(finite_indices.size)
+        if n_finite == 0:
+            del finite_indices, sig, uv, window
+            continue
+        if sample_size == total_pairs:
+            sample_sig[fill : fill + n_finite] = sig[finite_indices]
+            sample_uv[fill : fill + n_finite] = uv[finite_indices]
+            fill += n_finite
+            pair_offset += n_finite
+            del finite_indices, sig, uv, window
+            continue
+
+        global_positions = pair_offset + np.arange(n_finite, dtype=np.int64)
+        destinations = np.searchsorted(
+            selected_positions, global_positions, side="left"
+        )
+        in_range = destinations < sample_size
+        matches = np.zeros(n_finite, dtype=bool)
+        matches[in_range] = (
+            selected_positions[destinations[in_range]]
+            == global_positions[in_range]
+        )
+        if np.any(matches):
+            selected_destinations = destinations[matches]
+            sample_sig[selected_destinations] = sig[finite_indices[matches]]
+            sample_uv[selected_destinations] = uv[finite_indices[matches]]
+            fill += int(np.count_nonzero(matches))
+        pair_offset += n_finite
+        del finite_indices, global_positions, destinations, matches, sig, uv, window
+
+    if pair_offset != int(total_pairs) or fill != sample_size:
+        raise GuidedContinuousRwdTonicRunError(
+            "Native tonic bounded global-fit sampling lost paired samples."
+        )
+    return sample_uv, sample_sig
+
+
+def _fit_global_from_window_factory(
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Fit the existing robust model from a bounded deterministic sample."""
+    total_pairs = _count_finite_pairs(window_factory)
+    selected_positions = _global_fit_sample_positions(total_pairs)
+    if selected_positions.size == 0:
+        return {
+            "slope": 0.0,
+            "intercept": 0.0,
+            "fit_ok": False,
+            "n_used": 0,
+            "n_pairs": total_pairs,
+        }
+    sample_uv, sample_sig = _collect_global_fit_sample(
+        window_factory, selected_positions, total_pairs
+    )
+    try:
+        slope, intercept, fit_ok, n_used = compute_global_iso_fit_robust(
+            sample_uv,
+            sample_sig,
+            max_points=GLOBAL_FIT_MAX_POINTS,
+        )
+    except Exception:
+        slope, intercept, fit_ok, n_used = 0.0, 0.0, False, 0
+    return {
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "fit_ok": bool(fit_ok),
+        "n_used": int(n_used),
+        "n_pairs": total_pairs,
+    }
+
+
+def _has_valid_primary_output(
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+    *,
+    slope: float,
+    intercept: float,
+) -> bool:
+    for window in window_factory():
+        sig = np.asarray(window["sig"], dtype=float)
+        uv = np.asarray(window["uv"], dtype=float)
+        fitted = apply_global_fit(uv, slope, intercept)
+        usable = (
+            np.isfinite(sig)
+            & np.isfinite(uv)
+            & np.isfinite(fitted)
+            & (fitted > MIN_FITTED_ISOSBESTIC)
+        )
+        if np.any(usable):
+            dff = (sig[usable] - fitted[usable]) / fitted[usable]
+            if np.any(np.isfinite(dff)):
+                return True
+        del fitted, usable, sig, uv, window
+    return False
+
+
+def _collect_fallback_window_values(
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Keep only the scalar raw floors and midpoint times needed by fallback."""
+    values: list[dict[str, Any]] = []
+    for window in window_factory():
+        signal = np.asarray(window["sig"], dtype=float)
+        finite_signal = signal[np.isfinite(signal)]
+        values.append(
+            {
+                "chunk_id": int(window["chunk_id"]),
+                "midpoint_sec": (
+                    float(window["meta"]["window_start_sec"])
+                    + float(window["meta"]["window_end_sec"])
+                )
+                / 2.0,
+                "raw_signal_floor": (
+                    float(np.percentile(finite_signal, TONIC_PERCENTILE))
+                    if finite_signal.size
+                    else np.nan
+                ),
+            }
+        )
+        del finite_signal, signal, window
+    return values
+
+
+def _fit_recording_fallback(
+    roi: str,
+    values: list[dict[str, Any]],
+    *,
+    fallback_reason: str,
+) -> dict[str, Any]:
+    usable_positions = [
+        index
+        for index, value in enumerate(values)
+        if np.isfinite(float(value["raw_signal_floor"]))
+    ]
+    if len(usable_positions) < 3:
+        raise GuidedContinuousRwdTonicRunError(
+            f"Native tonic signal-only fallback failed for ROI {roi!r}: "
+            f"only {len(usable_positions)} valid output windows "
+            f"after {fallback_reason}."
+        )
+    times = np.asarray(
+        [values[index]["midpoint_sec"] for index in usable_positions],
+        dtype=float,
+    )
+    baselines = np.asarray(
+        [values[index]["raw_signal_floor"] for index in usable_positions],
+        dtype=float,
+    )
+    bleach, bleach_meta = _fit_exponential_bleach_trend(times, baselines)
+    if bleach_meta.get("fallback", False):
+        raise GuidedContinuousRwdTonicRunError(
+            f"Native tonic signal-only fallback failed for ROI {roi!r}: "
+            f"bleach fit failed ({bleach_meta.get('reason', 'unknown')}) "
+            f"after {fallback_reason}."
+        )
+    anchor = float(bleach_meta.get("anchor", np.nan))
+    if not np.isfinite(anchor) or not np.all(np.isfinite(bleach)):
+        raise GuidedContinuousRwdTonicRunError(
+            f"Native tonic signal-only fallback failed for ROI {roi!r}: "
+            "the recording-level bleach trend is not finite."
+        )
+    corrected_by_chunk = {
+        int(values[position]["chunk_id"]): float(
+            baselines[offset] - bleach[offset] + anchor
+        )
+        for offset, position in enumerate(usable_positions)
+    }
+    return {
+        "slope": np.nan,
+        "intercept": np.nan,
+        "n_used": np.nan,
+        "tonic_method": TONIC_METHOD_SIGNAL_ONLY,
+        "units": TONIC_UNITS_RAW_AU,
+        "tonic_fallback": True,
+        "fallback_reason": fallback_reason,
+        "fallback_value_by_chunk": corrected_by_chunk,
+    }
+
+
+def _prepare_native_roi_tonic_method(
+    roi: str,
+    window_factory: Callable[[], Iterable[dict[str, Any]]],
+) -> dict[str, Any]:
+    fit = _fit_global_from_window_factory(window_factory)
+    slope = float(fit["slope"])
+    intercept = float(fit["intercept"])
+    if (
+        fit["fit_ok"]
+        and np.isfinite(slope)
+        and slope > 0.0
+        and _has_valid_primary_output(
+            window_factory, slope=slope, intercept=intercept
+        )
+    ):
+        return {
+            "slope": slope,
+            "intercept": intercept,
+            "n_used": int(fit["n_used"]),
+            "tonic_method": TONIC_METHOD_GLOBAL_ISOSBESTIC,
+            "units": TONIC_UNITS_FRACTIONAL,
+            "tonic_fallback": False,
+            "fallback_reason": "",
+            "fallback_value_by_chunk": {},
+        }
+
+    if not fit["fit_ok"]:
+        fallback_reason = "global_fit_failed"
+    elif not np.isfinite(slope) or slope <= 0.0:
+        fallback_reason = "nonpositive_global_slope"
+    else:
+        fallback_reason = "invalid_global_denominator"
+    fallback_values = _collect_fallback_window_values(window_factory)
+    return _fit_recording_fallback(
+        roi,
+        fallback_values,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _build_native_tonic_window_result(
+    roi: str,
+    window: dict[str, Any],
+    method: dict[str, Any],
+) -> tuple[dict[str, Any], np.ndarray]:
+    """Calculate one window's scalar row and bounded cache trace."""
+    signal = np.asarray(window["sig"], dtype=float)
+    reference = np.asarray(window["uv"], dtype=float)
+    row = _tonic_row(
+        roi,
+        window,
+        method=method["tonic_method"],
+        units=method["units"],
+        fallback=bool(method["tonic_fallback"]),
+        fallback_reason=str(method["fallback_reason"]),
+    )
+    if not method["tonic_fallback"]:
+        fitted = apply_global_fit(
+            reference,
+            float(method["slope"]),
+            float(method["intercept"]),
+        )
+        usable = (
+            np.isfinite(signal)
+            & np.isfinite(reference)
+            & np.isfinite(fitted)
+            & (fitted > MIN_FITTED_ISOSBESTIC)
+        )
+        tonic_trace = np.full(signal.shape, np.nan, dtype=float)
+        tonic_trace[usable] = (signal[usable] - fitted[usable]) / fitted[usable]
+        finite_tonic = tonic_trace[np.isfinite(tonic_trace)]
+        row["global_slope"] = float(method["slope"])
+        row["global_intercept"] = float(method["intercept"])
+        row["global_fit_n_used"] = int(method["n_used"])
+        row["tonic_n_finite"] = int(finite_tonic.size)
+        row["tonic_nan_fraction"] = (
+            1.0 - finite_tonic.size / float(signal.size)
+            if signal.size
+            else np.nan
+        )
+        if not np.any(np.isfinite(signal) & np.isfinite(reference)):
+            row["tonic_status"] = TONIC_STATUS_NO_FINITE
+        elif finite_tonic.size == 0:
+            row["tonic_status"] = TONIC_STATUS_INVALID_DENOMINATOR
+        else:
+            row["tonic_status"] = TONIC_STATUS_VALID
+            row["tonic_value"] = float(
+                np.percentile(finite_tonic, TONIC_PERCENTILE)
+            )
+            row.update(_tonic_distribution_stats(finite_tonic))
+        return row, tonic_trace
+
+    finite_signal = signal[np.isfinite(signal)]
+    finite_count = int(finite_signal.size)
+    row["tonic_n_finite"] = finite_count
+    row["tonic_nan_fraction"] = (
+        1.0 - finite_count / float(signal.size) if signal.size else np.nan
+    )
+    row["tonic_status"] = (
+        TONIC_STATUS_VALID if finite_count else TONIC_STATUS_NO_FINITE
+    )
+    corrected = method["fallback_value_by_chunk"].get(int(window["chunk_id"]))
+    tonic_trace = np.full(signal.shape, np.nan, dtype=float)
+    if corrected is not None and np.isfinite(float(corrected)):
+        row["tonic_status"] = TONIC_STATUS_VALID
+        row["tonic_value"] = float(corrected)
+        row.update(_tonic_distribution_stats(np.full(finite_count, corrected)))
+        tonic_trace[np.isfinite(signal)] = float(corrected)
+    elif row["tonic_status"] == TONIC_STATUS_VALID:
+        row["tonic_status"] = TONIC_STATUS_UNAVAILABLE
+        row["fallback_reason"] = (
+            f"{method['fallback_reason']};bleach_fit_failed:nonfinite_trend"
+        )
+    return row, tonic_trace
+
+
+def _compute_native_roi_tonic_result(
+    roi: str, windows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Compute one ROI from a bounded window sequence for deterministic tests."""
+    if not windows:
+        raise GuidedContinuousRwdTonicRunError(
+            f"Native tonic has no output windows for ROI {roi!r}."
+        )
+    method = _prepare_native_roi_tonic_method(roi, lambda: iter(windows))
+    rows = [
+        _build_native_tonic_window_result(roi, window, method)[0]
+        for window in windows
+    ]
+    if not any(row["tonic_status"] == TONIC_STATUS_VALID for row in rows):
+        raise GuidedContinuousRwdTonicRunError(
+            f"Native tonic produced no valid output for ROI {roi!r}."
+        )
+    return {
+        "rows": rows,
+        "tonic_method": method["tonic_method"],
+        "units": method["units"],
+        "tonic_fallback": bool(method["tonic_fallback"]),
+        "fallback_reason": method["fallback_reason"],
+    }
 
 
 def _validate_tonic_cache(
@@ -319,39 +893,53 @@ def _validate_tonic_cache(
 
 
 def _generate_tonic_summary(
-    run_dir: str, tonic_out_dir: str, included_roi_ids: tuple[str, ...]
+    run_dir: str,
+    tonic_out_dir: str,
+    included_roi_ids: tuple[str, ...],
+    tonic_result: dict[str, Any],
 ) -> tuple[dict[str, str], dict[str, int]]:
-    """Invoke the existing, unmodified continuous-mode tonic generator
-    against the genuine tonic-mode cache.
+    """Write the native recording-wide tonic result into existing table paths.
 
     Returns ``(relative_paths_by_roi, row_counts_by_roi)``. Raises
-    ``GuidedContinuousRwdTonicRunError`` if the generator skipped its output
-    or did not cover every canonical included ROI.
+    ``GuidedContinuousRwdTonicRunError`` if any ROI is missing, mixed-method,
+    or has no output rows.
     """
-    result = generate_continuous_tonic_summary(tonic_out_dir, run_dir)
-    if result.get("skipped_outputs"):
+    cache_path = os.path.join(tonic_out_dir, TONIC_CACHE_FILENAME)
+    if not os.path.isfile(cache_path):
         raise GuidedContinuousRwdTonicRunError(
-            "The tonic window-summary generator skipped its output: "
-            f"{result['skipped_outputs']!r}"
+            f"The native tonic cache is missing before summary publication: {cache_path}"
         )
-    processed = set(result.get("rois_processed") or ())
-    if processed != set(included_roi_ids):
-        raise GuidedContinuousRwdTonicRunError(
-            "The tonic window-summary generator did not cover every canonical "
-            f"included ROI: processed={sorted(processed)!r}, "
-            f"expected={sorted(included_roi_ids)!r}."
-        )
-    row_counts = result.get("row_counts") or {}
     relative_paths = {
         roi_id: f"{roi_id}/tables/continuous_tonic_window_summary.csv"
         for roi_id in included_roi_ids
     }
+    row_counts_by_roi: dict[str, int] = {}
     for roi_id, relative_path in relative_paths.items():
-        if not os.path.isfile(os.path.join(run_dir, relative_path)):
+        roi_result = (tonic_result.get("by_roi") or {}).get(roi_id)
+        if not isinstance(roi_result, dict):
             raise GuidedContinuousRwdTonicRunError(
-                f"Expected tonic window-summary artifact is missing: {relative_path}"
+                f"Native tonic did not produce a result for ROI {roi_id!r}."
             )
-    row_counts_by_roi = {roi_id: int(row_counts.get(roi_id, 0)) for roi_id in included_roi_ids}
+        rows = list(roi_result.get("rows") or [])
+        if not rows:
+            raise GuidedContinuousRwdTonicRunError(
+                f"Native tonic produced no output rows for ROI {roi_id!r}."
+            )
+        methods = {str(row.get("tonic_method", "")) for row in rows}
+        units = {str(row.get("units", "")) for row in rows}
+        if len(methods) != 1 or len(units) != 1:
+            raise GuidedContinuousRwdTonicRunError(
+                f"Native tonic selected mixed methods or units for ROI {roi_id!r}: "
+                f"methods={sorted(methods)!r}, units={sorted(units)!r}."
+            )
+        output_path = os.path.join(run_dir, relative_path)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        frame = pd.DataFrame(rows, columns=TONIC_SUMMARY_COLUMNS)
+        frame = frame.sort_values(
+            ["window_index", "chunk_id"], kind="stable"
+        ).reset_index(drop=True)
+        frame.to_csv(output_path, index=False)
+        row_counts_by_roi[roi_id] = int(len(frame))
     return relative_paths, row_counts_by_roi
 
 
@@ -369,9 +957,11 @@ def execute_guided_continuous_rwd_tonic_run(
     cancellation_requested: Callable[[], bool] | None = None,
     run_started_callback: Callable[[str, str], None] | None = None,
 ) -> GuidedContinuousRwdTonicRunResult:
-    """Produce one coherent continuous-RWD run whose established tonic
-    computation has completed and been published through the existing tonic
-    trace-cache writer/reader.
+    """Produce one coherent Native Guided continuous-RWD tonic run.
+
+    Tonic is computed from one recording-wide raw signal/reference method per
+    ROI, summarized over the accepted continuous output windows, and published
+    through the existing tonic trace-cache writer/reader.
 
     Accepts exactly the same accepted continuous authorities as
     :func:`photometry_pipeline.guided_continuous_rwd_correction_run.
@@ -380,11 +970,11 @@ def execute_guided_continuous_rwd_tonic_run(
     allocate the run directory -> write a running status -> build the C4c
     traversal and persist it through D1 -> cross-check the finalized
     correction cache against the accepted authorities and the C4c completion
-    -> republish the established per-segment tonic result into a genuine
+    -> compute and publish the recording-wide tonic result into a genuine
     ``_analysis/tonic_out/tonic_trace_cache.h5`` via the existing tonic-mode
     writer -> write the existing ``_analysis/tonic_out/{run_report.json,
     config_used.yaml}`` pair via the existing production report writer ->
-    generate the existing continuous tonic window summary from that cache ->
+    write the existing continuous tonic window summary from that result ->
     write the run-level ``run_report.json`` -> build and write
     ``MANIFEST.json`` (with the tonic continuous-window index) -> write the
     final success ``status.json`` -> run the existing completed-run
@@ -456,7 +1046,7 @@ def execute_guided_continuous_rwd_tonic_run(
             run_mode=run_mode,
             phase="analyzing_tonic_signal",
         )
-        _write_tonic_trace_cache(
+        tonic_result = _write_tonic_trace_cache(
             corrected_cache_path=cache_path,
             tonic_cache_path=tonic_cache_path,
             included_roi_ids=included_roi_ids,
@@ -475,7 +1065,7 @@ def execute_guided_continuous_rwd_tonic_run(
         generate_run_report(config, tonic_out_dir, traces_only=False)
 
         tonic_paths, tonic_row_counts = _generate_tonic_summary(
-            run_dir, tonic_out_dir, included_roi_ids
+            run_dir, tonic_out_dir, included_roi_ids, tonic_result
         )
         _write_continuous_progress_status(
             run_dir,
@@ -529,6 +1119,12 @@ def execute_guided_continuous_rwd_tonic_run(
                 ),
                 "output_relative_paths": tonic_paths,
                 "window_row_counts": tonic_row_counts,
+                "tonic_method_by_roi": tonic_result["method_by_roi"],
+                "tonic_units_by_roi": tonic_result["units_by_roi"],
+                "tonic_fallback_by_roi": tonic_result["fallback_by_roi"],
+                "tonic_fallback_reason_by_roi": tonic_result[
+                    "fallback_reason_by_roi"
+                ],
             },
             "saved_artifacts": saved_artifacts,
             "continuous_correction_pass_completion_identity": completion.completion_identity,

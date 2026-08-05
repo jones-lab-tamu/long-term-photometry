@@ -59,12 +59,28 @@ _TONIC_SUMMARY_REQUIRED_COLUMNS = frozenset(
         "tonic_p95",
         "tonic_n_finite",
         "tonic_nan_fraction",
+        "tonic_value",
+        "tonic_status",
+        "tonic_method",
+        "units",
+        "tonic_percentile",
+        "tonic_fallback",
+        "fallback_reason",
         "is_partial_final_window",
         "continuous_window_sec",
         "continuous_step_sec",
         "acquisition_mode",
     }
 )
+
+_NATIVE_TONIC_METHOD_LABELS = {
+    "Global-isosbestic ΔF/F₀": "Global-isosbestic ΔF/F₀",
+    "Signal-only bleach corrected": "Signal-only bleach corrected",
+}
+_NATIVE_TONIC_UNITS_LABELS = {
+    "fractional ΔF/F₀": "fractional ΔF/F₀",
+    "raw fluorescence AU": "raw fluorescence AU",
+}
 
 CONTINUOUS_ARTIFACT_MAX_POINTS = CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
 
@@ -1338,6 +1354,7 @@ def _publish_tonic_overview(
     run_dir: str,
     roi: str,
     timeline_contract: dict[str, Any],
+    tonic_summary: pd.DataFrame,
     max_plot_points: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cache_path = os.path.join(run_dir, "_analysis", "tonic_out", "tonic_trace_cache.h5")
@@ -1348,6 +1365,50 @@ def _publish_tonic_overview(
             cache, roi, max_points=max_plot_points
         )
     x_sec = continuous_plot_coordinates(elapsed, timeline_contract)
+    summary = tonic_summary.copy()
+    summary["window_midpoint_sec"] = (
+        pd.to_numeric(summary["window_start_sec"], errors="coerce")
+        + pd.to_numeric(summary["window_end_sec"], errors="coerce")
+    ) / 2.0
+    tonic_data = build_window_plot_data(
+        summary,
+        timeline_contract=timeline_contract,
+        value_column="tonic_value",
+    )
+    methods = {
+        str(value).strip()
+        for value in summary["tonic_method"].dropna().astype(str)
+        if str(value).strip()
+    }
+    units = {
+        str(value).strip()
+        for value in summary["units"].dropna().astype(str)
+        if str(value).strip()
+    }
+    if len(methods) != 1 or len(units) != 1:
+        raise GuidedContinuousSavedArtifactError(
+            f"Native tonic summary has mixed or missing method/units for ROI {roi!r}: "
+            f"methods={sorted(methods)!r}, units={sorted(units)!r}."
+        )
+    method = next(iter(methods))
+    unit = next(iter(units))
+    method_label = _NATIVE_TONIC_METHOD_LABELS.get(method, method)
+    units_label = _NATIVE_TONIC_UNITS_LABELS.get(unit, unit)
+    fallback_values = {
+        str(value).strip().lower()
+        for value in summary["tonic_fallback"].dropna().astype(str)
+    }
+    if fallback_values not in ({"true"}, {"false"}):
+        raise GuidedContinuousSavedArtifactError(
+            f"Native tonic summary has mixed fallback status for ROI {roi!r}: "
+            f"{sorted(fallback_values)!r}."
+        )
+    fallback = fallback_values == {"true"}
+    fallback_reasons = {
+        str(value).strip()
+        for value in summary["fallback_reason"].dropna().astype(str)
+        if str(value).strip()
+    }
     data = {
         "elapsed_sec": elapsed,
         "x_sec": x_sec,
@@ -1377,16 +1438,22 @@ def _publish_tonic_overview(
     raw_ax.legend(loc="best")
 
     tonic_ax.plot(
-        data["x_hours"],
-        data["tonic_signal"],
+        tonic_data["x_hours"],
+        tonic_data["values"],
         linewidth=1.0,
         color="black",
-        label="Tonic signal (deltaF)",
+        marker="o",
+        markersize=3.5,
+        label=f"{method_label} (P2 per window)",
     )
     tonic_ax.set_xlabel(_timeline_axis_label(timeline_contract))
-    tonic_ax.set_ylabel("Tonic signal (deltaF)")
-    tonic_ax.set_title(f"{roi} Tonic overview")
-    tonic_ax.set_xlim(left=0.0, right=max(1.0, float(np.nanmax(data["x_hours"]))))
+    tonic_ax.set_ylabel(units_label)
+    tonic_ax.set_title(f"{roi} {method_label}")
+    x_max = max(
+        float(np.nanmax(data["x_hours"])),
+        float(np.nanmax(tonic_data["x_hours"])),
+    )
+    tonic_ax.set_xlim(left=0.0, right=max(1.0, x_max))
     tonic_ax.grid(True, alpha=0.3)
     tonic_ax.legend(loc="best")
     fig.tight_layout()
@@ -1398,7 +1465,23 @@ def _publish_tonic_overview(
         {
             "image_dimensions": list(dimensions),
             "timeline_mode": str(timeline_contract.get("timeline_mode")),
-            "trace_labels": ["Raw signal", "Raw reference", "Tonic signal (deltaF)"],
+            "trace_labels": [
+                "Raw signal",
+                "Raw reference",
+                f"{method_label} (P2 per window)",
+            ],
+            "tonic_method": method,
+            "tonic_method_label": method_label,
+            "tonic_units": unit,
+            "tonic_units_label": units_label,
+            "tonic_fallback": fallback,
+            "tonic_fallback_reason": "; ".join(sorted(fallback_reasons)),
+            "tonic_summary_percentile": float(
+                pd.to_numeric(
+                    summary["tonic_percentile"], errors="coerce"
+                ).dropna().iloc[0]
+            ),
+            "tonic_summary_points": int(tonic_data["values"].size),
         }
     )
     artifact = _artifact_record(
@@ -1409,6 +1492,12 @@ def _publish_tonic_overview(
         filename=TONIC_OVERVIEW_FILENAME,
         overview_sampling=details,
         image_dimensions=list(dimensions),
+        tonic_method=method,
+        tonic_method_label=method_label,
+        tonic_units=unit,
+        tonic_units_label=units_label,
+        tonic_fallback=fallback,
+        tonic_fallback_reason="; ".join(sorted(fallback_reasons)),
     )
     return artifact, details
 
@@ -1566,6 +1655,7 @@ def publish_guided_continuous_saved_artifacts(
                 run_dir=run_dir,
                 roi=roi,
                 timeline_contract=timeline_contract,
+                tonic_summary=tonic_summary,
                 max_plot_points=int(max_plot_points),
             )
             artifacts.append(tonic_artifact)
@@ -1614,6 +1704,22 @@ def publish_guided_continuous_saved_artifacts(
         "timeline": dict(timeline_contract),
         "correction_impact_selection_by_roi": correction_selection,
         "tonic_overview_sampling_by_roi": tonic_sampling_by_roi,
+        "tonic_method_by_roi": {
+            roi: details.get("tonic_method_label", "")
+            for roi, details in tonic_sampling_by_roi.items()
+        },
+        "tonic_units_by_roi": {
+            roi: details.get("tonic_units_label", "")
+            for roi, details in tonic_sampling_by_roi.items()
+        },
+        "tonic_fallback_by_roi": {
+            roi: bool(details.get("tonic_fallback", False))
+            for roi, details in tonic_sampling_by_roi.items()
+        },
+        "tonic_fallback_reason_by_roi": {
+            roi: str(details.get("tonic_fallback_reason", ""))
+            for roi, details in tonic_sampling_by_roi.items()
+        },
         "performance": performance,
         "timeline_label": timeline_mode_label(str(timeline_contract.get("timeline_mode", ""))),
     }

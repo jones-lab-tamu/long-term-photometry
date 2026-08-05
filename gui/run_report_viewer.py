@@ -2181,6 +2181,16 @@ class RunReportViewer(QWidget):
             lines.append(f"Plotted-day start: {timeline['fixed_daily_anchor_clock']}")
         if timeline.get("recording_start_clock"):
             lines.append(f"Recording start: {timeline['recording_start_clock']}")
+        if record.get("tonic_method_label"):
+            lines.append(f"Tonic method: {record['tonic_method_label']}")
+        if record.get("tonic_units_label"):
+            lines.append(f"Units: {record['tonic_units_label']}")
+        if "tonic_fallback" in record:
+            lines.append(
+                "Fallback: recording-level signal-only bleach correction"
+                if record.get("tonic_fallback") is True
+                else "Fallback: none"
+            )
         if record.get("correction_strategy_label"):
             lines.append(f"Correction: {record['correction_strategy_label']}")
         representative = record.get("representative_window")
@@ -2218,6 +2228,9 @@ class RunReportViewer(QWidget):
                 "Timeline:",
                 "Plotted-day start:",
                 "Recording start:",
+                "Tonic method:",
+                "Units:",
+                "Fallback:",
             )
             if selected_tab == TAB_PHASIC_SUMMARY:
                 allowed_prefixes += ("AUC units:",)

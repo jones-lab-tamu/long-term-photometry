@@ -385,7 +385,7 @@ def execute_guided_continuous_rwd_combined_run(
             completion=completion,
         )
 
-        # --- tonic publication, reading the one shared corrected cache ---
+        # --- tonic publication from raw channels in the one shared corrected cache ---
         _write_continuous_progress_status(
             run_dir,
             run_id=run_id,
@@ -393,7 +393,7 @@ def execute_guided_continuous_rwd_combined_run(
             phase="analyzing_tonic_signal",
         )
         os.makedirs(tonic_out_dir, exist_ok=True)
-        _write_tonic_trace_cache(
+        tonic_result = _write_tonic_trace_cache(
             corrected_cache_path=cache_path,
             tonic_cache_path=tonic_cache_path,
             included_roi_ids=included_roi_ids,
@@ -405,7 +405,7 @@ def execute_guided_continuous_rwd_combined_run(
         )
         generate_run_report(config, tonic_out_dir, traces_only=False)
         tonic_paths, tonic_row_counts = _generate_tonic_summary(
-            run_dir, tonic_out_dir, included_roi_ids
+            run_dir, tonic_out_dir, included_roi_ids, tonic_result
         )
 
         # --- phasic detection + publication, reading the same shared cache ---
@@ -550,6 +550,12 @@ def execute_guided_continuous_rwd_combined_run(
                 ),
                 "output_relative_paths": tonic_paths,
                 "window_row_counts": tonic_row_counts,
+                "tonic_method_by_roi": tonic_result["method_by_roi"],
+                "tonic_units_by_roi": tonic_result["units_by_roi"],
+                "tonic_fallback_by_roi": tonic_result["fallback_by_roi"],
+                "tonic_fallback_reason_by_roi": tonic_result[
+                    "fallback_reason_by_roi"
+                ],
             },
             "phasic_analysis": {
                 "trace_cache_relative_path": f"{PHASIC_ANALYSIS_RELATIVE_DIR}/{PHASIC_CACHE_FILENAME}".replace(
