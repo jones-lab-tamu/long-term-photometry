@@ -175,13 +175,13 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         tab_map = viewer._discover_region_tab_images(tmpdir)
 
         assert [os.path.basename(p) for p in tab_map["Verification"]] == ["phasic_correction_impact.png"]
-        assert [os.path.basename(p) for p in tab_map["Tonic"]] == [
+        assert [os.path.basename(p) for p in tab_map["Slow Signal"]] == [
             "tonic_session_summary.png"
         ]
         assert "tonic_overview.png" not in [
             os.path.basename(p) for paths in tab_map.values() for p in paths
         ]
-        assert [os.path.basename(p) for p in tab_map["Phasic Summary"]] == [
+        assert [os.path.basename(p) for p in tab_map["Event Summary"]] == [
             "phasic_auc_timeseries.png",
             "phasic_peak_rate_timeseries.png",
         ]
@@ -189,10 +189,10 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
             "continuous_phasic_dff_trace_overview.png",
             "continuous_tonic_trace_overview.png",
         ]
-        assert [os.path.basename(p) for p in tab_map["Phasic Sig/Iso"]] == ["phasic_sig_iso_day_000.png"]
-        assert [os.path.basename(p) for p in tab_map["Dynamic Fit"]] == ["phasic_dynamic_fit_day_000.png"]
-        assert [os.path.basename(p) for p in tab_map["Phasic dFF"]] == ["phasic_dFF_day_000.png"]
-        assert [os.path.basename(p) for p in tab_map["Phasic Stacked"]] == ["phasic_stacked_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Signal / Reference"]] == ["phasic_sig_iso_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Correction Reference"]] == ["phasic_dynamic_fit_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["dF/F"]] == ["phasic_dFF_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Stacked dF/F"]] == ["phasic_stacked_day_000.png"]
         assert "Phasic Raw" not in tab_map
 
 
@@ -209,15 +209,15 @@ def test_day_plot_captions_are_one_based_and_keep_filename_tooltips(qapp, tmp_pa
 
     viewer = RunReportViewer()
     try:
-        viewer._region_tab_images = {"Region0": {"Phasic Sig/Iso": paths}}
+        viewer._region_tab_images = {"Region0": {"Signal / Reference": paths}}
         viewer._region_combo.addItem("Region0")
         viewer._rebuild_tabs_for_selected_region()
 
-        assert viewer._image_title_label.text() == "Plotted day 1"
+        assert viewer._image_title_label.text() == "Signal / Reference — Plotted day 1"
         assert viewer._image_title_label.toolTip() == "phasic_sig_iso_day_000.png"
 
         viewer._on_next_image()
-        assert viewer._image_title_label.text() == "Plotted day 2"
+        assert viewer._image_title_label.text() == "Signal / Reference — Plotted day 2"
         assert viewer._image_title_label.toolTip() == "phasic_sig_iso_day_001.png"
     finally:
         viewer.close()
@@ -231,7 +231,7 @@ def test_unrecognized_day_plot_filename_falls_back_to_filename(qapp, tmp_path):
 
     viewer = RunReportViewer()
     try:
-        viewer._region_tab_images = {"Region0": {"Phasic Sig/Iso": [str(path)]}}
+        viewer._region_tab_images = {"Region0": {"Signal / Reference": [str(path)]}}
         viewer._region_combo.addItem("Region0")
         viewer._rebuild_tabs_for_selected_region()
 
@@ -248,22 +248,22 @@ def test_ambiguous_results_tabs_have_concise_tooltips_and_report_action_is_uncha
     try:
         viewer._region_tab_images = {
             "Region0": {
-                "Phasic Sig/Iso": ["missing_raw.png"],
-                "Dynamic Fit": ["missing_fit.png"],
-                "Phasic dFF": ["missing_dff.png"],
-                "Phasic Stacked": ["missing_stacked.png"],
-                "Phasic Summary": ["missing_summary.png"],
+                "Signal / Reference": ["missing_raw.png"],
+                "Correction Reference": ["missing_fit.png"],
+                "dF/F": ["missing_dff.png"],
+                "Stacked dF/F": ["missing_stacked.png"],
+                "Event Summary": ["missing_summary.png"],
             }
         }
         viewer._region_combo.addItem("Region0")
         viewer._rebuild_tabs_for_selected_region()
 
         expected = {
-            "Phasic Sig/Iso": "Raw signal and reference traces for each plotted day.",
-            "Dynamic Fit": "Dynamic fitted reference used for phasic correction.",
-            "Phasic dFF": "Reference-corrected phasic dF/F trace for each plotted day.",
-            "Phasic Stacked": "Stacked phasic traces comparing the plotted days.",
-            "Phasic Summary": "Summary plots of phasic event activity across plotted days.",
+            "Signal / Reference": "Raw signal and reference traces for each plotted day.",
+            "Correction Reference": "Signal used for correction and its reference.",
+            "dF/F": "Corrected dF/F trace for each plotted day.",
+            "Stacked dF/F": "Stacked corrected dF/F traces across plotted days.",
+            "Event Summary": "Detected event rate, count, and corrected signal area over time.",
         }
         for index in range(viewer._tabs.count()):
             label = viewer._tabs.tabText(index)
@@ -447,7 +447,7 @@ def test_mixed_native_review_switch_updates_strategy_and_feature_settings(qapp, 
     assert "mean" in viewer._selected_feature_settings_label.text()
     assert "threshold" in viewer._selected_feature_settings_label.text()
     assert viewer._region_tab_images["Region0"]["Verification"]
-    assert "Dynamic Fit" in viewer.available_view_tabs()
+    assert "Correction Reference" in viewer.available_view_tabs()
     assert viewer.phasic_review_model.sessions_for_roi("Region0")[0].fitted_reference is not None
 
     viewer._region_combo.setCurrentIndex(1)
@@ -457,7 +457,6 @@ def test_mixed_native_review_switch_updates_strategy_and_feature_settings(qapp, 
     assert "Baseline support:" in viewer._correction_summary_label.text()
     assert viewer._region_tab_images["Region1"]["Verification"]
     assert "Correction Reference" in viewer.available_view_tabs()
-    assert "Dynamic Fit" not in viewer.available_view_tabs()
     signal_only = viewer.phasic_review_model.sessions_for_roi("Region1")[0]
     assert signal_only.production_f0_baseline is not None
     assert signal_only.fitted_reference is None

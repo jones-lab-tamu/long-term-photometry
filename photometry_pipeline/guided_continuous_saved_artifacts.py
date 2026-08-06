@@ -34,6 +34,12 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
     open_tonic_cache,
 )
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    SUMMARY_TRACE_COLOR,
+)
 
 
 PHASIC_CORRECTION_IMPACT_FILENAME = "phasic_correction_impact.png"
@@ -74,11 +80,11 @@ _TONIC_SUMMARY_REQUIRED_COLUMNS = frozenset(
 )
 
 _NATIVE_TONIC_METHOD_LABELS = {
-    "Global-isosbestic ΔF/F₀": "Global-isosbestic ΔF/F₀",
-    "Signal-only bleach corrected": "Signal-only bleach corrected",
+    "Global-isosbestic ΔF/F₀": "Global reference-corrected dF/F₀",
+    "Signal-only bleach corrected": "Signal-only bleach-corrected fluorescence",
 }
 _NATIVE_TONIC_UNITS_LABELS = {
-    "fractional ΔF/F₀": "fractional ΔF/F₀",
+    "fractional ΔF/F₀": "fractional dF/F₀",
     "raw fluorescence AU": "raw fluorescence AU",
 }
 
@@ -98,7 +104,7 @@ _CONTINUOUS_DAY_PLOT_SMOOTH_SEC = 1.0
 _CONTINUOUS_DAY_PLOT_FAMILIES = (
     (
         "sampled_signal_reference",
-        "Phasic Sig/Iso",
+        "Signal / Reference",
         "phasic_sig_iso_day_{day:03d}.png",
     ),
     (
@@ -108,12 +114,12 @@ _CONTINUOUS_DAY_PLOT_FAMILIES = (
     ),
     (
         "sampled_phasic_dff",
-        "Phasic dFF",
+        "dF/F",
         "phasic_dFF_day_{day:03d}.png",
     ),
     (
         "sampled_stacked",
-        "Phasic Stacked",
+        "Stacked dF/F",
         "phasic_stacked_day_{day:03d}.png",
     ),
 )
@@ -339,6 +345,7 @@ def _write_window_plot(
         marker="o",
         linewidth=1.2,
         markersize=3.5,
+        color=SUMMARY_TRACE_COLOR,
     )
     ax.set_xlabel(_timeline_axis_label(timeline_contract))
     ax.set_ylabel(ylabel)
@@ -858,7 +865,7 @@ def build_continuous_marker_on_dff_dayplots(
             show_peak_markers=True,
             timeline_anchor_label=extracted["timeline_anchor_label"],
             title_override=(
-                f"Sampled Phasic dF/F with detected peaks - Day {day} - ROI {roi}"
+                f"Event-Detection QC - Day {day} - ROI {roi}"
             ),
             column_labels=_CONTINUOUS_DAY_PLOT_COLUMN_LABELS,
         )
@@ -1021,7 +1028,7 @@ def _publish_continuous_day_plots(
                     layout=_sig_iso_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI),
                     panel_y_ranges=_sig_iso_panel_ranges_with_day_min_span(slot_map),
                     timeline_anchor_label=anchor_label,
-                    title_override=f"Day {day} Sampled Signal + Reference - {roi}",
+                    title_override=f"Day {day} Signal / Reference - {roi}",
                     column_labels=column_labels,
                 )
             elif family == "sampled_correction_reference":
@@ -1033,7 +1040,7 @@ def _publish_continuous_day_plots(
                     layout=_dynamic_fit_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI),
                     panel_y_ranges=_dynamic_fit_panel_ranges_with_day_min_span(slot_map),
                     timeline_anchor_label=anchor_label,
-                    title_override=f"Day {day} {correction_label} - {roi}",
+                    title_override=f"Day {day} Correction Reference - {roi}",
                     column_labels=column_labels,
                 )
             elif family == "sampled_phasic_dff":
@@ -1047,7 +1054,7 @@ def _publish_continuous_day_plots(
                     global_ymax=global_ymax,
                     show_peak_markers=False,
                     timeline_anchor_label=anchor_label,
-                    title_override=f"Sampled Phasic dF/F - Day {day} - ROI {roi}",
+                    title_override=f"dF/F - Day {day} - ROI {roi}",
                     column_labels=column_labels,
                 )
             else:
@@ -1065,7 +1072,7 @@ def _publish_continuous_day_plots(
                     slot_map=dff_slot_map,
                     sph=sph,
                     title_override=(
-                        f"Sampled Stacked Phasic dF/F - Day {day} - ROI {roi}"
+                        f"Stacked dF/F - Day {day} - ROI {roi}"
                     ),
                     column_labels=column_labels,
                 )
@@ -1609,33 +1616,41 @@ def _publish_tonic_overview(
         data["x_hours"],
         data["raw_signal"],
         linewidth=0.7,
-        color="green",
+        color=RAW_SIGNAL_COLOR,
         label="Raw signal",
     )
     raw_ax.plot(
         data["x_hours"],
         data["raw_reference"],
         linewidth=0.7,
-        color="purple",
+        color=RAW_REFERENCE_COLOR,
         label="Raw reference",
     )
     raw_ax.set_ylabel("Raw signal")
-    raw_ax.set_title(f"{roi} Raw signal and reference")
+    raw_ax.set_title(f"{roi} Signal and Reference Overview")
     raw_ax.grid(True, alpha=0.3)
     raw_ax.legend(loc="best")
 
+    slow_signal_label = (
+        "Slow dF/F₀ — P2 per window"
+        if unit == "fractional ΔF/F₀"
+        else "Slow fluorescence — P2 per window (AU)"
+    )
+    slow_signal_color = (
+        DFF_COLOR if unit == "fractional ΔF/F₀" else SUMMARY_TRACE_COLOR
+    )
     tonic_ax.plot(
         tonic_data["x_hours"],
         tonic_data["values"],
         linewidth=1.0,
-        color="black",
+        color=slow_signal_color,
         marker="o",
         markersize=3.5,
-        label=f"{method_label} (P2 per window)",
+        label=slow_signal_label,
     )
     tonic_ax.set_xlabel(_timeline_axis_label(timeline_contract))
-    tonic_ax.set_ylabel(units_label)
-    tonic_ax.set_title(f"{roi} {method_label}")
+    tonic_ax.set_ylabel(slow_signal_label)
+    tonic_ax.set_title(f"{roi} Slow Signal Summary")
     x_max = max(
         float(np.nanmax(data["x_hours"])),
         float(np.nanmax(tonic_data["x_hours"])),
@@ -1757,16 +1772,16 @@ def publish_guided_continuous_saved_artifacts(
             auc_path = os.path.join(run_dir, roi, "summary", PHASIC_AUC_FILENAME)
             rate_details = _write_window_plot(
                 data=rate_data,
-                title="Peak rate per analysis window",
-                ylabel="Peak rate per analysis window (events/min)",
+                title="Detected Event Rate Over Time",
+                ylabel="Detected event rate (events/min)",
                 timeline_contract=timeline_contract,
                 out_path=rate_path,
             )
             auc_details = _write_window_plot(
                 data=auc_data,
-                title="Phasic signal AUC per analysis window",
+                title="Corrected Signal Area Over Time",
                 ylabel=(
-                    "Phasic signal AUC per analysis window "
+                    "Corrected signal area per analysis window "
                     f"({settings['auc_units']})"
                 ),
                 timeline_contract=timeline_contract,

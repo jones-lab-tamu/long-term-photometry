@@ -242,7 +242,7 @@ def test_tonic_and_combined_native_branches_pass_completion_verification(
     _app = QApplication.instance() or QApplication([])
     viewer = RunReportViewer()
     assert viewer.load_report(str(root)) is True
-    assert "tonic and phasic analyses" in viewer._correction_summary_label.text()
+    assert "slow-signal and event analyses" in viewer._correction_summary_label.text()
     tonic_cache = root / "_analysis" / "tonic_out" / "tonic_trace_cache.h5"
     held_cache = tonic_cache.with_suffix(".held")
     tonic_cache.rename(held_cache)

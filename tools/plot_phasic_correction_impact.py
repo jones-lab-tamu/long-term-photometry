@@ -3,11 +3,10 @@
 Phasic Correction Impact Plotter
 ================================
 
-Generates a 4-panel figure showing correction stages for a specific diagnostic chunk.
-Panel 1: Original signal/isosbestic + bleach-fit overlays
-Panel 2: Bleach-corrected signal/isosbestic
-Panel 3: Dynamic-fit view in bleach-corrected frame
-Panel 4: Final dFF
+Generates a three-panel figure showing correction stages for a specific diagnostic chunk.
+Panel 1: Original signal/reference + optional bleach-fit overlays
+Panel 2: Signal and fitted correction reference
+Panel 3: Final corrected dF/F
 
 Usage:
     python tools/plot_phasic_correction_impact.py --analysis-out <DIR> --roi <ROI> --chunk-id <ID> --out <FILE>
@@ -19,6 +18,19 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
+
+# Ensure repo imports work when this file is executed directly from ``tools``.
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+)
 
 
 _DYNAMIC_FIT_MODE_ALIAS = {
@@ -238,16 +250,16 @@ def build_correction_impact_figure(
     strategy_label: str = "Dynamic fit",
     signal_only_qc: dict | None = None,
 ):
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
     # 1) Original traces + bleach fits (same original frame)
-    ax1.plot(t, sig, 'g', label='Signal (470nm)', lw=0.8)
-    ax1.plot(t, iso, 'm', label='Iso (415nm)', lw=0.8, alpha=0.7)
+    ax1.plot(t, sig, color=RAW_SIGNAL_COLOR, label='Raw signal', lw=0.8)
+    ax1.plot(t, iso, color=RAW_REFERENCE_COLOR, label='Raw reference', lw=0.8, alpha=0.8)
     if sig_bleach_fit is not None:
         ax1.plot(
             t,
             np.asarray(sig_bleach_fit, dtype=float),
-            color="#1f77b4",
+            color=RAW_SIGNAL_COLOR,
             lw=0.8,
             linestyle=":",
             label="Signal bleach fit",
@@ -256,100 +268,71 @@ def build_correction_impact_figure(
         ax1.plot(
             t,
             np.asarray(iso_bleach_fit, dtype=float),
-            color="#7d3c98",
+            color=RAW_REFERENCE_COLOR,
             lw=0.8,
             linestyle=":",
-            label="Iso bleach fit",
+            label="Reference bleach fit",
         )
     ax1.legend(loc='upper right')
-    ax1.set_ylabel("Raw Output (V)")
-    ax1.set_title(
-        f"Stage 1 - Original Inputs + Bleach Fits | ROI {roi} | Chunk {chunk_id}"
-    )
+    ax1.set_ylabel("Signal")
+    ax1.set_title("Original Signal and Reference")
     ax1.grid(True, alpha=0.3)
 
-    # 2) Bleach-corrected traces (engine input frame when bleach is enabled)
+    # Resolve the signal frame used by the correction engine.  This preserves
+    # the persisted dynamic-fit frame adjustment without exposing a separate
+    # legacy bleach-corrected-input panel.
     sig_engine = (
         np.asarray(sig_bleach_corrected, dtype=float)
         if sig_bleach_corrected is not None
         else np.asarray(sig, dtype=float)
     )
-    iso_engine = (
-        np.asarray(iso_bleach_corrected, dtype=float)
-        if iso_bleach_corrected is not None
-        else np.asarray(iso, dtype=float)
-    )
-    ax2.plot(t, sig_engine, 'g', label='Signal (bleach-corrected)', lw=0.8)
-    ax2.plot(t, iso_engine, 'm', label='Iso (bleach-corrected)', lw=0.8, alpha=0.7)
-    ax2.legend(loc='upper right')
-    ax2.set_ylabel("Bleach-corrected (V)")
-    ax2.set_title("Stage 2 - Bleach-corrected Inputs")
-    if _normalize_bleach_correction_mode(bleach_correction_mode) == "none":
-        ax2.text(
-            0.01,
-            0.99,
-            "Bleach correction disabled: traces equal original inputs",
-            transform=ax2.transAxes,
-            ha="left",
-            va="top",
-            fontsize=8,
-            bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
-        )
-    ax2.grid(True, alpha=0.3)
-
-    # 3) Strategy-specific persisted correction reference.  No correction is
+    # 2) Strategy-specific persisted correction reference.  No correction is
     # recomputed here: fit_ref or signal_only_f0_baseline was loaded from the
     # authoritative native cache by the caller.
     fit_engine = np.asarray(fit, dtype=float)
     if strategy_family == "signal_only_f0":
-        ax3.plot(t, sig, 'g', label='Raw signal', lw=0.8)
-        ax3.plot(
+        ax2.plot(t, sig, color=RAW_SIGNAL_COLOR, label='Signal used for correction', lw=0.8)
+        ax2.plot(
             t,
             fit_engine,
-            'k',
-            label=correction_reference_label,
+            color=NEUTRAL_BASELINE_COLOR,
+            label='F0 baseline',
             lw=0.8,
             linestyle='--',
         )
-        ax3.set_ylabel("Signal / baseline")
-        ax3.set_title(f"Stage 3 - {strategy_label} correction reference")
+        ax2.set_ylabel("Signal / baseline")
     else:
         if sig_bleach_corrected is not None:
             # fit is stored reconciled to original frame; subtract removed signal decay
             # so this panel remains in the same frame dynamic fit actually used.
             sig_decay_removed = np.asarray(sig, dtype=float) - np.asarray(sig_bleach_corrected, dtype=float)
             fit_engine = fit_engine - sig_decay_removed
-        ax3.plot(t, sig_engine, 'g', label='Signal (fit input frame)', lw=0.8)
-        ax3.plot(t, fit_engine, 'k', label=correction_reference_label, lw=0.8, linestyle='--')
-        ax3.set_ylabel("Raw Output (V)")
-        ax3.set_title(
-            "Stage 3 - Dynamic Reference Fitting "
-            f"({_dynamic_fit_mode_label(dynamic_fit_mode)}; "
-            f"{_dynamic_fit_honesty_suffix(dynamic_fit_mode, baseline_subtract_before_fit)}; "
-            f"bleach correction: {_bleach_mode_label(bleach_correction_mode)})"
-        )
-    ax3.legend(loc='upper right')
+        ax2.plot(t, sig_engine, color=RAW_SIGNAL_COLOR, label='Signal used for correction', lw=0.8)
+        ax2.plot(t, fit_engine, color=FITTED_REFERENCE_COLOR, label='Fitted reference', lw=0.8, linestyle='--')
+        ax2.set_ylabel("Signal")
+    ax2.set_title("Correction Reference")
+    ax2.legend(loc='upper right')
     if strategy_family == "signal_only_f0":
-        ax3.text(
+        ax2.text(
             0.01,
             0.98,
             _signal_only_qc_note(signal_only_qc),
-            transform=ax3.transAxes,
+            transform=ax2.transAxes,
             ha="left",
             va="top",
             fontsize=8,
         )
-    ax3.grid(True, alpha=0.3)
+    ax2.grid(True, alpha=0.3)
 
-    # 4) Final dFF output stage
-    ax4.plot(t, dff, 'b', label='dFF (Phasic)', lw=0.8)
-    ax4.axhline(0, color='k', lw=0.5, alpha=0.5)
-    ax4.legend(loc='upper right')
-    ax4.set_ylabel("dFF")
-    ax4.set_xlabel("Time (s)")
-    ax4.set_title("Stage 4 - Final Corrected dF/F")
-    ax4.grid(True, alpha=0.3)
-    return fig, (ax1, ax2, ax3, ax4)
+    # 3) Final dFF output stage
+    ax3.plot(t, dff, color=DFF_COLOR, label='Corrected dF/F', lw=0.8)
+    ax3.axhline(0, color=NEUTRAL_BASELINE_COLOR, lw=0.5, alpha=0.5)
+    ax3.legend(loc='upper right')
+    ax3.set_ylabel("dF/F")
+    ax3.set_xlabel("Time (s)")
+    ax3.set_title("Corrected dF/F")
+    ax3.grid(True, alpha=0.3)
+    return fig, (ax1, ax2, ax3)
 
 
 def main():

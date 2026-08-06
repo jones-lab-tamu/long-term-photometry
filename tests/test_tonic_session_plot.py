@@ -30,6 +30,12 @@ from photometry_pipeline.tonic_session_plot import (
     session_elapsed_seconds,
     tonic_method_by_roi,
 )
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    SUMMARY_TRACE_COLOR,
+)
 from photometry_pipeline.tonic_session_summary import (
     SUMMARY_COLUMNS,
     TONIC_SESSION_SUMMARY_FILENAME,
@@ -444,13 +450,16 @@ def test_figure_has_exactly_two_panels_with_raw_above_tonic(tmp_path, monkeypatc
     assert RAW_ISOSBESTIC_LABEL in raw_labels
     assert raw_axis.get_ylabel() == "Raw fluorescence (AU)"
 
-    assert tonic_axis.get_ylabel() == "Tonic ΔF/F₀ (fraction)"
+    assert tonic_axis.get_ylabel() == "Slow dF/F₀ — P2 per session"
     assert tonic_axis.get_xlabel() == ELAPSED_AXIS_LABEL
     # Both panels share one elapsed axis.
     assert raw_axis.get_shared_x_axes().joined(raw_axis, tonic_axis)
 
     saved = [line for line in tonic_axis.get_lines() if line.get_marker() == "o"]
     assert len(saved) == 1
+    assert saved[0].get_color() == DFF_COLOR
+    assert raw_axis.get_lines()[0].get_color() == RAW_SIGNAL_COLOR
+    assert raw_axis.get_lines()[1].get_color() == RAW_REFERENCE_COLOR
     assert list(saved[0].get_xdata()) == pytest.approx(result["elapsed_hours"])
     real_close(figure)
 
@@ -519,22 +528,41 @@ def test_primary_method_labels_and_units(tmp_path):
     run_dir = _build_run(tmp_path, _half_hourly(6))
     result = generate_tonic_session_plots(run_dir)[0]
 
-    assert result["title"] == f"{ROI} — Tonic ΔF/F₀"
-    assert result["y_label"] == "Tonic ΔF/F₀ (fraction)"
+    assert result["title"] == f"{ROI} — Slow dF/F₀"
+    assert result["y_label"] == "Slow dF/F₀ — P2 per session"
     assert result["units"] == "fraction_dff"
-    assert result["raw_title"] == f"{ROI} — signal and isosbestic overview"
+    assert result["raw_title"] == f"{ROI} — Signal and Reference Overview"
     assert os.path.isfile(result["output_path"])
 
 
-def test_fallback_method_labels_and_units(tmp_path):
+def test_fallback_method_labels_units_and_neutral_color(tmp_path, monkeypatch):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    captured = {}
+    real_subplots = plt.subplots
+
+    def spy(*args, **kwargs):
+        captured["axes"] = real_subplots(*args, **kwargs)
+        return captured["axes"]
+
+    monkeypatch.setattr(plt, "subplots", spy)
     run_dir = _build_run(
         tmp_path, _half_hourly(6), method=METHOD_SIGNAL_ONLY,
         units="raw_fluorescence_AU", reason="nonpositive_global_slope",
     )
     result = generate_tonic_session_plots(run_dir)[0]
 
-    assert result["title"] == f"{ROI} — Tonic F, signal-only bleach corrected"
-    assert "raw fluorescence" in result["y_label"] and "AU" in result["y_label"]
+    assert result["title"] == f"{ROI} — Slow fluorescence (signal-only bleach-corrected)"
+    assert result["y_label"] == "Slow fluorescence — P2 per session (AU)"
+    assert "AU" in result["y_label"]
+    _figure, (_raw_axis, slow_axis) = captured["axes"]
+    assert all(
+        line.get_color() == SUMMARY_TRACE_COLOR
+        for line in slow_axis.get_lines()
+    )
     assert "ΔF/F" not in result["y_label"]
     assert "ΔF/F" not in result["title"]
 

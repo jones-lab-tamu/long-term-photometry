@@ -12,6 +12,14 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.core.feature_extraction import extract_features
 from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    color_to_rgb,
+)
 
 # Add project root to path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -19,6 +27,256 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import tools.plot_phasic_dayplot_bundle as bundle
+
+
+def _image_rgb_colors(image):
+    return {tuple(pixel) for row in np.asarray(image)[..., :3] for pixel in row}
+
+
+def _has_rgb_color(image, color, *, tolerance=12):
+    pixels = np.asarray(image.convert("RGB"), dtype=np.int16)[..., :3]
+    target = np.asarray(color_to_rgb(color), dtype=np.int16)
+    return bool(np.any(np.sum(np.abs(pixels - target), axis=-1) <= tolerance))
+
+
+def _has_red_marker(image):
+    pixels = np.asarray(image.convert("RGB"), dtype=np.int16)[..., :3]
+    return bool(
+        np.any(
+            (pixels[..., 0] >= 150)
+            & (pixels[..., 1] <= 130)
+            & (pixels[..., 2] <= 130)
+        )
+    )
+
+
+def test_lightweight_dayplot_renderers_use_shared_semantic_colors():
+    t = np.linspace(0.0, 9.0, 10)
+    layout = bundle._sig_iso_tile_layout(sph=1, dpi=80)
+    title_font = bundle._get_font(12)
+    signal_reference = {
+        "t": t,
+        "sig": np.linspace(0.0, 1.0, t.size),
+        "uv": np.linspace(2.0, 3.0, t.size),
+        "chunk_id": 0,
+    }
+    colors = _image_rgb_colors(
+        bundle._render_sig_iso_panel_tile_lightweight(
+            signal_reference, layout, title_font
+        )
+    )
+    assert color_to_rgb(RAW_SIGNAL_COLOR) in colors
+    assert color_to_rgb(RAW_REFERENCE_COLOR) in colors
+
+    dynamic = {
+        "t": t,
+        "sig_fit": np.linspace(0.0, 1.0, t.size),
+        "fit_ref": np.linspace(2.0, 3.0, t.size),
+        "chunk_id": 0,
+        "correction_strategy_family": "dynamic_fit",
+    }
+    colors = _image_rgb_colors(
+        bundle._render_dynamic_fit_panel_tile_lightweight(
+            dynamic, layout, title_font
+        )
+    )
+    assert color_to_rgb(RAW_SIGNAL_COLOR) in colors
+    assert color_to_rgb(FITTED_REFERENCE_COLOR) in colors
+
+    signal_only = {**dynamic, "correction_strategy_family": "signal_only_f0"}
+    colors = _image_rgb_colors(
+        bundle._render_dynamic_fit_panel_tile_lightweight(
+            signal_only, layout, title_font
+        )
+    )
+    assert color_to_rgb(NEUTRAL_BASELINE_COLOR) in colors
+    assert color_to_rgb(FITTED_REFERENCE_COLOR) not in colors
+
+    dff_panel = {
+        "t": t,
+        "dff": np.sin(t),
+        "chunk_id": 0,
+        "peak_indices": np.array([3]),
+    }
+    dff_image, _stats = bundle._render_dff_panel_tile_lightweight(
+        dff_panel,
+        bundle._dff_tile_layout(sph=1, dpi=80),
+        title_font,
+        -1.2,
+        1.2,
+        show_peak_markers=True,
+    )
+    colors = _image_rgb_colors(dff_image)
+    assert color_to_rgb(DFF_COLOR) in colors
+    assert (220, 0, 0) in colors
+
+    stacked = bundle._render_stacked_day_canvas_lightweight(
+        day=0,
+        plot_roi="Region0",
+        slot_traces=[(t, np.sin(t))],
+        smooth_window_s=1.0,
+        dpi=80,
+    )
+    assert color_to_rgb(DFF_COLOR) in _image_rgb_colors(stacked)
+
+
+def _assert_color_in_broad_x_regions(image, color, *, plot_x0, plot_w, buckets=8):
+    pixels = np.asarray(image.convert("RGB"))
+    target = np.asarray(color_to_rgb(color), dtype=np.int16)
+    region = np.asarray(pixels[:, plot_x0 : plot_x0 + plot_w, :3], dtype=np.int16)
+    mask = np.sum(np.abs(region - target), axis=-1) <= 12
+    for bucket in range(buckets):
+        left = (bucket * plot_w) // buckets
+        right = ((bucket + 1) * plot_w) // buckets
+        assert np.any(mask[:, left:right]), (
+            f"{color} is absent from broad x-region {bucket}"
+        )
+
+
+def test_correction_reference_keeps_complete_x_domain_in_lightweight_renderer():
+    t = np.linspace(0.0, 599.0, 1200)
+    panels = [
+        {
+            "t": t,
+            "sig_fit": -0.5 + 0.2 * np.sin(t / 19.0),
+            "fit_ref": 1.5 + 0.2 * np.cos(t / 23.0),
+            "chunk_id": 0,
+            "correction_strategy_family": "dynamic_fit",
+            "correction_reference_field": "fit_ref",
+        },
+        {
+            "t": t,
+            "sig_fit": 2.5 + 0.2 * np.cos(t / 17.0),
+            "fit_ref": -1.5 + 0.2 * np.sin(t / 29.0),
+            "chunk_id": 1,
+            "correction_strategy_family": "dynamic_fit",
+            "correction_reference_field": "fit_ref",
+        },
+    ]
+    layout = bundle._dynamic_fit_tile_layout(sph=1, dpi=120)
+    title_font = bundle._get_font(12)
+    plot_x0 = max(8, int(0.02 * layout["tile_w"]))
+    plot_w = layout["tile_w"] - (2 * plot_x0)
+    original_paint = bundle._paint_trace_minmax
+
+    for panel in panels:
+        calls = []
+
+        def capture_paint(
+            tile_arr,
+            x_idx,
+            y_idx,
+            plot_x0_arg,
+            plot_y0,
+            plot_w_arg,
+            plot_h,
+            color,
+            stroke=1,
+            dash_period=None,
+        ):
+            calls.append(
+                {
+                    "x_idx": np.asarray(x_idx).copy(),
+                    "y_idx": np.asarray(y_idx).copy(),
+                    "color": tuple(color),
+                    "plot_x0": plot_x0_arg,
+                    "plot_w": plot_w_arg,
+                    "dash_period": dash_period,
+                }
+            )
+            return original_paint(
+                tile_arr,
+                x_idx,
+                y_idx,
+                plot_x0_arg,
+                plot_y0,
+                plot_w_arg,
+                plot_h,
+                color,
+                stroke,
+                dash_period,
+            )
+
+        with patch.object(bundle, "_paint_trace_minmax", side_effect=capture_paint):
+            image = bundle._render_dynamic_fit_panel_tile_lightweight(
+                panel, layout, title_font
+            )
+
+        assert [call["color"] for call in calls] == [
+            color_to_rgb(RAW_SIGNAL_COLOR),
+            color_to_rgb(FITTED_REFERENCE_COLOR),
+        ]
+        assert len(calls[0]["x_idx"]) == len(calls[0]["y_idx"]) == len(t)
+        assert len(calls[1]["x_idx"]) == len(calls[1]["y_idx"]) == len(t)
+        assert np.isfinite(calls[0]["x_idx"]).all()
+        assert np.isfinite(calls[0]["y_idx"]).all()
+        assert np.isfinite(calls[1]["x_idx"]).all()
+        assert np.isfinite(calls[1]["y_idx"]).all()
+        np.testing.assert_array_equal(calls[0]["x_idx"], calls[1]["x_idx"])
+        assert calls[0]["x_idx"].min() == 0
+        assert calls[0]["x_idx"].max() == plot_w - 1
+        assert calls[0]["dash_period"] is None
+        assert calls[1]["dash_period"] is None
+
+        _assert_color_in_broad_x_regions(
+            image,
+            RAW_SIGNAL_COLOR,
+            plot_x0=plot_x0,
+            plot_w=plot_w,
+        )
+        _assert_color_in_broad_x_regions(
+            image,
+            FITTED_REFERENCE_COLOR,
+            plot_x0=plot_x0,
+            plot_w=plot_w,
+        )
+
+
+def test_correction_reference_full_renderer_draws_complete_shared_x_domain():
+    import matplotlib.pyplot as plt
+
+    t = np.linspace(0.0, 599.0, 1200)
+    panels = [
+        {
+            "t": t,
+            "sig_fit": -0.5 + 0.2 * np.sin(t / 19.0),
+            "fit_ref": 1.5 + 0.2 * np.cos(t / 23.0),
+            "correction_strategy_family": "dynamic_fit",
+            "correction_reference_field": "fit_ref",
+        },
+        {
+            "t": t,
+            "sig_fit": 2.5 + 0.2 * np.cos(t / 17.0),
+            "fit_ref": -1.5 + 0.2 * np.sin(t / 29.0),
+            "correction_strategy_family": "dynamic_fit",
+            "correction_reference_field": "fit_ref",
+        },
+    ]
+    figure, axes = plt.subplots(1, 2, figsize=(8, 3), sharex=True)
+    try:
+        for axis, panel in zip(axes, panels):
+            bundle._plot_dynamic_fit_panel(
+                axis,
+                panel,
+                bundle._yrange_from_dynamic_panel(panel, float(t[0]), float(t[-1])),
+            )
+
+        for axis in axes:
+            lines = axis.get_lines()
+            assert [line.get_color() for line in lines] == [
+                RAW_SIGNAL_COLOR,
+                FITTED_REFERENCE_COLOR,
+            ]
+            assert len(lines[0].get_xdata()) == len(lines[0].get_ydata()) == len(t)
+            assert len(lines[1].get_xdata()) == len(lines[1].get_ydata()) == len(t)
+            np.testing.assert_array_equal(lines[0].get_xdata(), lines[1].get_xdata())
+            assert np.isfinite(lines[0].get_xdata()).all()
+            assert np.isfinite(lines[0].get_ydata()).all()
+            assert np.isfinite(lines[1].get_xdata()).all()
+            assert np.isfinite(lines[1].get_ydata()).all()
+            assert not np.allclose(lines[0].get_ydata(), lines[1].get_ydata())
+    finally:
+        plt.close(figure)
 
 
 def _run_cli(cmd, cwd):
@@ -115,12 +373,23 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             '--sessions-per-hour', '1',
             '--no-write-dff-grid',
             '--no-write-stacked',
+            '--sig-iso-render-mode', 'full',
         ]
         with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
             bundle.main()
 
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_sig_iso_day_000.png')))
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000.png')))
+        sig_image = bundle.Image.open(
+            os.path.join(self.output_dir, 'phasic_sig_iso_day_000.png')
+        )
+        dynamic_image = bundle.Image.open(
+            os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000.png')
+        )
+        assert _has_rgb_color(sig_image, RAW_SIGNAL_COLOR)
+        assert _has_rgb_color(sig_image, RAW_REFERENCE_COLOR)
+        assert _has_rgb_color(dynamic_image, RAW_SIGNAL_COLOR)
+        assert _has_rgb_color(dynamic_image, FITTED_REFERENCE_COLOR)
         self.assertEqual(glob.glob(os.path.join(self.output_dir, '*_display_series.csv')), [])
 
     def test_display_series_export_enabled_writes_long_format_csv(self):
@@ -423,6 +692,101 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_sig_iso_day_000.png')))
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000.png')))
 
+    def test_correction_reference_main_full_and_qc_renderers_keep_both_traces(self):
+        t = np.linspace(0.0, 599.0, 1200)
+        panels = [
+            (
+                -0.5 + 0.2 * np.sin(t / 19.0),
+                1.5 + 0.2 * np.cos(t / 23.0),
+            ),
+            (
+                2.5 + 0.2 * np.cos(t / 17.0),
+                -1.5 + 0.2 * np.sin(t / 29.0),
+            ),
+        ]
+        for cid, (sig_fit, fit_ref) in enumerate(panels):
+            self.create_synthetic_chunk(cid=cid, include_dff=False)
+            self.create_synthetic_phasic_cache(
+                cid=cid,
+                include_dff=False,
+                sig_data=sig_fit,
+                fit_ref_data=fit_ref,
+                time_data=t,
+            )
+
+        for render_mode in ("qc", "full"):
+            output_dir = os.path.join(self.test_dir.name, f"day_plots_{render_mode}")
+            os.makedirs(output_dir, exist_ok=True)
+            test_args = [
+                "plot_phasic_dayplot_bundle.py",
+                "--analysis-out",
+                self.analysis_out,
+                "--roi",
+                "Region0",
+                "--output-dir",
+                output_dir,
+                "--sessions-per-hour",
+                "2",
+                "--no-write-dff-grid",
+                "--no-write-stacked",
+                "--sig-iso-render-mode",
+                render_mode,
+            ]
+            captured_axes = []
+            real_save = bundle.save_png_fast
+
+            def capture_save(fig, out_path, dpi):
+                if os.path.basename(out_path).startswith("phasic_dynamic_fit_day_"):
+                    captured_axes.extend(
+                        axis for axis in fig.axes if len(axis.get_lines()) == 2
+                    )
+                return real_save(fig, out_path, dpi)
+
+            with patch("tools.plot_phasic_dayplot_bundle.sys.argv", test_args):
+                with patch.object(bundle, "save_png_fast", side_effect=capture_save):
+                    bundle.main()
+
+            image = bundle.Image.open(
+                os.path.join(output_dir, "phasic_dynamic_fit_day_000.png")
+            )
+            if render_mode == "qc":
+                layout = bundle._dynamic_fit_tile_layout(sph=2, dpi=120)
+                plot_x0 = max(8, int(0.02 * layout["tile_w"]))
+                plot_w = layout["tile_w"] - (2 * plot_x0)
+                for column in range(2):
+                    left = layout["left_label_w"] + column * (
+                        layout["tile_w"] + layout["col_gap"]
+                    )
+                    top = layout["top_title_h"]
+                    tile = image.crop(
+                        (left, top, left + layout["tile_w"], top + layout["tile_h"])
+                    )
+                    _assert_color_in_broad_x_regions(
+                        tile,
+                        RAW_SIGNAL_COLOR,
+                        plot_x0=plot_x0,
+                        plot_w=plot_w,
+                    )
+                    _assert_color_in_broad_x_regions(
+                        tile,
+                        FITTED_REFERENCE_COLOR,
+                        plot_x0=plot_x0,
+                        plot_w=plot_w,
+                    )
+            else:
+                assert len(captured_axes) == 2
+                for axis in captured_axes:
+                    lines = axis.get_lines()
+                    assert [line.get_color() for line in lines] == [
+                        RAW_SIGNAL_COLOR,
+                        FITTED_REFERENCE_COLOR,
+                    ]
+                    np.testing.assert_array_equal(
+                        lines[0].get_xdata(), lines[1].get_xdata()
+                    )
+                    assert len(lines[0].get_xdata()) == len(t)
+                    assert len(lines[1].get_xdata()) == len(t)
+
     def test_stacked_only_mode_no_features(self):
         # B. stacked-only mode: no features.csv, dff necessary but feature shouldn't be read 
         self.create_synthetic_chunk(cid=0, include_dff=True)
@@ -435,11 +799,14 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             '--sessions-per-hour', '1',
             '--no-write-dff-grid',
             '--no-write-sig-iso-grid',
-            '--write-stacked'
+            '--write-stacked',
+            '--stacked-render-mode', 'full',
         ]
         with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
             bundle.main() # Should not raise
-        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
+        stacked_path = os.path.join(self.output_dir, 'phasic_stacked_day_000.png')
+        self.assertTrue(os.path.exists(stacked_path))
+        assert _has_rgb_color(bundle.Image.open(stacked_path), DFF_COLOR)
 
     def test_stacked_emits_same_day_family_when_one_day_has_zero_occupied_traces(self):
         t = np.arange(0, 600, 0.1)
@@ -528,6 +895,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         dff_csv = os.path.join(self.output_dir, 'phasic_dFF_day_000_display_series.csv')
         self.assertTrue(os.path.exists(dff_png))
         self.assertTrue(os.path.exists(dff_csv))
+        assert _has_rgb_color(bundle.Image.open(dff_png), DFF_COLOR)
 
         df = pd.read_csv(dff_csv)
         self.assertEqual(set(df['plot_type'].dropna().astype(str).unique()), {'phasic_day_dff'})
@@ -615,7 +983,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             '--output-dir', self.output_dir,
             '--sessions-per-hour', '1',
             '--write-dff-grid',
-            '--write-stacked'
+            '--write-stacked',
         ]
         
         # Minimal trace CSV required for discovery logic

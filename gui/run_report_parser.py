@@ -36,13 +36,13 @@ class SavedArtifactIndexError(RuntimeError):
 
 
 _CONTINUOUS_ARTIFACT_LABELS = {
-    "phasic_correction_impact.png": "Correction impact",
-    "tonic_overview.png": "Tonic overview",
-    "phasic_auc_timeseries.png": "Phasic signal AUC",
-    "phasic_peak_rate_timeseries.png": "Peak rate",
-    "continuous_phasic_window_summary.csv": "Phasic window summary",
-    "continuous_tonic_window_summary.csv": "Tonic window summary",
-    "continuous_phasic_events.csv": "Detected events",
+    "phasic_correction_impact.png": "Correction Verification",
+    "tonic_overview.png": "Slow Signal Summary",
+    "phasic_auc_timeseries.png": "Corrected Signal Area Over Time",
+    "phasic_peak_rate_timeseries.png": "Detected Event Rate Over Time",
+    "continuous_phasic_window_summary.csv": "Event Window Summary",
+    "continuous_tonic_window_summary.csv": "Slow Signal Window Summary",
+    "continuous_phasic_events.csv": "Detected Events",
 }
 
 _CONTINUOUS_ARTIFACT_ORDER = {
@@ -56,10 +56,10 @@ _CONTINUOUS_ARTIFACT_ORDER = {
 }
 
 _CONTINUOUS_DAY_PLOT_FAMILY_LABELS = {
-    "sampled_signal_reference": "Phasic Sig/Iso",
+    "sampled_signal_reference": "Signal / Reference",
     "sampled_correction_reference": "Correction Reference",
-    "sampled_phasic_dff": "Phasic dFF",
-    "sampled_stacked": "Phasic Stacked",
+    "sampled_phasic_dff": "dF/F",
+    "sampled_stacked": "Stacked dF/F",
 }
 _CONTINUOUS_DAY_PLOT_FILENAME_PATTERNS = {
     "sampled_signal_reference": re.compile(r"phasic_sig_iso_day_\d{3}\.png"),
@@ -389,7 +389,7 @@ def build_guided_continuous_saved_artifact_index(
         artifacts.append(
             {
                 "roi": None,
-                "label": "Detected events",
+                "label": "Detected Events",
                 "relative_path": event_relative_path,
                 "path": event_path,
                 "artifact_type": "table",

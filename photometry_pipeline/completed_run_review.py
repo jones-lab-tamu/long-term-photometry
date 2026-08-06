@@ -1237,7 +1237,7 @@ def format_tonic_settings_summary(tonic_settings: Mapping[str, str]) -> str:
         TONIC_TIMELINE_MODE_SUMMARY_LABELS.get(timeline_mode, str(timeline_mode)),
     )
     shape_label = TONIC_OUTPUT_MODE_SUMMARY_LABELS.get(output_mode, str(output_mode))
-    return f"Tonic timeline: {timeline_label}\nSession shape: {shape_label}"
+    return f"Slow-signal timeline: {timeline_label}\nSession shape: {shape_label}"
 
 
 def _resolve_missing_effective_correction_parameters(

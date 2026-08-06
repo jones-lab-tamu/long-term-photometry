@@ -575,7 +575,7 @@ def load_continuous_roi_trace(run_dir: str, *, family: str, roi_id: str) -> Cont
     cache_path = os.path.join(overview.run_dir, cache_relative_path)
     opener = open_tonic_cache if family == "tonic" else open_phasic_cache
     field_name = "deltaF" if family == "tonic" else "dff"
-    label = "Tonic dF/F" if family == "tonic" else "Phasic dF/F"
+    label = "Slow signal (deltaF)" if family == "tonic" else "Event signal (dF/F)"
 
     cache = opener(cache_path)
     try:

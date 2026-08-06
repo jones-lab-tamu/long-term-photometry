@@ -30,6 +30,14 @@ from typing import Any, Iterable
 import h5py
 import numpy as np
 
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+)
+
 from photometry_pipeline.config import Config
 from photometry_pipeline.core import preprocessing, regression
 from photometry_pipeline.core.types import Chunk
@@ -315,27 +323,27 @@ def render_guided_correction_preview_visuals(
                 )
                 if method == "signal_only_f0":
                     panel_titles = [
-                        "Inputs",
-                        "F0 baseline: Signal-Only F0",
-                        f"Corrected dF/F: {label}",
+                        "Original Signal and Reference",
+                        "Correction Reference",
+                        "Corrected dF/F",
                     ]
                     trace_labels = [
                         "Raw signal",
-                        "Reference/control signal",
+                        "Raw reference",
                         "Raw signal",
-                        "Signal-Only F0 baseline",
+                        "F0 baseline",
                         "Corrected dF/F",
                     ]
                 else:
                     panel_titles = [
-                        "Inputs",
-                        f"Fitted reference: {label}",
-                        f"Corrected dF/F: {label}",
+                        "Original Signal and Reference",
+                        "Correction Reference",
+                        "Corrected dF/F",
                     ]
                     trace_labels = [
                         "Raw signal",
-                        "Reference/control signal",
-                        "Fit-input signal",
+                        "Raw reference",
+                        "Signal used for correction",
                         "Fitted reference",
                         "Corrected dF/F",
                     ]
@@ -358,12 +366,14 @@ def render_guided_correction_preview_visuals(
                     time_plot,
                     series["sig_raw"][::stride],
                     label="Raw signal",
+                    color=RAW_SIGNAL_COLOR,
                     linewidth=1.2,
                 )
                 axes[0].plot(
                     time_plot,
                     series["uv_raw"][::stride],
-                    label="Reference/control signal",
+                    label="Raw reference",
+                    color=RAW_REFERENCE_COLOR,
                     linewidth=1.0,
                     alpha=0.8,
                 )
@@ -375,25 +385,30 @@ def render_guided_correction_preview_visuals(
                         time_plot,
                         series["sig_raw"][::stride],
                         label="Raw signal",
+                        color=RAW_SIGNAL_COLOR,
                         linewidth=1.2,
                     )
                     axes[1].plot(
                         time_plot,
                         series["f0_baseline"][::stride],
-                        label="Signal-Only F0 baseline",
+                        label="F0 baseline",
+                        color=NEUTRAL_BASELINE_COLOR,
                         linewidth=1.1,
+                        linestyle="--",
                     )
                 else:
                     axes[1].plot(
                         time_plot,
                         series["fit_input_signal"][::stride],
-                        label="Fit-input signal",
+                        label="Signal used for correction",
+                        color=RAW_SIGNAL_COLOR,
                         linewidth=1.2,
                     )
                     axes[1].plot(
                         time_plot,
                         series["fit_ref"][::stride],
                         label="Fitted reference",
+                        color=FITTED_REFERENCE_COLOR,
                         linewidth=1.1,
                     )
                 axes[1].set_title(panel_titles[1])
@@ -403,6 +418,7 @@ def render_guided_correction_preview_visuals(
                     time_plot,
                     series["preview_dff"][::stride],
                     label="Corrected dF/F",
+                    color=DFF_COLOR,
                     linewidth=1.1,
                 )
                 axes[2].set_title(panel_titles[2])

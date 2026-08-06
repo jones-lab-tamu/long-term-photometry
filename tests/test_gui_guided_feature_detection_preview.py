@@ -7,10 +7,12 @@ from types import SimpleNamespace
 import pytest
 import numpy as np
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QGroupBox, QComboBox, QPushButton, QLabel, QTableWidget, QWidget, QToolButton
 
 from gui.main_window import MainWindow, LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
 from photometry_pipeline.guided_feature_detection_preview import GuidedFeaturePreviewUnsupportedError
+from photometry_pipeline.viz.semantic_colors import DFF_COLOR, NEUTRAL_TRACE_COLOR
 
 
 MISSING_TRACE_MESSAGE = "The selected preview segment is unavailable."
@@ -231,6 +233,21 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
     }
     window._guided_feature_event_signal_combo.setCurrentText("dff")
     window._refresh_guided_feature_detection_preview_panel()
+
+
+def _has_near_color(colors, color, *, tolerance=12):
+    target = tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
+    return any(
+        sum(
+            abs(channel - expected)
+            for channel, expected in zip(
+                (int(rgb[index:index + 2], 16) for index in (1, 3, 5)),
+                target,
+            )
+        )
+        <= tolerance
+        for rgb in colors
+    )
 
 
 def _setup_dynamic_evidence(
@@ -607,6 +624,31 @@ def test_visual_plot_renders_events_and_thresholds(
     assert plot.threshold_upper == pytest.approx(1.5)
     assert plot.threshold_lower == pytest.approx(-1.5)
     assert window._guided_feature_preview_last_result is expected
+
+    plot.resize(360, 260)
+    image = QImage(360, 260, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    plot.render(image)
+    rendered_colors = {
+        image.pixelColor(x, y).name().upper()
+        for x in range(image.width())
+        for y in range(image.height())
+    }
+    assert _has_near_color(rendered_colors, DFF_COLOR)
+
+    expected_delta_f = SimpleNamespace(
+        **{**vars(expected), "event_signal": "delta_f"}
+    )
+    plot.set_result(expected_delta_f)
+    image.fill(Qt.white)
+    plot.render(image)
+    rendered_colors = {
+        image.pixelColor(x, y).name().upper()
+        for x in range(image.width())
+        for y in range(image.height())
+    }
+    assert _has_near_color(rendered_colors, NEUTRAL_TRACE_COLOR)
+    assert not _has_near_color(rendered_colors, DFF_COLOR)
 
 
 def test_only_retained_in_memory_segment_is_selectable(window):

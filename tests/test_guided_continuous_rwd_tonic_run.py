@@ -22,6 +22,12 @@ from photometry_pipeline.run_completion_contract import (
     TERMINAL_SUCCESS_CURRENT,
     classify_run_terminal_state,
 )
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    SUMMARY_TRACE_COLOR,
+)
 
 # Reuse the D1 module's synthetic-recording builders (same accepted
 # construction path already used by D1/D2's own test suites).
@@ -159,7 +165,7 @@ def test_successful_multi_chunk_run_publishes_current_run(accepted_case, real_co
         sampling = report["saved_artifacts"]["tonic_overview_sampling_by_roi"][roi]
         assert sampling["n_points_plotted"] <= sampling["max_plot_points"]
         assert sampling["trace_labels"][:2] == ["Raw signal", "Raw reference"]
-        assert sampling["trace_labels"][2].endswith("(P2 per window)")
+        assert "P2 per window" in sampling["trace_labels"][2]
         assert sampling["tonic_method"] in {
             subject.TONIC_METHOD_GLOBAL_ISOSBESTIC,
             subject.TONIC_METHOD_SIGNAL_ONLY,
@@ -209,12 +215,17 @@ def test_natural_tonic_publication_uses_two_shared_readable_panels(
             "Raw reference",
         ]
         tonic_label = tonic_axis.get_lines()[0].get_label()
-        assert tonic_label.endswith("(P2 per window)")
+        assert "P2 per window" in tonic_label
         assert [line.get_color() for line in raw_axis.get_lines()] == [
-            "green",
-            "purple",
+            RAW_SIGNAL_COLOR,
+            RAW_REFERENCE_COLOR,
         ]
-        assert [line.get_color() for line in tonic_axis.get_lines()] == ["black"]
+        expected_slow_color = (
+            DFF_COLOR if tonic_label.startswith("Slow dF/F") else SUMMARY_TRACE_COLOR
+        )
+        assert [line.get_color() for line in tonic_axis.get_lines()] == [
+            expected_slow_color
+        ]
         assert not any(line.get_label().endswith("(P2 per window)") for line in raw_axis.get_lines())
         assert not any(
             line.get_label() in {"Raw signal", "Raw reference"}

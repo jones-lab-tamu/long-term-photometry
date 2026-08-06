@@ -5,9 +5,16 @@ import numpy as np
 import pytest
 
 import tools.plot_phasic_correction_impact as impact
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+)
 
 
-def test_build_correction_impact_figure_has_four_panels_and_expected_semantics():
+def test_build_correction_impact_figure_has_three_panels_and_expected_semantics():
     t = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
     sig = np.array([57.0, 60.0, 63.0, 60.0], dtype=float)
     iso = np.array([84.5, 85.0, 85.5, 85.0], dtype=float)
@@ -26,28 +33,30 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         baseline_subtract_before_fit=False,
     )
     try:
-        assert len(axes) == 4
-        ax1, ax2, ax3, ax4 = axes
+        assert len(axes) == 3
+        ax1, ax2, ax3 = axes
 
         # Panel 1: raw absolute inputs unchanged
         assert np.allclose(ax1.lines[0].get_ydata(), sig)
         assert np.allclose(ax1.lines[1].get_ydata(), iso)
-        assert "Stage 1 - Original Inputs + Bleach Fits" in ax1.get_title()
+        assert ax1.get_title() == "Original Signal and Reference"
+        assert ax1.lines[0].get_color() == RAW_SIGNAL_COLOR
+        assert ax1.lines[1].get_color() == RAW_REFERENCE_COLOR
 
-        # Panel 2: bleach-corrected inputs (bleach off => equals originals)
+        # Panel 2: correction-reference frame (bleach off => equals originals)
         assert np.allclose(ax2.lines[0].get_ydata(), sig)
-        assert np.allclose(ax2.lines[1].get_ydata(), iso)
-        assert "Stage 2 - Bleach-corrected Inputs" in ax2.get_title()
+        assert np.allclose(ax2.lines[1].get_ydata(), fit)
+        assert ax2.get_title() == "Correction Reference"
+        assert ax2.lines[0].get_label() == "Signal used for correction"
+        assert ax2.lines[1].get_label() == "Fitted reference"
+        assert ax2.lines[0].get_color() == RAW_SIGNAL_COLOR
+        assert ax2.lines[1].get_color() == FITTED_REFERENCE_COLOR
+        assert ax2.lines[1].get_linestyle() == "--"
 
-        # Panel 3/4: dynamic-fit frame and final output
-        assert np.allclose(ax3.lines[0].get_ydata(), sig)
-        assert np.allclose(ax3.lines[1].get_ydata(), fit)
-        assert (
-            ax3.get_title()
-            == "Stage 3 - Dynamic Reference Fitting (Rolling regression (filtered→raw); baseline subtract before fit: off; bleach correction: off)"
-        )
-        assert np.allclose(ax4.lines[0].get_ydata(), dff)
-        assert ax4.get_title() == "Stage 4 - Final Corrected dF/F"
+        # Panel 3: final output
+        assert np.allclose(ax3.lines[0].get_ydata(), dff)
+        assert ax3.get_title() == "Corrected dF/F"
+        assert ax3.lines[0].get_color() == DFF_COLOR
     finally:
         import matplotlib.pyplot as plt
 
@@ -75,13 +84,15 @@ def test_build_correction_impact_figure_signal_only_uses_persisted_baseline_labe
         signal_only_qc={"signal_only_f0_candidate_viability": "contextual"},
     )
     try:
-        ax3 = axes[2]
-        assert np.allclose(ax3.lines[0].get_ydata(), sig)
-        assert np.allclose(ax3.lines[1].get_ydata(), baseline)
-        assert ax3.lines[1].get_label() == "Signal-only F0 baseline"
-        assert "Signal-Only F0" in ax3.get_title()
-        assert "Baseline support: contextual." in [text.get_text() for text in ax3.texts]
-        assert np.allclose(axes[3].lines[0].get_ydata(), dff)
+        ax2 = axes[1]
+        assert np.allclose(ax2.lines[0].get_ydata(), sig)
+        assert np.allclose(ax2.lines[1].get_ydata(), baseline)
+        assert ax2.lines[1].get_label() == "F0 baseline"
+        assert ax2.lines[1].get_color() == NEUTRAL_BASELINE_COLOR
+        assert ax2.lines[1].get_color() != FITTED_REFERENCE_COLOR
+        assert ax2.lines[1].get_linestyle() == "--"
+        assert "Baseline support: contextual." in [text.get_text() for text in ax2.texts]
+        assert np.allclose(axes[2].lines[0].get_ydata(), dff)
     finally:
         import matplotlib.pyplot as plt
 
@@ -124,8 +135,8 @@ def test_build_correction_impact_figure_global_mode_title():
     )
     try:
         assert (
-            axes[2].get_title()
-            == "Stage 3 - Dynamic Reference Fitting (Global linear regression; baseline subtract before fit: inactive; bleach correction: off)"
+            axes[1].get_title()
+            == "Correction Reference"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -161,22 +172,17 @@ def test_build_correction_impact_figure_uses_stage_aware_bleach_panels_and_frame
         iso_bleach_corrected=iso_bleach_corrected,
     )
     try:
-        ax1, ax2, ax3, _ax4 = axes
+        ax1, ax2, ax3 = axes
         assert len(ax1.lines) == 4
         assert np.allclose(ax1.lines[2].get_ydata(), sig_bleach_fit)
         assert np.allclose(ax1.lines[3].get_ydata(), iso_bleach_fit)
 
+        fit_engine_expected = fit - (sig - sig_bleach_corrected)
         assert len(ax2.lines) == 2
         assert np.allclose(ax2.lines[0].get_ydata(), sig_bleach_corrected)
-        assert np.allclose(ax2.lines[1].get_ydata(), iso_bleach_corrected)
-
-        fit_engine_expected = fit - (sig - sig_bleach_corrected)
-        assert len(ax3.lines) == 2
-        assert np.allclose(ax3.lines[0].get_ydata(), sig_bleach_corrected)
-        assert np.allclose(ax3.lines[1].get_ydata(), fit_engine_expected)
-        ax3 = axes[2]
-        assert "stage 3 - dynamic reference fitting" in ax3.get_title().lower()
-        assert "bleach correction: single exponential" in ax3.get_title().lower()
+        assert np.allclose(ax2.lines[1].get_ydata(), fit_engine_expected)
+        assert ax2.get_title() == "Correction Reference"
+        assert np.allclose(ax3.lines[0].get_ydata(), dff)
     finally:
         import matplotlib.pyplot as plt
 
@@ -202,7 +208,7 @@ def test_build_correction_impact_figure_double_exponential_labeling():
         bleach_correction_mode="double_exponential",
     )
     try:
-        assert "bleach correction: double exponential" in axes[2].get_title().lower()
+        assert axes[1].get_title() == "Correction Reference"
     finally:
         import matplotlib.pyplot as plt
 
@@ -229,8 +235,8 @@ def test_build_correction_impact_figure_rolling_filtered_to_filtered_with_baseli
     )
     try:
         assert (
-            axes[2].get_title()
-            == "Stage 3 - Dynamic Reference Fitting (Rolling regression (filtered→filtered); baseline subtract before fit: on; bleach correction: off)"
+            axes[1].get_title()
+            == "Correction Reference"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -258,8 +264,8 @@ def test_build_correction_impact_figure_robust_mode_title():
     )
     try:
         assert (
-            axes[2].get_title()
-            == "Stage 3 - Dynamic Reference Fitting (Robust global fit + event rejection; baseline subtract before fit: inactive; bleach correction: off)"
+            axes[1].get_title()
+            == "Correction Reference"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -287,8 +293,8 @@ def test_build_correction_impact_figure_adaptive_mode_title():
     )
     try:
         assert (
-            axes[2].get_title()
-            == "Stage 3 - Dynamic Reference Fitting (Adaptive event-gated regression; baseline subtract before fit: inactive; bleach correction: off)"
+            axes[1].get_title()
+            == "Correction Reference"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -326,7 +332,7 @@ def test_resolve_dynamic_fit_settings_accepts_double_exponential_mode(tmp_path):
     assert bleach == "double_exponential"
 
 
-def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
+def test_main_generates_png_with_three_panel_layout(tmp_path, monkeypatch):
     analysis_out = tmp_path / "analysis"
     analysis_out.mkdir(parents=True, exist_ok=True)
     (analysis_out / "config_used.yaml").write_text(

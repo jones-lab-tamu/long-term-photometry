@@ -271,12 +271,12 @@ def test_combined_native_results_index_and_switching_use_saved_files(
         assert not viewer._workspace.isHidden()
         assert _tab_labels(viewer) == [
             "Verification",
-            "Tonic",
-            "Phasic Sig/Iso",
+            "Slow Signal",
+            "Signal / Reference",
             "Correction Reference",
-            "Phasic dFF",
-            "Phasic Stacked",
-            "Phasic Summary",
+            "dF/F",
+            "Stacked dF/F",
+            "Event Summary",
         ]
         indexed = viewer._native_continuous_artifact_index["artifacts"]
         assert len(indexed) == 21
@@ -286,15 +286,15 @@ def test_combined_native_results_index_and_switching_use_saved_files(
             for roi in viewer.available_regions()
         )
         records = viewer.available_artifacts()
-        assert sum(record["label"] == "Detected events" for record in records) == 1
+        assert sum(record["label"] == "Detected Events" for record in records) == 1
         assert {
             record["label"]
             for record in records
             if record["artifact_type"] == "table"
         } == {
-            "Phasic window summary",
-            "Tonic window summary",
-            "Detected events",
+            "Event Window Summary",
+            "Slow Signal Window Summary",
+            "Detected Events",
         }
         assert records[0]["path"].endswith("phasic_correction_impact.png")
         assert viewer.active_artifact_path().endswith("phasic_correction_impact.png")
@@ -314,28 +314,28 @@ def test_native_continuous_phasic_summary_groups_saved_images_and_wraps(
     viewer = RunReportViewer()
     try:
         assert viewer.load_report(combined_run.run_dir) is True
-        _select_native_tab(viewer, "Phasic Summary")
+        _select_native_tab(viewer, "Event Summary")
 
-        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_title_label.text() == "Corrected Signal Area Over Time"
         assert viewer._image_counter_label.text() == "1/2"
         assert not viewer._prev_btn.isHidden()
         assert not viewer._next_btn.isHidden()
         assert viewer.active_artifact_path().endswith("phasic_auc_timeseries.png")
 
         viewer._next_btn.click()
-        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_title_label.text() == "Detected Event Rate Over Time"
         assert viewer._image_counter_label.text() == "2/2"
         assert viewer.active_artifact_path().endswith("phasic_peak_rate_timeseries.png")
 
         viewer._next_btn.click()
-        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_title_label.text() == "Corrected Signal Area Over Time"
         assert viewer._image_counter_label.text() == "1/2"
         viewer._prev_btn.click()
-        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_title_label.text() == "Detected Event Rate Over Time"
         assert viewer._image_counter_label.text() == "2/2"
 
         viewer._region_combo.setCurrentIndex(1)
-        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert viewer._image_title_label.text() == "Corrected Signal Area Over Time"
         assert viewer._image_counter_label.text() == "1/2"
         assert viewer.active_artifact_path().endswith(
             os.path.join(viewer.selected_region(), "summary", "phasic_auc_timeseries.png")
@@ -351,12 +351,12 @@ def test_native_continuous_phasic_only_summary_uses_same_grouping(
     viewer = RunReportViewer()
     try:
         assert viewer.load_report(phasic_run.run_dir) is True
-        assert _tab_labels(viewer) == ["Verification", "Phasic Summary"]
-        _select_native_tab(viewer, "Phasic Summary")
-        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        assert _tab_labels(viewer) == ["Verification", "Event Summary"]
+        _select_native_tab(viewer, "Event Summary")
+        assert viewer._image_title_label.text() == "Corrected Signal Area Over Time"
         assert viewer._image_counter_label.text() == "1/2"
         viewer._next_btn.click()
-        assert viewer._image_title_label.text() == "Peak rate"
+        assert viewer._image_title_label.text() == "Detected Event Rate Over Time"
         assert viewer._image_counter_label.text() == "2/2"
     finally:
         viewer.close()
@@ -387,8 +387,8 @@ def test_native_continuous_single_summary_image_hides_pagination(
         assert viewer.install_prepared_native_continuous_artifacts(
             combined_run.run_dir, prepared
         ) is True
-        _select_native_tab(viewer, "Phasic Summary")
-        assert viewer._image_title_label.text() == "Phasic signal AUC"
+        _select_native_tab(viewer, "Event Summary")
+        assert viewer._image_title_label.text() == "Corrected Signal Area Over Time"
         assert viewer._image_counter_label.text() == ""
         assert viewer._prev_btn.isHidden()
         assert viewer._next_btn.isHidden()
@@ -412,7 +412,7 @@ def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
         assert "Artifact" not in verification_metadata
         assert "Timeline:" not in verification_metadata
 
-        _select_native_tab(viewer, "Tonic")
+        _select_native_tab(viewer, "Slow Signal")
         tonic_metadata = viewer._artifact_metadata_label.text()
         assert f"ROI: {viewer.selected_region()}" in tonic_metadata
         assert "Timeline:" in tonic_metadata
@@ -425,11 +425,11 @@ def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
             for record in viewer.available_artifacts()
             if str(record.get("relative_path", "")).endswith("tonic_overview.png")
         )
-        assert f"Tonic method: {tonic_record['tonic_method_label']}" in tonic_metadata
+        assert f"Slow-signal method: {tonic_record['tonic_method_label']}" in tonic_metadata
         assert f"Units: {tonic_record['tonic_units_label']}" in tonic_metadata
         assert "Artifact" not in tonic_metadata
 
-        _select_native_tab(viewer, "Phasic Summary")
+        _select_native_tab(viewer, "Event Summary")
         auc_metadata = viewer._artifact_metadata_label.text()
         auc_record = next(
             record
@@ -450,7 +450,7 @@ def test_native_continuous_metadata_is_concise_and_tracks_selected_summary(
         assert "AUC units:" not in peak_metadata
         assert "Artifact" not in peak_metadata
 
-        _select_native_tab(viewer, "Phasic Sig/Iso")
+        _select_native_tab(viewer, "Signal / Reference")
         day_plot_metadata = viewer._artifact_metadata_label.text()
         assert "Continuous Day Plots sample two 10-minute windows" in day_plot_metadata
         assert "Columns: 00–10 min; 30–40 min" in day_plot_metadata
@@ -612,7 +612,7 @@ def test_large_detected_events_remains_saved_but_not_a_primary_tab(
     try:
         assert viewer.load_report(str(broken)) is True
         monkeypatch.setattr(viewer, "_open_path", opened.append)
-        assert "Detected events" not in _tab_labels(viewer)
+        assert "Detected Events" not in _tab_labels(viewer)
         assert any(
             record["relative_path"]
             == "_analysis/phasic_out/features/continuous_phasic_events.csv"
@@ -634,18 +634,18 @@ def test_large_detected_events_remains_saved_but_not_a_primary_tab(
     [
         (
             "phasic_run",
-            {"Tonic overview", "Tonic window summary"},
-            {"Verification", "Phasic Summary"},
+                {"Slow Signal Summary", "Slow Signal Window Summary"},
+                {"Verification", "Event Summary"},
         ),
         (
             "tonic_run",
             {
                 "Verification",
-                "Phasic Summary",
-                "Phasic window summary",
-                "Detected events",
+                "Event Summary",
+                "Event Window Summary",
+                "Detected Events",
             },
-            {"Tonic"},
+            {"Slow Signal"},
         ),
     ],
 )

@@ -3223,7 +3223,7 @@ def main():
                 manifest['deliverables'][roi]['diagnostic_chunk_id'] = int(cid_diag)
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
-                # A. Phasic Correction Impact (4-panel + session CSV)
+    # A. Phasic Correction Impact (3-panel + session CSV)
                 cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
                               '--analysis-out', phasic_out,
                               '--roi', roi,

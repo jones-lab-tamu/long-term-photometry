@@ -837,7 +837,7 @@ def test_tuning_mode_switch_preserves_results_region_tab_and_image(window, tmp_p
     window._report_viewer._region_combo.setCurrentText("Region1")
     phasic_raw_idx = -1
     for i in range(window._report_viewer._tabs.count()):
-        if window._report_viewer._tabs.tabText(i) == "Phasic Sig/Iso":
+        if window._report_viewer._tabs.tabText(i) == "Signal / Reference":
             phasic_raw_idx = i
             break
     assert phasic_raw_idx >= 0
@@ -975,7 +975,7 @@ def test_correction_mode_switch_preserves_results_region_tab_and_image(window, t
     window._report_viewer._region_combo.setCurrentText("Region1")
     phasic_raw_idx = -1
     for i in range(window._report_viewer._tabs.count()):
-        if window._report_viewer._tabs.tabText(i) == "Phasic Sig/Iso":
+        if window._report_viewer._tabs.tabText(i) == "Signal / Reference":
             phasic_raw_idx = i
             break
     assert phasic_raw_idx >= 0
@@ -3445,4 +3445,3 @@ def test_correction_tuning_state_resets_on_new_run(window, tmp_path, monkeypatch
     assert window._correction_tuning_summary_label.text() == "No correction retune result yet."
     assert window._correction_tuning_inspection_title.text() == "No correction inspection artifact loaded."
     assert not window._open_correction_tuning_dir_btn.isEnabled()
-

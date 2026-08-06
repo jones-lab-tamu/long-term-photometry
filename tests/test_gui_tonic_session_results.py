@@ -17,6 +17,7 @@ from photometry_pipeline.tonic_session_plot import (
     METHOD_SIGNAL_ONLY,
     TONIC_FALLBACK_NOTE,
     TONIC_SESSION_PLOT_FILENAME,
+    tonic_method_label,
 )
 
 
@@ -119,7 +120,9 @@ def test_fallback_explanation_appears_once_for_a_fallback_roi(qapp):
     viewer._refresh_tonic_method_note()
 
     text = viewer._tonic_method_note_label.text()
-    assert text.startswith("Tonic method: Tonic F, signal-only bleach corrected.")
+    assert text.startswith(
+        f"Slow-signal method: {tonic_method_label(METHOD_SIGNAL_ONLY)}."
+    )
     assert TONIC_FALLBACK_NOTE in text
     assert "nonpositive_global_slope" in text
     # Exactly one explanation for the ROI -- never repeated per session.
@@ -132,7 +135,9 @@ def test_primary_method_states_its_method_without_a_fallback_warning(qapp):
     viewer._refresh_tonic_method_note()
 
     text = viewer._tonic_method_note_label.text()
-    assert text == "Tonic method: Global-isosbestic ΔF/F₀."
+    assert text == (
+        f"Slow-signal method: {tonic_method_label(METHOD_GLOBAL_ISOSBESTIC)}."
+    )
     assert TONIC_FALLBACK_NOTE not in text
 
 
@@ -154,7 +159,7 @@ def test_note_switches_method_between_rois(qapp):
     viewer._region_combo.setCurrentText("Region1")
     viewer._refresh_tonic_method_note()
     assert viewer._tonic_method_note_label.text() == (
-        "Tonic method: Global-isosbestic ΔF/F₀."
+        f"Slow-signal method: {tonic_method_label(METHOD_GLOBAL_ISOSBESTIC)}."
     )
 
 

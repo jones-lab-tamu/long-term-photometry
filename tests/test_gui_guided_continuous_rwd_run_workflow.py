@@ -1874,7 +1874,7 @@ def test_live_workflow_produces_a_completed_run_that_opens_in_results(
     assert viewer._native_continuous_artifact_index is not None
     assert [
         viewer._tabs.tabText(i) for i in range(viewer._tabs.count())
-    ] == ["Verification", "Tonic", "Phasic Summary"]
+    ] == ["Verification", "Slow Signal", "Event Summary"]
 
 
 # ---------------------------------------------------------------------------

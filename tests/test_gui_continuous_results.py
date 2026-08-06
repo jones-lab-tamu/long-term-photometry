@@ -141,12 +141,12 @@ def test_native_continuous_load_report_routes_to_saved_artifact_viewer(
     assert not viewer._workspace.isHidden()
     assert viewer.available_view_tabs() == [
         "Verification",
-        "Tonic",
-        "Phasic Sig/Iso",
+        "Slow Signal",
+        "Signal / Reference",
         "Correction Reference",
-        "Phasic dFF",
-        "Phasic Stacked",
-        "Phasic Summary",
+        "dF/F",
+        "Stacked dF/F",
+        "Event Summary",
     ]
 
 
@@ -198,8 +198,8 @@ def test_correction_only_presentation(qapp, correction_only_run, included_roi_id
     overview_text = viewer._continuous_overview_label.text()
     assert "Continuous recording" in overview_text
     assert "Correction: Completed" in overview_text
-    assert "Tonic analysis: Not run" in overview_text
-    assert "Phasic event analysis: Not run" in overview_text
+    assert "Slow-signal analysis: Not run" in overview_text
+    assert "Event analysis: Not run" in overview_text
     for roi_id in included_roi_ids:
         assert roi_id in overview_text
 
@@ -229,7 +229,7 @@ def test_tonic_only_presentation(qapp, tonic_only_run, included_roi_ids):
     tab_labels = [
         viewer._continuous_tabs.tabText(i) for i in range(viewer._continuous_tabs.count())
     ]
-    assert tab_labels == ["Tonic"]
+    assert tab_labels == ["Slow Signal"]
 
     assert not viewer._continuous_tonic_interaction._pixmap.isNull()
     assert viewer._continuous_tonic_summary_table.rowCount() > 0
@@ -301,7 +301,7 @@ def test_phasic_only_presentation(qapp, phasic_only_run, included_roi_ids):
     tab_labels = [
         viewer._continuous_tabs.tabText(i) for i in range(viewer._continuous_tabs.count())
     ]
-    assert tab_labels == ["Phasic"]
+    assert tab_labels == ["Events"]
     assert not viewer._continuous_roi_row.isHidden()
 
     overview = subject.load_continuous_run_overview(phasic_only_run.run_dir)
@@ -376,7 +376,7 @@ def test_combined_presentation(qapp, combined_run, included_roi_ids):
     tab_labels = [
         viewer._continuous_tabs.tabText(i) for i in range(viewer._continuous_tabs.count())
     ]
-    assert tab_labels == ["Tonic", "Phasic"]
+    assert tab_labels == ["Slow Signal", "Events"]
 
     combo_items = [
         viewer._continuous_roi_combo.itemText(i)

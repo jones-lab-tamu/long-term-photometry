@@ -7,7 +7,13 @@ import numpy as np
 import pandas as pd
 
 from gui.run_report_parser import is_successful_completed_run_dir, resolve_region_deliverables
-from photometry_pipeline.continuous_outputs import generate_continuous_summary_plots
+from photometry_pipeline.continuous_outputs import (
+    _continuous_auc_display_units,
+    generate_continuous_phasic_plots,
+    generate_continuous_summary_plots,
+    generate_continuous_tonic_plots,
+)
+from photometry_pipeline.viz.semantic_colors import SUMMARY_TRACE_COLOR
 
 
 def _write_phasic_summary(path: Path) -> None:
@@ -129,6 +135,102 @@ def test_continuous_phasic_plots_are_generated_from_summary_csv(tmp_path: Path):
     assert "Region0/summary/phasic_peak_rate_timeseries.png" in result["summary_plots"]
     assert "Region0/summary/phasic_auc_timeseries.png" in result["summary_plots"]
     assert any(skip["reason"] == "tonic mode not requested" for skip in result["plot_skips"])
+
+
+def test_continuous_summary_labels_units_and_colors_are_scientist_facing(
+    tmp_path: Path, monkeypatch
+):
+    run_dir = tmp_path / "run"
+    _write_phasic_summary(
+        run_dir / "Region0" / "tables" / "continuous_phasic_window_summary.csv"
+    )
+    report_path = run_dir / "_analysis" / "phasic_out" / "run_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "continuous_phasic_auc": {
+                    "global_defaults": {"event_signal": "delta_f"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    captured = []
+    real_subplots = plt.subplots
+    monkeypatch.setattr(
+        plt,
+        "subplots",
+        lambda *args, **kwargs: captured.append(real_subplots(*args, **kwargs))
+        or captured[-1],
+    )
+
+    result = generate_continuous_phasic_plots(str(run_dir))
+
+    assert len(captured) == 3
+    assert [axis.get_title() for _figure, axis in captured] == [
+        "Region0 Detected Event Rate Over Time",
+        "Region0 Detected Event Count Over Time",
+        "Region0 Corrected Signal Area Over Time",
+    ]
+    assert [axis.get_lines()[0].get_color() for _figure, axis in captured] == [
+        SUMMARY_TRACE_COLOR,
+        SUMMARY_TRACE_COLOR,
+        SUMMARY_TRACE_COLOR,
+    ]
+    assert captured[2][1].get_ylabel() == "Corrected signal area per window (deltaF\u00b7s)"
+    assert result["generated_files"]
+
+    report_path.write_text(
+        json.dumps(
+            {
+                "continuous_phasic_auc": {
+                    "effective_settings_by_roi": {
+                        "Region0": {"event_signal": "dff"}
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _continuous_auc_display_units(str(run_dir), "Region0") == "dF/F\u00b7s"
+
+
+def test_continuous_tonic_summary_uses_slow_signal_text_and_neutral_trace(
+    tmp_path: Path, monkeypatch
+):
+    run_dir = tmp_path / "run"
+    _write_tonic_summary(
+        run_dir / "Region0" / "tables" / "continuous_tonic_window_summary.csv"
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    captured = []
+    real_subplots = plt.subplots
+    monkeypatch.setattr(
+        plt,
+        "subplots",
+        lambda *args, **kwargs: captured.append(real_subplots(*args, **kwargs))
+        or captured[-1],
+    )
+
+    generate_continuous_tonic_plots(str(run_dir))
+
+    assert len(captured) == 1
+    _figure, axis = captured[0]
+    assert axis.get_title() == "Region0 Slow Signal Summary"
+    assert axis.get_ylabel() == "Slow signal (deltaF), median per window"
+    assert axis.get_lines()[0].get_color() == SUMMARY_TRACE_COLOR
 
 
 def test_continuous_phasic_plot_skip_does_not_create_empty_summary_folder(tmp_path: Path):

@@ -116,16 +116,17 @@ def test_gui_completed_run_parser_accepts_continuous_phasic_summary_outputs(
     assert (out_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
-    assert tab_map["Phasic Summary"] == [
+    assert tab_map["Event Summary"] == [
         "phasic_auc_timeseries.png",
+        "phasic_peak_count_timeseries.png",
         "phasic_peak_rate_timeseries.png",
     ]
     assert tab_map["Continuous Trace"] == ["continuous_phasic_dff_trace_overview.png"]
-    assert tab_map["Tonic"] == []
-    assert tab_map["Phasic Sig/Iso"] == []
-    assert tab_map["Dynamic Fit"] == []
-    assert tab_map["Phasic dFF"] == []
-    assert tab_map["Phasic Stacked"] == []
+    assert tab_map["Slow Signal"] == []
+    assert tab_map["Signal / Reference"] == []
+    assert tab_map["Correction Reference"] == []
+    assert tab_map["dF/F"] == []
+    assert tab_map["Stacked dF/F"] == []
 
 
 def test_gui_completed_run_parser_accepts_continuous_both_summary_outputs(
@@ -144,19 +145,20 @@ def test_gui_completed_run_parser_accepts_continuous_both_summary_outputs(
     assert (out_dir / "Region0" / "summary" / "continuous_tonic_trace_overview.png").exists()
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
-    assert tab_map["Tonic"] == ["tonic_overview.png"]
-    assert tab_map["Phasic Summary"] == [
+    assert tab_map["Slow Signal"] == ["tonic_overview.png"]
+    assert tab_map["Event Summary"] == [
         "phasic_auc_timeseries.png",
+        "phasic_peak_count_timeseries.png",
         "phasic_peak_rate_timeseries.png",
     ]
     assert tab_map["Continuous Trace"] == [
         "continuous_phasic_dff_trace_overview.png",
         "continuous_tonic_trace_overview.png",
     ]
-    assert tab_map["Phasic Sig/Iso"] == []
-    assert tab_map["Dynamic Fit"] == []
-    assert tab_map["Phasic dFF"] == []
-    assert tab_map["Phasic Stacked"] == []
+    assert tab_map["Signal / Reference"] == []
+    assert tab_map["Correction Reference"] == []
+    assert tab_map["dF/F"] == []
+    assert tab_map["Stacked dF/F"] == []
 
 
 def test_gui_completed_run_parser_accepts_continuous_tonic_only_summary_outputs(
@@ -179,10 +181,10 @@ def test_gui_completed_run_parser_accepts_continuous_tonic_only_summary_outputs(
     )
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
-    assert tab_map["Tonic"] == ["tonic_overview.png"]
+    assert tab_map["Slow Signal"] == ["tonic_overview.png"]
     assert tab_map["Continuous Trace"] == ["continuous_tonic_trace_overview.png"]
-    assert tab_map["Phasic Summary"] == []
-    assert tab_map["Phasic Sig/Iso"] == []
-    assert tab_map["Dynamic Fit"] == []
-    assert tab_map["Phasic dFF"] == []
-    assert tab_map["Phasic Stacked"] == []
+    assert tab_map["Event Summary"] == []
+    assert tab_map["Signal / Reference"] == []
+    assert tab_map["Correction Reference"] == []
+    assert tab_map["dF/F"] == []
+    assert tab_map["Stacked dF/F"] == []

@@ -54,6 +54,14 @@ from photometry_pipeline.completed_run_review import (
     resolve_analysis_plot_context,
     resolve_persisted_cache_strategy,
 )
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    color_to_rgb,
+)
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -786,7 +794,18 @@ def _dynamic_fit_panel_ranges_with_day_min_span(slot_map):
     return final_ranges
 
 
-def _paint_trace_minmax(tile_arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h, color, stroke=1):
+def _paint_trace_minmax(
+    tile_arr,
+    x_idx,
+    y_idx,
+    plot_x0,
+    plot_y0,
+    plot_w,
+    plot_h,
+    color,
+    stroke=1,
+    dash_period=None,
+):
     if x_idx.size == 0:
         return
     y_min = np.full(plot_w, plot_h, dtype=np.int32)
@@ -799,6 +818,8 @@ def _paint_trace_minmax(tile_arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h
 
     half = max(0, stroke // 2)
     for col in cols:
+        if dash_period and (int(col) // int(dash_period)) % 2:
+            continue
         y0 = int(y_min[col])
         y1 = int(y_max[col])
         if y1 < y0:
@@ -862,7 +883,7 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
         y_idx = np.clip(y_idx, 0, plot_h - 1)
         _paint_trace_minmax(
             arr, x_idx[sig_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(0, 140, 0), stroke=1
+            color=color_to_rgb(RAW_SIGNAL_COLOR), stroke=1
         )
 
     uv = panel['uv'][domain_mask]
@@ -873,7 +894,7 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
         y_idx = np.clip(y_idx, 0, plot_h - 1)
         _paint_trace_minmax(
             arr, x_idx[uv_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(180, 0, 180), stroke=1
+            color=color_to_rgb(RAW_REFERENCE_COLOR), stroke=1
         )
 
     tile = Image.fromarray(arr)
@@ -940,7 +961,7 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
         y_idx = np.clip(y_idx, 0, plot_h - 1)
         _paint_trace_minmax(
             arr, x_idx[sig_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(0, 140, 0), stroke=1
+            color=color_to_rgb(RAW_SIGNAL_COLOR), stroke=1
         )
 
     fit = panel['fit_ref'][domain_mask]
@@ -951,7 +972,31 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
         y_idx = np.clip(y_idx, 0, plot_h - 1)
         _paint_trace_minmax(
             arr, x_idx[fit_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(0, 0, 0), stroke=1
+            color=color_to_rgb(
+                NEUTRAL_BASELINE_COLOR
+                if (
+                    str(panel.get("correction_strategy_family", "")).strip().lower()
+                    == "signal_only_f0"
+                    or str(panel.get("correction_reference_field", "")).strip()
+                    == "signal_only_f0_baseline"
+                )
+                else FITTED_REFERENCE_COLOR
+            ),
+            stroke=1,
+            # The lightweight pixel renderer implements dashes by suppressing
+            # whole x-columns. That is appropriate for the neutral F0
+            # baseline, but it makes a fitted reference appear as repeated
+            # vertical bands. A fitted reference must retain every x-column.
+            dash_period=(
+                max(2, plot_w // 40)
+                if (
+                    str(panel.get("correction_strategy_family", "")).strip().lower()
+                    == "signal_only_f0"
+                    or str(panel.get("correction_reference_field", "")).strip()
+                    == "signal_only_f0_baseline"
+                )
+                else None
+            ),
         )
 
     tile = Image.fromarray(arr)
@@ -968,6 +1013,33 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
 
 def _build_blank_dynamic_fit_tile(layout):
     return _build_blank_sig_iso_tile(layout)
+
+
+def _plot_dynamic_fit_panel(ax, panel, panel_y_range):
+    """Draw one full-renderer Correction Reference panel from saved arrays."""
+    ax.set_ylim(panel_y_range[0], panel_y_range[1])
+    is_signal_only_f0 = (
+        str(panel.get("correction_strategy_family", "")).strip().lower()
+        == "signal_only_f0"
+        or str(panel.get("correction_reference_field", "")).strip()
+        == "signal_only_f0_baseline"
+    )
+    signal_line = ax.plot(
+        panel["t"],
+        panel["sig_fit"],
+        color=RAW_SIGNAL_COLOR,
+        lw=0.5,
+        label="Signal used for correction",
+    )[0]
+    reference_line = ax.plot(
+        panel["t"],
+        panel["fit_ref"],
+        color=NEUTRAL_BASELINE_COLOR if is_signal_only_f0 else FITTED_REFERENCE_COLOR,
+        lw=0.5,
+        linestyle="--",
+        label="F0 baseline" if is_signal_only_f0 else "Fitted reference",
+    )[0]
+    return signal_line, reference_line
 
 
 def _compose_dynamic_fit_day_tile_canvas(
@@ -999,11 +1071,7 @@ def _compose_dynamic_fit_day_tile_canvas(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    reference_label = next(
-        (panel.get("reference_label") for panel in slot_map.values() if panel and not panel.get("is_missing")),
-        "Fitted reference",
-    )
-    title_txt = title_override or f"Day {day} Correction reference (Raw Signal + {reference_label}) - {plot_roi}"
+    title_txt = title_override or f"Day {day} Correction Reference - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
@@ -1084,7 +1152,7 @@ def _compose_sig_iso_day_tile_canvas(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = title_override or f"Day {day} Sig/Iso (Centered, Common Gain) - {plot_roi}"
+    title_txt = title_override or f"Day {day} Signal / Reference - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
@@ -1249,7 +1317,7 @@ def _render_dff_panel_tile_lightweight(
 
         _paint_trace_minmax(
             arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(0, 0, 0), stroke=1
+            color=color_to_rgb(DFF_COLOR), stroke=1
         )
     trace_sec = time.perf_counter() - trace_t0
 
@@ -1284,14 +1352,23 @@ def _render_dff_panel_tile_lightweight(
 
             if py_true > (y1 - y_eps):
                 top_y = plot_y0 + 1
-                draw.polygon([(px, top_y), (px - 3, top_y + 6), (px + 3, top_y + 6)], fill=(220, 0, 0))
+                draw.polygon(
+                    [(px, top_y), (px - 3, top_y + 6), (px + 3, top_y + 6)],
+                    fill=(220, 0, 0),
+                )
             elif py_true < (y0 + y_eps):
                 bot_y = plot_y1 - 1
-                draw.polygon([(px, bot_y), (px - 3, bot_y - 6), (px + 3, bot_y - 6)], fill=(220, 0, 0))
+                draw.polygon(
+                    [(px, bot_y), (px - 3, bot_y - 6), (px + 3, bot_y - 6)],
+                    fill=(220, 0, 0),
+                )
             else:
                 y_float = ((py_true - y0) / y_span) * (plot_h - 1)
                 py = int(round(plot_y0 + (plot_h - 1) - np.clip(y_float, 0, plot_h - 1)))
-                draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(220, 0, 0))
+                draw.ellipse(
+                    (px - 2, py - 2, px + 2, py + 2),
+                    fill=(220, 0, 0),
+                )
         marker_sec = time.perf_counter() - marker_t0
 
     return tile, {
@@ -1333,7 +1410,12 @@ def _compose_dff_day_tile_canvas_lightweight(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = title_override or f"Phasic QC - Day {day} - ROI {plot_roi} - Mode: DFF"
+    default_title = (
+        f"Event-Detection QC - Day {day} - ROI {plot_roi}"
+        if show_peak_markers
+        else f"dF/F - Day {day} - ROI {plot_roi}"
+    )
+    title_txt = title_override or default_title
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
@@ -1477,7 +1559,7 @@ def _render_stacked_day_canvas_lightweight(
         y_idx = np.clip(y_idx, 0, plot_h - 1)
         _paint_trace_minmax(
             arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h,
-            color=(0, 0, 0), stroke=1
+            color=color_to_rgb(DFF_COLOR), stroke=1
         )
 
     img = Image.fromarray(arr)
@@ -1485,7 +1567,7 @@ def _render_stacked_day_canvas_lightweight(
     title_font = _get_font(max(12, int(round(0.11 * dpi))))
     label_font = _get_font(max(10, int(round(0.09 * dpi))))
     tick_font = _get_font(max(9, int(round(0.08 * dpi))))
-    title_txt = title_override or f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}"
+    title_txt = title_override or f"Stacked dF/F - Day {day} (Smoothed {smooth_window_s}s) - {plot_roi}"
     if column_labels:
         title_txt += " [" + " | ".join(str(label) for label in column_labels) + "]"
     if timeline_anchor_label:
@@ -2624,6 +2706,9 @@ def main():
             'correction_strategy_family': rec.get(
                 'correction_strategy_family', correction_reference["strategy_family"]
             ),
+            'correction_reference_field': rec.get(
+                'correction_reference_field', reference_field
+            ),
             'correction_selected_strategy': rec.get(
                 'correction_selected_strategy', correction_reference["selected_strategy"]
             ),
@@ -2693,8 +2778,13 @@ def main():
                 if not slot_map:
                     continue
 
+                dff_title = (
+                    f"Event-Detection QC - Day {d} - ROI {plot_roi}"
+                    if args.show_peak_markers
+                    else f"dF/F - Day {d} - ROI {plot_roi}"
+                )
                 fig_dff.suptitle(
-                    f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF [{timeline_anchor_label}]",
+                    f"{dff_title} [{timeline_anchor_label}]",
                     fontsize=16,
                 )
 
@@ -2725,7 +2815,7 @@ def main():
                         if c == 0:
                             ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=15, va='center', fontweight='bold')
                         ax.set_title(f"Chunk {p['chunk_id']}", fontsize=6, pad=2)
-                        ax.plot(p['t'], p['dff'], 'k', lw=0.8)
+                        ax.plot(p['t'], p['dff'], color=DFF_COLOR, lw=0.8)
 
                         # Peak Overlays (Clipped vs unclipped)
                         p_idxs = np.array([], dtype=int)
@@ -2743,11 +2833,11 @@ def main():
                             mask_ok = ~(mask_hi | mask_lo)
 
                             if np.any(mask_ok):
-                                ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='red', alpha=0.6, zorder=3)
+                                ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='#dc0000', alpha=0.6, zorder=3)
                             if np.any(mask_hi):
-                                ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='red', alpha=0.8, zorder=4)
+                                ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='#dc0000', alpha=0.8, zorder=4)
                             if np.any(mask_lo):
-                                ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
+                                ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='#dc0000', alpha=0.8, zorder=4)
                             n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
 
                         # Peak-count annotation follows marker visibility and valid count metadata.
@@ -2862,7 +2952,7 @@ def main():
                 panel_y_ranges = _sig_iso_panel_ranges_with_day_min_span(slot_map)
 
                 fig_sig.suptitle(
-                    f"Day {d} Sig/Iso (Centered, Common Gain) - {plot_roi} [{timeline_anchor_label}]",
+                    f"Day {d} Signal / Reference - {plot_roi} [{timeline_anchor_label}]",
                     fontsize=16,
                 )
 
@@ -2894,8 +2984,8 @@ def main():
                             x0, x1 = _trace_domain(p['t'], p.get('xlim_600', False))
                             panel_y = _yrange_from_panel(p, x0, x1)
                         ax.set_ylim(panel_y[0], panel_y[1])
-                        ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
-                        ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
+                        ax.plot(p['t'], p['sig'], color=RAW_SIGNAL_COLOR, lw=0.5, label='Raw signal')
+                        ax.plot(p['t'], p['uv'], color=RAW_REFERENCE_COLOR, lw=0.5, label='Raw reference')
                         if p.get('xlim_600', False):
                             ax.set_xlim(0, 600)
                         if c == 0:
@@ -2977,12 +3067,8 @@ def main():
                     continue
                 panel_y_ranges = _dynamic_fit_panel_ranges_with_day_min_span(slot_map)
 
-                reference_label = next(
-                    (p.get("reference_label") for p in slot_map.values() if p and not p.get("is_missing")),
-                    "Fitted reference",
-                )
                 fig_dyn.suptitle(
-                    f"Day {d} Correction reference (Raw Signal + {reference_label}) - {plot_roi} [{timeline_anchor_label}]",
+                    f"Day {d} Correction Reference - {plot_roi} [{timeline_anchor_label}]",
                     fontsize=16,
                 )
 
@@ -3013,9 +3099,7 @@ def main():
                         if panel_y is None:
                             x0, x1 = _trace_domain(p['t'], p.get('xlim_600', False))
                             panel_y = _yrange_from_dynamic_panel(p, x0, x1)
-                        ax.set_ylim(panel_y[0], panel_y[1])
-                        ax.plot(p['t'], p['sig_fit'], 'g', lw=0.5, label='Raw signal')
-                        ax.plot(p['t'], p['fit_ref'], 'k', lw=0.5, label=p.get('reference_label', 'Fitted reference'))
+                        _plot_dynamic_fit_panel(ax, p, panel_y)
                         if p.get('xlim_600', False):
                             ax.set_xlim(0, 600)
                         if c == 0:
@@ -3130,14 +3214,14 @@ def main():
                         continue
                     t, y = tr
                     offset = (n_slots - 1 - i) * step
-                    ax.plot(t, y + offset, 'k', lw=0.5)
+                    ax.plot(t, y + offset, color=DFF_COLOR, lw=0.5)
 
                 ax.set_yticks([])
                 ax.set_ylim(y0, y1)
                 ax.set_xlabel("Time (s)")
                 ax.set_ylabel(f"Slots ({n_occupied}/{n_slots})")
                 ax.set_title(
-                    f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - "
+                    f"Stacked dF/F - Day {d} (Smoothed {args.smooth_window_s}s) - "
                     f"{plot_roi} [{timeline_anchor_label}]"
                 )
 

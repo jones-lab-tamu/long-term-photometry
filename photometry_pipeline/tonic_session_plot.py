@@ -25,6 +25,14 @@ import math
 import os
 from typing import Any, Optional, Sequence
 
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+    SUMMARY_TRACE_COLOR,
+)
+
 TONIC_SESSION_PLOT_FILENAME = "tonic_session_summary.png"
 
 METHOD_GLOBAL_ISOSBESTIC = "global_isosbestic_tonic_dff"
@@ -32,26 +40,26 @@ METHOD_SIGNAL_ONLY = "signal_only_bleach_corrected_tonic_f"
 
 #: Scientist-facing name of each tonic method.
 TONIC_METHOD_LABELS = {
-    METHOD_GLOBAL_ISOSBESTIC: "Global-isosbestic ΔF/F₀",
-    METHOD_SIGNAL_ONLY: "Tonic F, signal-only bleach corrected",
+    METHOD_GLOBAL_ISOSBESTIC: "Global reference-corrected dF/F₀",
+    METHOD_SIGNAL_ONLY: "Signal-only bleach-corrected fluorescence",
 }
 
 # Keep the compact figure title stable while the Results note identifies the
 # primary method more precisely.
 TONIC_PLOT_TITLE_LABELS = {
-    METHOD_GLOBAL_ISOSBESTIC: "Tonic ΔF/F₀",
-    METHOD_SIGNAL_ONLY: "Tonic F, signal-only bleach corrected",
+    METHOD_GLOBAL_ISOSBESTIC: "Slow dF/F₀",
+    METHOD_SIGNAL_ONLY: "Slow fluorescence (signal-only bleach-corrected)",
 }
 
 #: Y-axis label of each tonic method, carrying its real units.
 TONIC_METHOD_Y_LABELS = {
-    METHOD_GLOBAL_ISOSBESTIC: "Tonic ΔF/F₀ (fraction)",
-    METHOD_SIGNAL_ONLY: "Tonic F (raw fluorescence, AU)",
+    METHOD_GLOBAL_ISOSBESTIC: "Slow dF/F₀ — P2 per session",
+    METHOD_SIGNAL_ONLY: "Slow fluorescence — P2 per session (AU)",
 }
 
 TONIC_FALLBACK_NOTE = (
-    "The global isosbestic fit was unusable for this ROI. Tonic is shown as "
-    "signal-only, bleach-corrected fluorescence."
+    "The global reference fit was unusable for this ROI. Slow signal is shown as "
+    "slow signal-only, bleach-corrected fluorescence."
 )
 
 #: Same bounded display budget the previous tonic overview used for the raw
@@ -62,7 +70,7 @@ ELAPSED_AXIS_LABEL = "Elapsed recording time (hours)"
 SESSION_INDEX_AXIS_LABEL = "Session index"
 
 RAW_SIGNAL_LABEL = "Raw signal"
-RAW_ISOSBESTIC_LABEL = "Raw isosbestic"
+RAW_ISOSBESTIC_LABEL = "Raw reference"
 
 STATUS_VALID = "valid"
 
@@ -341,7 +349,7 @@ def generate_tonic_session_plots(
     frame = read_tonic_session_summary(run_dir, summary_path=summary_path)
     if frame is None:
         raise TonicSessionPlotError(
-            "The session-level tonic summary required for the Tonic view is missing."
+            "The session-level slow-signal summary required for the Slow Signal view is missing."
         )
 
     analysis_dir = _tonic_out_dir(run_dir, tonic_out_dir)
@@ -369,8 +377,8 @@ def generate_tonic_session_plots(
 
             method = str(group["tonic_method"].iloc[0])
             units = str(group["units"].iloc[0])
-            title_label = TONIC_PLOT_TITLE_LABELS.get(method, "Tonic")
-            y_label = TONIC_METHOD_Y_LABELS.get(method, "Tonic value")
+            title_label = TONIC_PLOT_TITLE_LABELS.get(method, "Slow Signal")
+            y_label = TONIC_METHOD_Y_LABELS.get(method, "Slow signal value")
 
             statuses = [str(value) for value in group["status"]]
             values = [float(value) for value in group["tonic_value"]]
@@ -397,20 +405,20 @@ def generate_tonic_session_plots(
                     raw_axis.plot(
                         segment["hours"][::stride],
                         segment["sig"][::stride],
-                        color="#2e7d32",
+                        color=RAW_SIGNAL_COLOR,
                         linewidth=0.6,
                         label=RAW_SIGNAL_LABEL if position == 0 else "_nolegend_",
                     )
                     raw_axis.plot(
                         segment["hours"][::stride],
                         segment["uv"][::stride],
-                        color="#6a1b9a",
+                        color=RAW_REFERENCE_COLOR,
                         linewidth=0.6,
                         alpha=0.85,
                         label=RAW_ISOSBESTIC_LABEL if position == 0 else "_nolegend_",
                     )
                 raw_axis.set_ylabel("Raw fluorescence (AU)")
-                raw_axis.set_title(f"{roi} — signal and isosbestic overview")
+                raw_axis.set_title(f"{roi} — Signal and Reference Overview")
                 raw_axis.grid(True, alpha=0.3)
                 if segments:
                     raw_axis.legend(loc="upper right", fontsize="small")
@@ -422,12 +430,17 @@ def generate_tonic_session_plots(
                     else "unplaced"
                     for position, status in enumerate(statuses)
                 ]
+                slow_signal_color = (
+                    DFF_COLOR
+                    if method == METHOD_GLOBAL_ISOSBESTIC
+                    else SUMMARY_TRACE_COLOR
+                )
                 for run in _valid_runs(plotted_statuses):
                     if len(run) > 1:
                         tonic_axis.plot(
                             [hours[i] for i in run],
                             [values[i] for i in run],
-                            color="#1f4e79",
+                            color=slow_signal_color,
                             linewidth=1.2,
                             zorder=2,
                         )
@@ -442,12 +455,12 @@ def generate_tonic_session_plots(
                     linestyle="none",
                     marker="o",
                     markersize=3.5,
-                    color="#1f4e79",
+                    color=slow_signal_color,
                     zorder=3,
                 )
                 if method == METHOD_GLOBAL_ISOSBESTIC:
                     tonic_axis.axhline(
-                        0.0, color="#999999", linewidth=0.8, linestyle=":", zorder=1
+                        0.0, color=NEUTRAL_BASELINE_COLOR, linewidth=0.8, linestyle=":", zorder=1
                     )
                 tonic_axis.set_title(f"{roi} — {title_label}")
                 tonic_axis.set_xlabel(x_label)
@@ -467,7 +480,7 @@ def generate_tonic_session_plots(
                     "tonic_method": method,
                     "units": units,
                     "title": f"{roi} — {title_label}",
-                    "raw_title": f"{roi} — signal and isosbestic overview",
+                    "raw_title": f"{roi} — Signal and Reference Overview",
                     "y_label": y_label,
                     "x_label": x_label,
                     "n_plotted": len(plotted),

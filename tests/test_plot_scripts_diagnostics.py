@@ -6,6 +6,68 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytest
 
+
+def test_plot_phasic_time_series_summary_uses_event_signal_units_and_semantic_lines(
+    tmp_path, monkeypatch
+):
+    analysis_out = tmp_path / "analysis_out"
+    features_dir = analysis_out / "features"
+    features_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "chunk_id": [0, 1],
+            "roi": ["ROI1", "ROI1"],
+            "peak_count": [2, 4],
+            "auc": [1.5, 2.5],
+            "source_file": ["chunk_0.csv", "chunk_1.csv"],
+        }
+    ).to_csv(features_dir / "features.csv", index=False)
+    (analysis_out / "config_used.yaml").write_text(
+        "event_signal: delta_f\n", encoding="utf-8"
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    import tools.plot_phasic_time_series_summary as summary_script
+    from photometry_pipeline.viz.semantic_colors import SUMMARY_TRACE_COLOR
+
+    captured = []
+    real_subplots = plt.subplots
+
+    def spy(*args, **kwargs):
+        figure, axis = real_subplots(*args, **kwargs)
+        captured.append((figure, axis))
+        return figure, axis
+
+    monkeypatch.setattr(plt, "subplots", spy)
+    monkeypatch.setattr(
+        summary_script.sys,
+        "argv",
+        [
+            "plot_phasic_time_series_summary.py",
+            "--analysis-out",
+            str(analysis_out),
+            "--out-dir",
+            str(tmp_path / "viz"),
+        ],
+    )
+
+    assert summary_script._resolve_event_signal(str(analysis_out), "ROI1", None) == "delta_f"
+    summary_script.main()
+
+    assert len(captured) == 2
+    rate_axis = captured[0][1]
+    auc_axis = captured[1][1]
+    assert rate_axis.get_title().startswith("Detected Event Rate Over Time")
+    assert rate_axis.get_ylabel() == "Detected event rate (events/min)"
+    assert rate_axis.get_lines()[0].get_color() == SUMMARY_TRACE_COLOR
+    assert auc_axis.get_title().startswith("Corrected Signal Area Over Time")
+    assert auc_axis.get_ylabel() == "Corrected signal area (deltaF\u00b7s)"
+    assert auc_axis.get_lines()[0].get_color() == SUMMARY_TRACE_COLOR
+
+
 def test_plot_phasic_time_series_summary_no_datetime_warning(tmp_path):
     """
     Ensures that when features.csv has non-datetime source_file strings (e.g., 'chunk_0.csv'),

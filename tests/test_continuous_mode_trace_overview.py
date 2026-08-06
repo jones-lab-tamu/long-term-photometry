@@ -433,9 +433,10 @@ def test_gui_viewer_exposes_continuous_trace_tab(tmp_path: Path, qapp):
             CONTINUOUS_PHASIC_DFF_TRACE_OVERVIEW_FILENAME,
             CONTINUOUS_TONIC_TRACE_OVERVIEW_FILENAME,
         ]
-        assert tab_map["Tonic"] == ["tonic_overview.png"]
-        assert tab_map["Phasic Summary"] == [
+        assert tab_map["Slow Signal"] == ["tonic_overview.png"]
+        assert tab_map["Event Summary"] == [
             "phasic_auc_timeseries.png",
+            "phasic_peak_count_timeseries.png",
             "phasic_peak_rate_timeseries.png",
         ]
     finally:

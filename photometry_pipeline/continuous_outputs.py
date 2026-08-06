@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -16,6 +17,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
     open_tonic_cache,
 )
+from photometry_pipeline.viz.semantic_colors import DFF_COLOR, SUMMARY_TRACE_COLOR
 
 
 PHASIC_SUMMARY_FILENAME = "continuous_phasic_window_summary.csv"
@@ -651,6 +653,7 @@ def _plot_xy_from_summary(
     y_label: str,
     title: str,
     out_path: str,
+    color: str = SUMMARY_TRACE_COLOR,
 ) -> bool:
     import matplotlib.pyplot as plt
 
@@ -667,7 +670,13 @@ def _plot_xy_from_summary(
     plot_df = plot_df.sort_values(x_col)
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(plot_df[x_col], plot_df[y_col], marker="o", linewidth=1.2)
+    ax.plot(
+        plot_df[x_col],
+        plot_df[y_col],
+        marker="o",
+        linewidth=1.2,
+        color=color,
+    )
     ax.set_xlabel("Elapsed time (hours)")
     ax.set_ylabel(y_label)
     ax.set_title(title)
@@ -908,6 +917,7 @@ def _plot_continuous_trace_overview(
     ylabel: str,
     title: str,
     out_path: str,
+    color: str = SUMMARY_TRACE_COLOR,
 ) -> dict[str, Any]:
     import matplotlib.pyplot as plt
 
@@ -920,7 +930,7 @@ def _plot_continuous_trace_overview(
         }
 
     fig, ax = plt.subplots(figsize=(12, 4.8))
-    ax.plot(x_plot / 3600.0, y_plot, linewidth=0.8)
+    ax.plot(x_plot / 3600.0, y_plot, linewidth=0.8, color=color)
     ax.set_xlabel("Elapsed time (hours)")
     ax.set_ylabel(ylabel)
     ax.set_title(f"{roi} {title}")
@@ -945,6 +955,7 @@ def _generate_trace_overview_for_cache(
     title: str,
     opener,
     max_plot_points: int,
+    color: str = SUMMARY_TRACE_COLOR,
 ) -> dict[str, Any]:
     result = _empty_result(f"{cache_kind}_trace_overview")
     result["details"] = {}
@@ -970,6 +981,7 @@ def _generate_trace_overview_for_cache(
                     ylabel=ylabel,
                     title=title,
                     out_path=out_path,
+                    color=color,
                 )
                 details.update(plot_details)
                 details["field"] = field
@@ -1026,8 +1038,9 @@ def generate_continuous_trace_overview_plots(
             cache_kind="tonic",
             field="deltaF",
             filename=CONTINUOUS_TONIC_TRACE_OVERVIEW_FILENAME,
-            ylabel="Tonic deltaF",
-            title="full continuous tonic trace overview",
+            ylabel="Slow signal (deltaF)",
+            title="Slow Signal Trace",
+            color=SUMMARY_TRACE_COLOR,
             opener=open_tonic_cache,
             max_plot_points=max_plot_points,
         )
@@ -1045,8 +1058,9 @@ def generate_continuous_trace_overview_plots(
             cache_kind="phasic",
             field="dff",
             filename=CONTINUOUS_PHASIC_DFF_TRACE_OVERVIEW_FILENAME,
-            ylabel="Phasic dF/F",
-            title="full continuous phasic dF/F trace overview",
+            ylabel="dF/F",
+            title="dF/F Trace",
+            color=DFF_COLOR,
             opener=open_phasic_cache,
             max_plot_points=max_plot_points,
         )
@@ -1086,6 +1100,31 @@ def _record_generated_plot(
     result["row_counts"][str(roi)] = result["row_counts"].get(str(roi), 0) + 1
 
 
+def _continuous_auc_display_units(run_dir: str, roi: str) -> str:
+    """Resolve truthful AUC units from saved provenance without rerunning analysis."""
+    report_path = os.path.join(run_dir, "_analysis", "phasic_out", "run_report.json")
+    try:
+        with open(report_path, "r", encoding="utf-8") as handle:
+            report = json.load(handle)
+        provenance = report.get("continuous_phasic_auc") or {}
+        effective = provenance.get("effective_settings_by_roi")
+        if isinstance(effective, dict) and isinstance(effective.get(str(roi)), dict):
+            settings = effective[str(roi)]
+        else:
+            settings = provenance.get("global_defaults") or provenance
+        event_signal = str(settings.get("event_signal", "")).strip().lower()
+        if event_signal == "dff":
+            return "dF/F·s"
+        if event_signal in {"delta_f", "deltaf", "delta-f"}:
+            return "deltaF·s"
+        units = str(settings.get("auc_units", "")).strip()
+        if units:
+            return units
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return "corrected signal·s"
+
+
 def generate_continuous_phasic_plots(run_dir: str, *, logger=None) -> dict[str, Any]:
     """Generate continuous phasic elapsed-time plots from Patch 3a summary CSVs."""
     result = _empty_result("phasic_plots")
@@ -1097,24 +1136,25 @@ def generate_continuous_phasic_plots(run_dir: str, *, logger=None) -> dict[str, 
         any_table = True
         df = pd.read_csv(table_path)
         summary_dir = os.path.join(run_dir, str(roi), "summary")
+        auc_units = _continuous_auc_display_units(run_dir, roi)
         plot_specs = [
             (
                 PHASIC_RATE_PLOT_FILENAME,
                 "event_rate_per_min",
-                "Event rate (events/min)",
-                f"{roi} continuous event rate",
+                "Detected event rate (events/min)",
+                f"{roi} Detected Event Rate Over Time",
             ),
             (
                 PHASIC_COUNT_PLOT_FILENAME,
                 "event_count",
-                "Event count per window",
-                f"{roi} continuous event count",
+                "Detected event count per window",
+                f"{roi} Detected Event Count Over Time",
             ),
             (
                 PHASIC_AUC_PLOT_FILENAME,
                 "phasic_signal_auc",
-                "Phasic signal AUC per window",
-                f"{roi} continuous phasic signal AUC",
+                f"Corrected signal area per window ({auc_units})",
+                f"{roi} Corrected Signal Area Over Time",
             ),
         ]
         for filename, y_col, y_label, title in plot_specs:
@@ -1165,10 +1205,10 @@ def generate_continuous_tonic_plots(run_dir: str, *, logger=None) -> dict[str, A
         df = pd.read_csv(table_path)
         if "tonic_median" in df.columns:
             y_col = "tonic_median"
-            y_label = "Tonic dF/F, median per window"
+            y_label = "Slow signal (deltaF), median per window"
         else:
             y_col = "tonic_mean"
-            y_label = "Tonic dF/F, mean per window"
+            y_label = "Slow signal (deltaF), mean per window"
         summary_dir = os.path.join(run_dir, str(roi), "summary")
         out_path = os.path.join(summary_dir, TONIC_OVERVIEW_PLOT_FILENAME)
         ok = _plot_xy_from_summary(
@@ -1176,7 +1216,7 @@ def generate_continuous_tonic_plots(run_dir: str, *, logger=None) -> dict[str, A
             x_col="elapsed_hour_mid",
             y_col=y_col,
             y_label=y_label,
-            title=f"{roi} continuous tonic summary",
+            title=f"{roi} Slow Signal Summary",
             out_path=out_path,
         )
         if ok:

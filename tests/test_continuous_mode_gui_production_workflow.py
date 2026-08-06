@@ -306,8 +306,8 @@ def test_gui_equivalent_continuous_full_run_outputs_are_viewer_visible(
             tab: [Path(path).name for path in paths]
             for tab, paths in viewer._region_tab_images["Region0"].items()
         }
-        assert tab_map["Tonic"] == ["tonic_overview.png"]
-        assert tab_map["Phasic Summary"] == [
+        assert tab_map["Slow Signal"] == ["tonic_overview.png"]
+        assert tab_map["Event Summary"] == [
             "phasic_auc_timeseries.png",
             "phasic_peak_rate_timeseries.png",
         ]
@@ -315,10 +315,10 @@ def test_gui_equivalent_continuous_full_run_outputs_are_viewer_visible(
             "continuous_phasic_dff_trace_overview.png",
             "continuous_tonic_trace_overview.png",
         ]
-        assert tab_map["Phasic Sig/Iso"] == []
-        assert tab_map["Dynamic Fit"] == []
-        assert tab_map["Phasic dFF"] == []
-        assert tab_map["Phasic Stacked"] == []
+        assert tab_map["Signal / Reference"] == []
+        assert tab_map["Correction Reference"] == []
+        assert tab_map["dF/F"] == []
+        assert tab_map["Stacked dF/F"] == []
     finally:
         viewer.close()
 

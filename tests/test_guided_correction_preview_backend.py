@@ -17,6 +17,13 @@ from photometry_pipeline.preview.correction_preview import (
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    FITTED_REFERENCE_COLOR,
+    NEUTRAL_BASELINE_COLOR,
+    RAW_REFERENCE_COLOR,
+    RAW_SIGNAL_COLOR,
+)
 from photometry_pipeline.guided_diagnostic_cache import (
     DiagnosticCacheBuildRequest,
     artifact_record_from_request,
@@ -80,15 +87,15 @@ def test_worker_safe_report_generation_uses_only_plain_snapshot(tmp_path):
     assert Path(result["user_report_path"]).is_file()
     assert result["visual_trace_labels"] == [
         "Raw signal",
-        "Reference/control signal",
-        "Fit-input signal",
+        "Raw reference",
+        "Signal used for correction",
         "Fitted reference",
         "Corrected dF/F",
     ]
     assert result["visual_panel_titles"] == [
-        "Inputs",
-        "Fitted reference: Global Linear Regression",
-        "Corrected dF/F: Global Linear Regression",
+        "Original Signal and Reference",
+        "Correction Reference",
+        "Corrected dF/F",
     ]
     assert "Global Linear Regression" in Path(
         result["user_report_path"]
@@ -176,12 +183,15 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
         axes = list(np.asarray(axes).reshape(-1))
         assert len(axes) == 3
         label = labels[method]
-        assert axes[0].get_title() == "Inputs"
-        assert axes[2].get_title() == f"Corrected dF/F: {label}"
+        assert axes[0].get_title() == "Original Signal and Reference"
+        assert axes[1].get_title() == "Correction Reference"
+        assert axes[2].get_title() == "Corrected dF/F"
         assert [line.get_label() for line in axes[0].lines] == [
             "Raw signal",
-            "Reference/control signal",
+            "Raw reference",
         ]
+        assert axes[0].lines[0].get_color() == RAW_SIGNAL_COLOR
+        assert axes[0].lines[1].get_color() == RAW_REFERENCE_COLOR
         evidence = (
             result["signal_only_f0_preview_evidence"]
             if method == "signal_only_f0"
@@ -190,12 +200,15 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
             ]
         )
         if method == "signal_only_f0":
-            assert axes[1].get_title() == "F0 baseline: Signal-Only F0"
             assert "Fitted reference" not in axes[1].get_title()
             assert [line.get_label() for line in axes[1].lines] == [
                 "Raw signal",
-                "Signal-Only F0 baseline",
+                "F0 baseline",
             ]
+            assert axes[1].lines[0].get_color() == RAW_SIGNAL_COLOR
+            assert axes[1].lines[1].get_color() == NEUTRAL_BASELINE_COLOR
+            assert axes[1].lines[1].get_color() != FITTED_REFERENCE_COLOR
+            assert axes[1].lines[1].get_linestyle() == "--"
             np.testing.assert_allclose(
                 axes[0].lines[0].get_ydata(),
                 sampled(evidence["signal_raw"]),
@@ -216,16 +229,18 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
                 sampled(evidence["preview_dff"]),
                 equal_nan=True,
             )
+            assert axes[2].lines[0].get_color() == DFF_COLOR
             continue
 
         trace = correction_preview_module._load_guided_preview_trace(
             Path(result["method_statuses"][method]["trace_csv"])
         )
-        assert axes[1].get_title() == f"Fitted reference: {label}"
         assert [line.get_label() for line in axes[1].lines] == [
-            "Fit-input signal",
+            "Signal used for correction",
             "Fitted reference",
         ]
+        assert axes[1].lines[0].get_color() == RAW_SIGNAL_COLOR
+        assert axes[1].lines[1].get_color() == FITTED_REFERENCE_COLOR
         np.testing.assert_allclose(
             axes[0].lines[0].get_ydata(), sampled(trace["sig_raw"]), equal_nan=True
         )
@@ -245,6 +260,7 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
             sampled(evidence["preview_dff"]),
             equal_nan=True,
         )
+        assert axes[2].lines[0].get_color() == DFF_COLOR
 
 
 def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():

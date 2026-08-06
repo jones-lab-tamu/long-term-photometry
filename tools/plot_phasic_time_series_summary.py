@@ -23,6 +23,12 @@ try:
         build_authoritative_plot_sessions,
         build_feature_map,
     )
+    from photometry_pipeline.config import Config
+    from photometry_pipeline.feature_event_provenance import (
+        load_feature_event_provenance,
+        resolve_roi_effective_fields,
+    )
+    from photometry_pipeline.viz.semantic_colors import SUMMARY_TRACE_COLOR
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
     sys.exit(1)
@@ -94,6 +100,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Plot phasic event frequency and AUC over time.")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory (containing features/features.csv)")
     parser.add_argument('--roi', help="ROI to plot. Defaults to first ROI alphabetically.")
+    parser.add_argument(
+        '--event-signal',
+        choices=['dff', 'delta_f'],
+        default=None,
+        help="Event signal used for the saved AUC label; defaults to ROI provenance.",
+    )
     parser.add_argument('--sessions-per-hour', type=int, default=2, help="Expected sessions per hour for fallback timing.")
     parser.add_argument(
         '--timeline-anchor-mode',
@@ -124,6 +136,30 @@ def parse_args():
     parser.add_argument('--dpi', type=int, default=150, help="DPI for output figures")
     parser.add_argument('--export-csv', action='store_true', help="Export CSVs of plotting data (if --out-*-csv not provided)")
     return parser.parse_args()
+
+
+def _resolve_event_signal(analysis_out: str, roi: str, requested: str | None) -> str:
+    if requested in {"dff", "delta_f"}:
+        return requested
+    provenance_path = os.path.join(
+        analysis_out, "features", "feature_event_provenance.json"
+    )
+    try:
+        payload = load_feature_event_provenance(provenance_path)
+        fields = resolve_roi_effective_fields(payload, str(roi))
+        signal = str(fields.get("event_signal", "")).strip().lower()
+        if signal in {"dff", "delta_f"}:
+            return signal
+    except Exception:
+        pass
+    try:
+        config = Config.from_yaml(os.path.join(analysis_out, "config_used.yaml"))
+        signal = str(getattr(config, "event_signal", "")).strip().lower()
+        if signal in {"dff", "delta_f"}:
+            return signal
+    except Exception:
+        pass
+    return "dff"
 
 def main():
     try:
@@ -197,6 +233,10 @@ def main():
             selected_roi = unique_rois[0]
             
         print(f"Selected ROI: {selected_roi}")
+        event_signal = _resolve_event_signal(
+            args.analysis_out, str(selected_roi), args.event_signal
+        )
+        auc_units = "dF/F" if event_signal == "dff" else "deltaF"
         
         # 5. Filter Data
         roi_df = df[df['roi'] == selected_roi].copy()
@@ -387,7 +427,14 @@ def main():
              raise RuntimeError("All Peak Rate values are NaN.")
 
         fig1, ax1 = plt.subplots(figsize=(10, 6), dpi=args.dpi)
-        ax1.plot(x, y_rate, marker='o', linestyle='-', label=f'Peak Rate (ROI: {selected_roi})')
+        ax1.plot(
+            x,
+            y_rate,
+            marker='o',
+            linestyle='-',
+            color=SUMMARY_TRACE_COLOR,
+            label=f'Detected Event Rate (ROI: {selected_roi})',
+        )
         _annotate_missing_sessions(
             ax1,
             timeline,
@@ -395,9 +442,9 @@ def main():
             y_top=ax1.get_ylim()[1],
         )
         ax1.set_xlabel(x_axis_label)
-        ax1.set_ylabel("Peaks per minute")
+        ax1.set_ylabel("Detected event rate (events/min)")
         ax1.set_title(
-            f"Phasic event frequency over time (ROI {selected_roi}) [{anchor_label}]"
+            f"Detected Event Rate Over Time (ROI {selected_roi}) [{anchor_label}]"
         )
         ax1.grid(True, alpha=0.3)
         
@@ -419,7 +466,14 @@ def main():
                       horizontalalignment='center', verticalalignment='center',
                       transform=ax2.transAxes)
         else:
-             ax2.plot(x, y_auc, marker='o', linestyle='-', label=f'AUC (ROI: {selected_roi})')
+             ax2.plot(
+                 x,
+                 y_auc,
+                 marker='o',
+                 linestyle='-',
+                 color=SUMMARY_TRACE_COLOR,
+                 label=f'Corrected Signal Area (ROI: {selected_roi})',
+             )
 
         _annotate_missing_sessions(
             ax2,
@@ -429,9 +483,9 @@ def main():
         )
 
         ax2.set_xlabel(x_axis_label)
-        ax2.set_ylabel("AUC above threshold (dFF·s)")
+        ax2.set_ylabel(f"Corrected signal area ({auc_units}·s)")
         ax2.set_title(
-            f"Phasic AUC over time (ROI {selected_roi}) [{anchor_label}]"
+            f"Corrected Signal Area Over Time (ROI {selected_roi}) [{anchor_label}]"
         )
         ax2.grid(True, alpha=0.3)
         

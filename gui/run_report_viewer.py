@@ -76,6 +76,10 @@ from photometry_pipeline.completed_continuous_rwd_review import (
     load_continuous_window_summary,
 )
 from photometry_pipeline.continuous_outputs import CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS
+from photometry_pipeline.viz.semantic_colors import (
+    DFF_COLOR,
+    SUMMARY_TRACE_COLOR,
+)
 from photometry_pipeline.tonic_session_plot import (
     TONIC_FALLBACK_NOTE,
     TONIC_SESSION_PLOT_FILENAME,
@@ -88,22 +92,21 @@ from photometry_pipeline.tonic_session_plot import (
 NATIVE_CSV_PREVIEW_ROW_LIMIT = 5000
 
 TAB_VERIFICATION = "Verification"
-TAB_TONIC = "Tonic"
-TAB_PHASIC_RAW = "Phasic Sig/Iso"
-TAB_PHASIC_DYNAMIC_FIT = "Dynamic Fit"
+TAB_TONIC = "Slow Signal"
+TAB_PHASIC_RAW = "Signal / Reference"
+TAB_PHASIC_DYNAMIC_FIT = "Correction Reference"
 TAB_PHASIC_CORRECTION_REFERENCE = "Correction Reference"
-TAB_PHASIC_DFF = "Phasic dFF"
-TAB_PHASIC_STACKED = "Phasic Stacked"
-TAB_PHASIC_SUMMARY = "Phasic Summary"
+TAB_PHASIC_DFF = "dF/F"
+TAB_PHASIC_STACKED = "Stacked dF/F"
+TAB_PHASIC_SUMMARY = "Event Summary"
 TAB_CONTINUOUS_TRACE = "Continuous Trace"
 
 _RESULT_TAB_TOOLTIPS = {
     TAB_PHASIC_RAW: "Raw signal and reference traces for each plotted day.",
-    TAB_PHASIC_DYNAMIC_FIT: "Dynamic fitted reference used for phasic correction.",
-    TAB_PHASIC_CORRECTION_REFERENCE: "Reference trace used for phasic correction.",
-    TAB_PHASIC_DFF: "Reference-corrected phasic dF/F trace for each plotted day.",
-    TAB_PHASIC_STACKED: "Stacked phasic traces comparing the plotted days.",
-    TAB_PHASIC_SUMMARY: "Summary plots of phasic event activity across plotted days.",
+    TAB_PHASIC_CORRECTION_REFERENCE: "Signal used for correction and its reference.",
+    TAB_PHASIC_DFF: "Corrected dF/F trace for each plotted day.",
+    TAB_PHASIC_STACKED: "Stacked corrected dF/F traces across plotted days.",
+    TAB_PHASIC_SUMMARY: "Detected event rate, count, and corrected signal area over time.",
 }
 
 TAB_ORDER = [
@@ -120,6 +123,7 @@ TAB_ORDER = [
 _NATIVE_PHASIC_SUMMARY_IMAGE_ORDER = {
     "phasic_auc_timeseries.png": 0,
     "phasic_peak_rate_timeseries.png": 1,
+    "phasic_peak_count_timeseries.png": 2,
 }
 _NATIVE_CONTINUOUS_IMAGE_TABS = {
     "phasic_correction_impact.png": TAB_VERIFICATION,
@@ -506,7 +510,7 @@ class RunReportViewer(QWidget):
             self._continuous_tonic_summary_table,
         ) = self._build_continuous_analysis_page(
             self._continuous_tonic_page,
-            "No tonic trace loaded.",
+            "No slow-signal trace loaded.",
             "continuousTonicSummaryTable",
         )
 
@@ -518,7 +522,7 @@ class RunReportViewer(QWidget):
             self._continuous_phasic_summary_table,
         ) = self._build_continuous_analysis_page(
             self._continuous_phasic_page,
-            "No phasic trace loaded.",
+            "No event trace loaded.",
             "continuousPhasicSummaryTable",
             event_count_label_name="continuousPhasicEventCountLabel",
         )
@@ -1176,8 +1180,8 @@ class RunReportViewer(QWidget):
             "Continuous recording",
             "Regions of interest: " + ", ".join(overview.included_roi_ids),
             "Correction: Completed" if overview.correction_completed else "Correction: Not completed",
-            "Tonic analysis: " + ("Completed" if overview.tonic_analysis else "Not run"),
-            "Phasic event analysis: " + ("Completed" if overview.phasic_analysis else "Not run"),
+            "Slow-signal analysis: " + ("Completed" if overview.tonic_analysis else "Not run"),
+            "Event analysis: " + ("Completed" if overview.phasic_analysis else "Not run"),
             "Recording duration: " + self._format_recording_duration(total_duration_sec),
             "Analysis windows: " + str(overview.corrected_segment_count),
         ]
@@ -1190,9 +1194,9 @@ class RunReportViewer(QWidget):
         while self._continuous_tabs.count() > 0:
             self._continuous_tabs.removeTab(0)
         if overview.tonic_analysis:
-            self._continuous_tabs.addTab(self._continuous_tonic_page, "Tonic")
+            self._continuous_tabs.addTab(self._continuous_tonic_page, "Slow Signal")
         if overview.phasic_analysis:
-            self._continuous_tabs.addTab(self._continuous_phasic_page, "Phasic")
+            self._continuous_tabs.addTab(self._continuous_phasic_page, "Events")
         has_any = overview.tonic_analysis or overview.phasic_analysis
         self._continuous_tabs.setVisible(has_any)
         if self._continuous_tabs.count() > 0:
@@ -1200,14 +1204,14 @@ class RunReportViewer(QWidget):
 
     def _clear_continuous_tonic_display(self) -> None:
         self._continuous_tonic_interaction.clear(
-            "No tonic trace loaded.", fallback_width=640, fallback_height=320
+            "No slow-signal trace loaded.", fallback_width=640, fallback_height=320
         )
         self._continuous_tonic_summary_table.setRowCount(0)
         self._continuous_tonic_summary_table.setColumnCount(0)
 
     def _clear_continuous_phasic_display(self) -> None:
         self._continuous_phasic_interaction.clear(
-            "No phasic trace loaded.", fallback_width=640, fallback_height=320
+            "No event trace loaded.", fallback_width=640, fallback_height=320
         )
         self._continuous_phasic_summary_table.setRowCount(0)
         self._continuous_phasic_summary_table.setColumnCount(0)
@@ -1293,6 +1297,7 @@ class RunReportViewer(QWidget):
                 trace.primary_trace,
                 title=f"{roi_id} — {trace.primary_trace_label}",
                 y_label=trace.primary_trace_label,
+                trace_kind=trace.family,
             )
             summary = load_continuous_window_summary(
                 overview.run_dir, family="tonic", roi_id=roi_id
@@ -1314,6 +1319,7 @@ class RunReportViewer(QWidget):
                 trace.primary_trace,
                 title=f"{roi_id} — {trace.primary_trace_label}",
                 y_label=trace.primary_trace_label,
+                trace_kind=trace.family,
                 event_times=event_times,
                 event_polarities=event_polarities,
             )
@@ -1341,7 +1347,7 @@ class RunReportViewer(QWidget):
             pixmap, persisted_total, summary = phasic_data
             self._continuous_phasic_interaction.set_pixmap(pixmap, reset_zoom=True)
             self._continuous_phasic_event_count_label.setText(
-                f"Saved phasic events for {roi_id}: {persisted_total}"
+                f"Saved detected events for {roi_id}: {persisted_total}"
             )
             self._populate_summary_table(self._continuous_phasic_summary_table, summary)
 
@@ -1352,6 +1358,7 @@ class RunReportViewer(QWidget):
         *,
         title: str,
         y_label: str,
+        trace_kind: str = "",
         event_times=None,
         event_polarities=None,
     ) -> QPixmap:
@@ -1376,7 +1383,12 @@ class RunReportViewer(QWidget):
         with matplotlib.rc_context({"figure.dpi": 90}):
             figure, axis = plt.subplots(figsize=(9.5, 4.2))
             try:
-                axis.plot(plot_time, plot_trace, linewidth=0.6, color="#3b6ea5")
+                trace_color = (
+                    DFF_COLOR
+                    if str(trace_kind).strip().lower() in {"phasic", "dff"}
+                    else SUMMARY_TRACE_COLOR
+                )
+                axis.plot(plot_time, plot_trace, linewidth=0.6, color=trace_color)
                 if event_times is not None and len(event_times):
                     positive = event_polarities > 0 if event_polarities is not None else None
                     if positive is not None:
@@ -1394,7 +1406,7 @@ class RunReportViewer(QWidget):
                             [axis.get_ylim()[0]] * int(negative.sum()),
                             marker="^",
                             s=10,
-                            color="#2e7d32",
+                            color="#c0392b",
                             label="Negative event",
                         )
                         axis.legend(loc="upper right", fontsize="small")
@@ -1567,11 +1579,14 @@ class RunReportViewer(QWidget):
         candidates = [
             os.path.join(summary_dir, "phasic_auc_timeseries.png"),
             os.path.join(summary_dir, "phasic_peak_rate_timeseries.png"),
+            os.path.join(summary_dir, "phasic_peak_count_timeseries.png"),
         ]
         for name in os.listdir(summary_dir):
             if name.startswith("phasic_auc_timeseries_") and name.endswith(".png"):
                 candidates.append(os.path.join(summary_dir, name))
             if name.startswith("phasic_peak_rate_timeseries_") and name.endswith(".png"):
+                candidates.append(os.path.join(summary_dir, name))
+            if name.startswith("phasic_peak_count_timeseries_") and name.endswith(".png"):
                 candidates.append(os.path.join(summary_dir, name))
         return self._dedupe_sorted_existing(candidates)
 
@@ -1611,6 +1626,42 @@ class RunReportViewer(QWidget):
             return name
         return f"Plotted day {int(match.group(1)) + 1}"
 
+    @classmethod
+    def _display_title_for_image(cls, filename: str) -> str:
+        """Return a compact human-facing title without changing artifact names."""
+        name = os.path.basename(str(filename or ""))
+        lower = name.lower()
+        if lower == "tonic_session_summary.png" or lower == "tonic_overview.png":
+            return "Slow Signal Summary"
+        if lower.startswith("phasic_auc_timeseries"):
+            return "Corrected Signal Area Over Time"
+        if lower.startswith("phasic_peak_rate_timeseries"):
+            return "Detected Event Rate Over Time"
+        if lower.startswith("phasic_peak_count_timeseries"):
+            return "Detected Event Count Over Time"
+        if lower.startswith("phasic_correction_impact"):
+            return "Correction Verification"
+        if lower == "continuous_phasic_dff_trace_overview.png":
+            return "dF/F Trace"
+        if lower == "continuous_tonic_trace_overview.png":
+            return "Slow Signal Trace"
+
+        match = re.search(r"_day_(\d+)\.png$", name, re.IGNORECASE)
+        if match is not None:
+            day_caption = f"Plotted day {int(match.group(1)) + 1}"
+            if lower.startswith("phasic_sig_iso_day_"):
+                return f"Signal / Reference — {day_caption}"
+            if (
+                lower.startswith("phasic_dynamic_fit_day_")
+                or lower.startswith("phasic_correction_reference_day_")
+            ):
+                return f"Correction Reference — {day_caption}"
+            if lower.startswith("phasic_dff_day_"):
+                return f"dF/F — {day_caption}"
+            if lower.startswith("phasic_stacked_day_"):
+                return f"Stacked dF/F — {day_caption}"
+        return name
+
     def _on_region_changed(self, _index: int):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
@@ -1634,7 +1685,7 @@ class RunReportViewer(QWidget):
             self._tonic_method_note_label.setText("")
             self._tonic_method_note_label.setVisible(False)
             return
-        text = f"Tonic method: {label}."
+        text = f"Slow-signal method: {label}."
         if method == METHOD_SIGNAL_ONLY:
             text += f" {TONIC_FALLBACK_NOTE}"
             reason = str(record.get("fallback_reason", "") or "")
@@ -1735,9 +1786,9 @@ class RunReportViewer(QWidget):
         else:
             text = f"Correction approach: {label}."
         if set(model.analysis_branches) == {"tonic", "phasic"}:
-            text += " Used for tonic and phasic analyses."
+            text += " Used for slow-signal and event analyses."
         elif model.analysis_branches == ("tonic",):
-            text += " Used for tonic analysis."
+            text += " Used for slow-signal analysis."
         sessions = model.sessions_for_roi(roi)
         processed_count = sum(1 for session in sessions if session.processed)
         absent_count = max(0, len(sessions) - processed_count)
@@ -2069,7 +2120,7 @@ class RunReportViewer(QWidget):
         path = images[idx]
         self._active_image_path = path
         filename = os.path.basename(path)
-        self._image_title_label.setText(self._day_plot_caption(filename))
+        self._image_title_label.setText(self._display_title_for_image(filename))
         self._image_title_label.setToolTip(filename)
         self._set_zoom_mode(False)
         self._set_image(path)
@@ -2104,10 +2155,12 @@ class RunReportViewer(QWidget):
             self._image_scroll.setVisible(True)
             self._active_image_path = path
             self._active_pixmap = QPixmap()
+            filename = os.path.basename(path)
+            display_title = self._display_title_for_image(filename)
             title = (
-                str(record.get("label") or "Saved figure")
-                if label == TAB_PHASIC_SUMMARY
-                else label
+                display_title
+                if display_title != filename
+                else str(record.get("label") or label or "Saved figure")
             )
             self._image_title_label.setText(title)
             self._image_title_label.setToolTip(os.path.basename(path))
@@ -2218,7 +2271,7 @@ class RunReportViewer(QWidget):
         if timeline.get("recording_start_clock"):
             lines.append(f"Recording start: {timeline['recording_start_clock']}")
         if record.get("tonic_method_label"):
-            lines.append(f"Tonic method: {record['tonic_method_label']}")
+            lines.append(f"Slow-signal method: {record['tonic_method_label']}")
         if record.get("tonic_units_label"):
             lines.append(f"Units: {record['tonic_units_label']}")
         if "tonic_fallback" in record:
@@ -2264,7 +2317,7 @@ class RunReportViewer(QWidget):
                 "Timeline:",
                 "Plotted-day start:",
                 "Recording start:",
-                "Tonic method:",
+                "Slow-signal method:",
                 "Units:",
                 "Fallback:",
             )

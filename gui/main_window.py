@@ -168,6 +168,7 @@ from photometry_pipeline.preview.correction_preview import (
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
+from photometry_pipeline.viz.semantic_colors import DFF_COLOR, NEUTRAL_TRACE_COLOR
 from photometry_pipeline.guided_recording_structure_inference import (
     GuidedRecordingStructureInference,
     infer_guided_recording_structure,
@@ -250,6 +251,7 @@ class _GuidedFeaturePreviewPlot(QWidget):
         self.setMinimumHeight(240)
         self.time_sec = np.asarray([], dtype=float)
         self.trace = np.asarray([], dtype=float)
+        self.event_signal = ""
         self.positive_peak_indices = np.asarray([], dtype=int)
         self.negative_peak_indices = np.asarray([], dtype=int)
         self.threshold_upper = None
@@ -258,6 +260,7 @@ class _GuidedFeaturePreviewPlot(QWidget):
     def clear_result(self) -> None:
         self.time_sec = np.asarray([], dtype=float)
         self.trace = np.asarray([], dtype=float)
+        self.event_signal = ""
         self.positive_peak_indices = np.asarray([], dtype=int)
         self.negative_peak_indices = np.asarray([], dtype=int)
         self.threshold_upper = None
@@ -273,6 +276,7 @@ class _GuidedFeaturePreviewPlot(QWidget):
             else result.trace
         )
         self.trace = np.asarray(rendered, dtype=float).copy()
+        self.event_signal = str(getattr(result, "event_signal", "")).strip().lower()
         self.positive_peak_indices = np.asarray(
             result.positive_peak_indices, dtype=int
         ).copy()
@@ -330,7 +334,8 @@ class _GuidedFeaturePreviewPlot(QWidget):
             ) * plot.height()
 
         finite_indices = np.flatnonzero(finite)
-        painter.setPen(QPen(QColor("#336699"), 1.25))
+        trace_color = DFF_COLOR if self.event_signal == "dff" else NEUTRAL_TRACE_COLOR
+        painter.setPen(QPen(QColor(trace_color), 1.25))
         for left, right in zip(finite_indices, finite_indices[1:]):
             if right == left + 1:
                 painter.drawLine(point(int(left)), point(int(right)))
