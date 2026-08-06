@@ -16203,15 +16203,51 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _refresh_guided_dataset_contract_panel(self) -> None:
+        pending_candidate = getattr(
+            self, "_guided_new_analysis_dataset_contract_candidate_snapshot", None
+        )
+        # Confirmation prepares this one candidate before installing it.  It is
+        # a one-shot handoff for the immediate panel refresh, not a cache: any
+        # later refresh must either use the current applied NPM snapshot or
+        # infer a fresh candidate after the existing staleness check.
+        self._guided_new_analysis_dataset_contract_candidate_snapshot = None
         if not hasattr(self, "_guided_dataset_contract_status_label"):
             return
         self._refresh_guided_new_analysis_dataset_contract_staleness()
-        candidate = self._guided_new_analysis_dataset_contract_candidate()
-        self._guided_new_analysis_dataset_contract_candidate_snapshot = candidate
         stored = (
             getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
             or self._default_guided_new_analysis_dataset_contract_snapshot()
         )
+        pending_is_npm = (
+            pending_candidate is not None
+            and str(getattr(pending_candidate, "input_format", "") or "")
+            .strip()
+            .lower()
+            == "npm"
+        )
+        stored_is_current_npm = (
+            getattr(stored, "current_applied", False)
+            and getattr(stored, "status", "") == "applied"
+            and not getattr(stored, "stale_reasons", ())
+            and str(getattr(stored, "input_format", "") or "")
+            .strip()
+            .lower()
+            == "npm"
+        )
+        if pending_is_npm:
+            pending_is_valid = (
+                getattr(pending_candidate, "status", "") == "inferred"
+                and not getattr(pending_candidate, "validation_issues", ())
+            )
+            candidate = (
+                stored
+                if pending_is_valid and stored_is_current_npm
+                else pending_candidate
+            )
+        elif stored_is_current_npm:
+            candidate = stored
+        else:
+            candidate = self._guided_new_analysis_dataset_contract_candidate()
         can_apply = candidate.status == "inferred" and not candidate.validation_issues
         if str(getattr(candidate, "input_format", "") or "").lower() == "npm":
             self._guided_dataset_contract_status_label.setText(
@@ -16345,6 +16381,7 @@ class MainWindow(QMainWindow):
             self._refresh_guided_draft_run_plan_preview()
         finally:
             self._guided_dataset_contract_confirmation_active = False
+            self._guided_new_analysis_dataset_contract_candidate_snapshot = None
             if action_btn is not None:
                 action_btn.setText("Confirm detected dataset settings")
                 action_btn.setEnabled(True)

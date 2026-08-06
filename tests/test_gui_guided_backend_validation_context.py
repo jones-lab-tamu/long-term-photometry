@@ -156,6 +156,164 @@ def test_npm_dataset_contract_candidate_uses_recording_rate_inference(
     assert candidate.contract_values["target_fs_hz"] == 20.0
 
 
+def test_npm_confirmation_infers_once_and_panel_reuses_applied_snapshot(
+    window,
+    monkeypatch,
+):
+    _configure_minimal_npm_contract_state(window)
+    inferred_values = {
+        "npm_time_axis": "system_timestamp",
+        "npm_system_ts_col": "Timestamp",
+        "npm_computer_ts_col": "ComputerTimestamp",
+        "npm_led_col": "LedState",
+        "npm_region_prefix": "Region",
+        "npm_region_suffix": "G",
+        "chunk_duration_sec": 120.0,
+        "allow_partial_final_chunk": False,
+        "adapter_value_nan_policy": "strict",
+        "target_fs_hz": 20.0,
+    }
+    inference_calls = []
+
+    def infer(*args, **kwargs):
+        inference_calls.append((args, kwargs))
+        return dict(inferred_values)
+
+    monkeypatch.setattr(window, "_infer_npm_dataset_contract_overrides", infer)
+    draft_refreshes = []
+    real_draft_refresh = window._refresh_guided_draft_run_plan_preview
+    monkeypatch.setattr(
+        window,
+        "_refresh_guided_draft_run_plan_preview",
+        lambda: (draft_refreshes.append(True), real_draft_refresh())[1],
+    )
+
+    window._on_guided_apply_dataset_contract()
+
+    assert len(inference_calls) == 1
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot.status == "applied"
+    assert snapshot.current_applied is True
+    assert snapshot.contract_values["target_fs_hz"] == 20.0
+    assert "Stored NPM settings: applied; current_for_setup=true." in (
+        window._guided_dataset_contract_status_label.text()
+    )
+    assert draft_refreshes == [True]
+
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: pytest.fail(
+            "current applied NPM settings were reinferred during panel refresh"
+        ),
+    )
+    window._refresh_guided_dataset_contract_panel()
+
+    assert window._guided_new_analysis_dataset_contract_snapshot is snapshot
+    assert "status: applied" in (
+        window._guided_dataset_contract_candidate_label.text()
+    )
+
+
+def test_npm_dataset_contract_invalidation_requires_fresh_inference(
+    window,
+    monkeypatch,
+):
+    _configure_minimal_npm_contract_state(window)
+    inference_calls = []
+
+    def infer(*args, **kwargs):
+        inference_calls.append((args, kwargs))
+        return {
+            "npm_time_axis": "system_timestamp",
+            "npm_system_ts_col": "Timestamp",
+            "npm_computer_ts_col": "ComputerTimestamp",
+            "npm_led_col": "LedState",
+            "npm_region_prefix": "Region",
+            "npm_region_suffix": "G",
+            "chunk_duration_sec": 120.0,
+            "allow_partial_final_chunk": False,
+            "adapter_value_nan_policy": "strict",
+            "target_fs_hz": 20.0,
+        }
+
+    monkeypatch.setattr(window, "_infer_npm_dataset_contract_overrides", infer)
+    window._on_guided_apply_dataset_contract()
+    assert len(inference_calls) == 1
+
+    window._guided_session_duration_edit.setText("180")
+    window._refresh_guided_draft_run_plan_preview()
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot.current_applied is False
+    assert snapshot.status == "stale"
+
+    window._refresh_guided_dataset_contract_panel()
+    assert len(inference_calls) == 2
+
+
+def test_npm_preview_request_after_confirmation_reuses_applied_contract(
+    window, qapp, tmp_path, monkeypatch
+):
+    from tests.test_gui_guided_workflow import _setup_guided_local_raw_preview_ready
+
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch, n_rois=1)
+    discovery = dict(window._discovery_cache)
+    discovery["resolved_format"] = "npm"
+    discovery["rois"] = [{"roi_id": "Region0"}]
+    window._format_combo.setCurrentText("npm")
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    window._refresh_guided_diagnostics_panel()
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("600")
+
+    applied_values = {
+        "npm_time_axis": "system_timestamp",
+        "npm_system_ts_col": "Timestamp",
+        "npm_computer_ts_col": "ComputerTimestamp",
+        "npm_led_col": "LedState",
+        "npm_region_prefix": "Region",
+        "npm_region_suffix": "G",
+        "chunk_duration_sec": 600.0,
+        "allow_partial_final_chunk": False,
+        "adapter_value_nan_policy": "strict",
+        "target_fs_hz": 20.0,
+    }
+    inference_calls = []
+
+    def infer(*args, **kwargs):
+        inference_calls.append((args, kwargs))
+        return dict(applied_values)
+
+    monkeypatch.setattr(window, "_infer_npm_dataset_contract_overrides", infer)
+    window._on_guided_apply_dataset_contract()
+    assert len(inference_calls) == 1
+
+    requests = []
+
+    def capture_request(args, kwargs, **context):
+        requests.append((args, kwargs, context))
+
+    monkeypatch.setattr(
+        window, "_start_guided_threaded_correction_preview", capture_request
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: pytest.fail(
+            "confirmed NPM settings were reinferred during preview preflight"
+        ),
+    )
+
+    window._on_generate_guided_correction_preview()
+
+    assert len(requests) == 1
+    preview_overrides = requests[0][1]["config_overrides"]
+    for key, value in applied_values.items():
+        assert preview_overrides[key] == value
+    assert len(inference_calls) == 1
+
+
 def test_rwd_dataset_contract_candidate_reuses_discovery_contract_cache(
     window, monkeypatch
 ):
