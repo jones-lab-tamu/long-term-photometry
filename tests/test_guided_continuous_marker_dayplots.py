@@ -549,6 +549,8 @@ def test_action_is_enabled_for_a_completed_continuous_combined_run(window, combi
     assert ready is True
     assert window._guided_continuous_marker_dayplot_btn.isEnabled()
     assert not window._guided_continuous_marker_dayplot_group.isHidden()
+    # Only the action that applies to this recording type is offered.
+    assert window._guided_marker_free_dayplot_group.isHidden()
     assert "unchanged" in message
 
 
@@ -560,6 +562,9 @@ def test_action_is_unavailable_for_continuous_phasic_only_with_a_specific_reason
     assert ready is False
     assert not window._guided_continuous_marker_dayplot_btn.isEnabled()
     assert "phasic analysis only" in message
+    # Visible but disabled, so the reason stays readable.
+    assert not window._guided_continuous_marker_dayplot_group.isHidden()
+    assert window._guided_marker_free_dayplot_group.isHidden()
 
 
 def test_action_is_unavailable_for_continuous_tonic_only_with_a_specific_reason(
@@ -570,6 +575,9 @@ def test_action_is_unavailable_for_continuous_tonic_only_with_a_specific_reason(
     assert ready is False
     assert not window._guided_continuous_marker_dayplot_btn.isEnabled()
     assert "tonic analysis only" in message
+    # Visible but disabled, so the reason stays readable.
+    assert not window._guided_continuous_marker_dayplot_group.isHidden()
+    assert window._guided_marker_free_dayplot_group.isHidden()
 
 
 def test_action_is_unavailable_when_no_results_are_loaded(window):
@@ -577,6 +585,7 @@ def test_action_is_unavailable_when_no_results_are_loaded(window):
     assert ready is False
     assert "Open a completed analysis" in message
     assert window._guided_continuous_marker_dayplot_group.isHidden()
+    assert window._guided_marker_free_dayplot_group.isHidden()
 
 
 def test_action_is_unavailable_for_intermittent_runs_with_a_specific_reason(

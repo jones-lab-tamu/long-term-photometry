@@ -6204,7 +6204,7 @@ class MainWindow(QMainWindow):
         self._append_run_log(
             f"Completed run opened through compact Review: {selected}"
         )
-        self._refresh_guided_continuous_marker_dayplot_availability()
+        self._refresh_guided_dayplot_copy_availability()
 
     def _on_guided_start_open_results_failed(self, message: str) -> None:
         sender = self.sender()
@@ -19749,7 +19749,7 @@ class MainWindow(QMainWindow):
                     "The completed analysis could not be opened for review. "
                     "The output folder may be incomplete."
                 )
-            self._refresh_guided_continuous_marker_dayplot_availability()
+            self._refresh_guided_dayplot_copy_availability()
             return
         self._current_run_dir = candidate
         self._set_guided_workflow_mode("open_results")
@@ -19761,7 +19761,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.setCurrentRow(review_index)
         if label is not None:
             label.setText("Completed run loaded for review.")
-        self._refresh_guided_continuous_marker_dayplot_availability()
+        self._refresh_guided_dayplot_copy_availability()
 
     def _on_guided_completed_review_load_failed(self, message: str) -> None:
         sender = self.sender()
@@ -19780,7 +19780,7 @@ class MainWindow(QMainWindow):
                 "Check that the completed output folder is still available "
                 "and try again."
             )
-        self._refresh_guided_continuous_marker_dayplot_availability()
+        self._refresh_guided_dayplot_copy_availability()
 
     def _cleanup_guided_completed_review_loader(self) -> None:
         self._guided_completed_review_load_thread = None
@@ -24575,7 +24575,7 @@ class MainWindow(QMainWindow):
         self._guided_report_viewer = RunReportViewer()
         self._guided_report_viewer.setObjectName("guidedReviewReportViewer")
         self._guided_report_viewer.region_changed.connect(
-            lambda _region: self._refresh_guided_continuous_marker_dayplot_availability()
+            lambda _region: self._refresh_guided_dayplot_copy_availability()
         )
 
         content = QWidget()
@@ -24585,6 +24585,7 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(8)
         content_layout.addWidget(self._guided_report_viewer, 1)
         content_layout.addWidget(self._build_guided_continuous_marker_dayplot_group(), 0)
+        content_layout.addWidget(self._build_guided_marker_free_dayplot_group(), 0)
 
         return self._build_guided_step_scroll(
             "guidedStepReview",
@@ -24733,8 +24734,17 @@ class MainWindow(QMainWindow):
         label.setText(message)
         group = getattr(self, "_guided_continuous_marker_dayplot_group", None)
         if group is not None:
+            # Offered only for a native continuous package. A phasic-only or
+            # tonic-only continuous run keeps the group visible and disabled, so
+            # its reason is readable rather than silently absent.
             viewer = getattr(self, "_guided_report_viewer", None)
-            group.setVisible(bool(viewer is not None and viewer.has_loaded_results()))
+            group.setVisible(
+                bool(
+                    viewer is not None
+                    and viewer.has_loaded_results()
+                    and viewer.is_native_continuous_results()
+                )
+            )
 
     def _on_guided_create_continuous_marker_dayplots(self) -> None:
         """Write display-only dF/F day-plot copies that show detected peaks."""
@@ -24819,6 +24829,235 @@ class MainWindow(QMainWindow):
                 "folder to view the copies. Analysis results and original dayplots "
                 "are unchanged."
             )
+
+    def _refresh_guided_dayplot_copy_availability(self) -> None:
+        """Refresh both Guided Review day-plot copy actions together."""
+        self._refresh_guided_continuous_marker_dayplot_availability()
+        self._refresh_guided_marker_free_dayplot_availability()
+
+    def _build_guided_marker_free_dayplot_group(self) -> QGroupBox:
+        """Presentation copies of session-based dF/F day plots without markers."""
+        group = QGroupBox("Marker-free day plots")
+        group.setObjectName("guidedMarkerFreeDayplotGroup")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        row = QHBoxLayout()
+        self._guided_marker_free_dayplot_btn = QPushButton(
+            "Create dayplots without detected peaks"
+        )
+        self._guided_marker_free_dayplot_btn.setObjectName(
+            "guidedMarkerFreeDayplotButton"
+        )
+        self._guided_marker_free_dayplot_btn.setToolTip(
+            "Creates presentation copies without detected-event markers. Analysis "
+            "results and original QC dayplots are unchanged."
+        )
+        self._guided_marker_free_dayplot_btn.clicked.connect(
+            self._on_guided_create_marker_free_dayplots
+        )
+        row.addWidget(self._guided_marker_free_dayplot_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._guided_marker_free_dayplot_status_label = QLabel("")
+        self._guided_marker_free_dayplot_status_label.setObjectName(
+            "guidedMarkerFreeDayplotStatus"
+        )
+        self._guided_marker_free_dayplot_status_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_marker_free_dayplot_status_label.setWordWrap(True)
+        self._guided_marker_free_dayplot_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._make_guided_widget_shrinkable(
+            self._guided_marker_free_dayplot_status_label
+        )
+        layout.addWidget(self._guided_marker_free_dayplot_status_label)
+
+        self._guided_marker_free_dayplot_group = group
+        self._refresh_guided_marker_free_dayplot_availability()
+        return group
+
+    def _guided_marker_free_dayplot_readiness(self) -> tuple[bool, str]:
+        """Whether marker-free dF/F day-plot copies can be created now."""
+        viewer = getattr(self, "_guided_report_viewer", None)
+        if viewer is None or not viewer.has_loaded_results():
+            return False, "Open a completed analysis to create marker-free day plots."
+        if viewer.is_continuous_recording_results():
+            return False, (
+                "Marker-free day plots are available only for session-based "
+                "recordings. Continuous day plots are already drawn without "
+                "detected-event markers."
+            )
+
+        roi = viewer.selected_region().strip()
+        if not roi:
+            return False, "Select a region to create marker-free day plots."
+
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir or not os.path.isdir(run_dir):
+            return False, "The completed analysis folder is no longer available."
+        if not self._list_dff_dayplot_pngs(os.path.join(run_dir, roi, "day_plots")):
+            return False, f"Region {roi} has no saved dF/F day plots to copy."
+
+        phasic_out = os.path.join(run_dir, "_analysis", "phasic_out")
+        for filename, label in (
+            ("phasic_trace_cache.h5", "phasic dF/F trace data"),
+            ("config_used.yaml", "analysis settings record"),
+        ):
+            if not os.path.isfile(os.path.join(phasic_out, filename)):
+                return False, (
+                    "Marker-free day plots are unavailable: this completed "
+                    f"analysis is missing its saved {label}."
+                )
+
+        if not self._completed_run_dayplot_context().get("sessions_per_hour"):
+            return False, (
+                "Marker-free day plots are unavailable: this completed analysis "
+                "has no recorded sessions-per-hour layout."
+            )
+
+        return True, (
+            "Creates presentation copies without detected-event markers. Analysis "
+            "results and original QC dayplots are unchanged."
+        )
+
+    def _refresh_guided_marker_free_dayplot_availability(self) -> None:
+        button = getattr(self, "_guided_marker_free_dayplot_btn", None)
+        label = getattr(self, "_guided_marker_free_dayplot_status_label", None)
+        if button is None or label is None:
+            return
+        ready, message = self._guided_marker_free_dayplot_readiness()
+        running = bool(self._runner.is_running())
+        button.setEnabled(bool(ready and not running))
+        label.setText(message)
+        group = getattr(self, "_guided_marker_free_dayplot_group", None)
+        if group is not None:
+            # Offered only for session-based results; continuous day plots are
+            # already drawn without detected-event markers.
+            viewer = getattr(self, "_guided_report_viewer", None)
+            group.setVisible(
+                bool(
+                    viewer is not None
+                    and viewer.has_loaded_results()
+                    and not viewer.is_continuous_recording_results()
+                )
+            )
+
+    def _on_guided_create_marker_free_dayplots(self) -> None:
+        """Rerender display-only dF/F day-plot copies with markers hidden."""
+        ready, reason = self._guided_marker_free_dayplot_readiness()
+        if not ready:
+            self._refresh_guided_marker_free_dayplot_availability()
+            QMessageBox.information(self, "Marker-Free Day Plots Unavailable", reason)
+            return
+
+        viewer = self._guided_report_viewer
+        roi = viewer.selected_region().strip()
+        run_dir = self._current_guided_completed_run_dir()
+        out_dir = os.path.join(
+            run_dir, roi, "day_plots", "rerendered_display_variants",
+            "dff_peak_markers_off",
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        cmd = self._build_marker_off_dff_dayplot_command(
+            phasic_out=os.path.join(run_dir, "_analysis", "phasic_out"),
+            roi=roi,
+            out_dir=out_dir,
+            ctx=self._completed_run_dayplot_context(),
+        )
+
+        button = self._guided_marker_free_dayplot_btn
+        button.setEnabled(False)
+        button.setText("Creating...")
+        self._append_run_log(
+            f"Creating display-only marker-free dF/F day plots for ROI={roi} "
+            f"-> {out_dir}"
+        )
+        try:
+            with self._busy_cursor_scope():
+                proc = self._run_dayplot_bundle_subprocess(cmd)
+            if proc.returncode != 0:
+                detail = self._dayplot_bundle_failure_detail(proc)
+                self._append_run_log(f"Marker-free day plots failed: {detail}")
+                QMessageBox.critical(
+                    self,
+                    "Marker-Free Day Plots Failed",
+                    "Could not create marker-free day plots from the saved "
+                    f"analysis outputs.\n\n{detail}",
+                )
+                return
+        except Exception as exc:
+            self._append_run_log(f"Marker-free day plots failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Marker-Free Day Plots Failed",
+                "Could not create marker-free day plots from the saved analysis "
+                f"outputs.\n\n{exc}",
+            )
+            return
+        finally:
+            button.setText("Create dayplots without detected peaks")
+            self._refresh_guided_marker_free_dayplot_availability()
+
+        paths = self._rerender_variant_sequence_paths(out_dir)
+        status = self._guided_marker_free_dayplot_status_label
+        if not paths:
+            self._append_run_log(
+                f"Marker-free day plots produced no images for ROI={roi}."
+            )
+            status.setText(
+                "No marker-free day plots were produced for this region. Analysis "
+                "results and original QC dayplots are unchanged."
+            )
+            return
+
+        self._append_run_log(
+            f"Marker-free dF/F day plots created for ROI={roi}: "
+            f"{len(paths)} file(s) -> {out_dir}"
+        )
+        displayed = bool(
+            viewer.show_external_image_sequence(
+                paths,
+                initial_path=self._pick_guided_variant_initial_image_path(paths),
+            )
+        ) and os.path.realpath(viewer.active_image_path()) in {
+            os.path.realpath(path) for path in paths
+        }
+        if displayed:
+            status.setText(
+                f"Showing {len(paths)} marker-free day plot copy(ies) for {roi}. "
+                f"Saved to: {out_dir}. Analysis results and original QC dayplots "
+                "are unchanged."
+            )
+        else:
+            status.setText(
+                f"Created {len(paths)} marker-free day plot copy(ies) for {roi} "
+                f"in: {out_dir}. The viewer could not switch to them; open the "
+                "folder to view the copies. Analysis results and original QC "
+                "dayplots are unchanged."
+            )
+
+    def _pick_guided_variant_initial_image_path(self, sequence_paths: list[str]) -> str:
+        """Keep the currently viewed plotted day selected when the copy exists."""
+        if not sequence_paths:
+            return ""
+        viewer = getattr(self, "_guided_report_viewer", None)
+        current_name = (
+            os.path.basename(viewer.active_image_path()).strip()
+            if viewer is not None
+            else ""
+        )
+        if current_name:
+            matched = {
+                os.path.basename(path).lower(): path for path in sequence_paths
+            }.get(current_name.lower())
+            if matched:
+                return matched
+        return sequence_paths[0]
 
     def _build_guided_open_results_unavailable_panel(
         self,
@@ -33227,6 +33466,59 @@ class MainWindow(QMainWindow):
     def _rerender_variant_sequence_paths(self, variant_dir: str) -> list[str]:
         return [os.path.join(variant_dir, name) for name in self._list_dff_dayplot_pngs(variant_dir)]
 
+    @staticmethod
+    def _repo_root_dir() -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def _build_marker_off_dff_dayplot_command(
+        self, *, phasic_out: str, roi: str, out_dir: str, ctx: dict
+    ) -> list[str]:
+        """argv for the display-only marker-free dF/F day-plot rerender.
+
+        Single source of truth for the flag set, so the Full Control and Guided
+        entry points can never drift into rendering different figures. With
+        markers hidden the bundle redraws from the saved phasic trace cache and
+        never replays event detection.
+        """
+        cmd = [
+            sys.executable,
+            os.path.join(self._repo_root_dir(), "tools", "plot_phasic_dayplot_bundle.py"),
+            "--analysis-out", phasic_out,
+            "--roi", roi,
+            "--output-dir", out_dir,
+            "--sessions-per-hour", str(ctx["sessions_per_hour"]),
+            "--write-dff-grid",
+            "--no-write-sig-iso-grid",
+            "--no-write-stacked",
+            "--hide-peak-markers",
+            "--dff-render-mode", str(ctx["dff_render_mode"]),
+            "--source-run-profile", str(ctx["run_profile"]),
+        ]
+        session_duration_s = ctx.get("session_duration_s")
+        if session_duration_s is not None:
+            cmd.extend(["--session-duration-s", str(session_duration_s)])
+        timeline_anchor_mode = str(ctx.get("timeline_anchor_mode", "civil")).strip().lower()
+        if timeline_anchor_mode != "civil":
+            cmd.extend(["--timeline-anchor-mode", timeline_anchor_mode])
+        fixed_clock = str(ctx.get("fixed_daily_anchor_clock", "")).strip()
+        if timeline_anchor_mode == "fixed_daily_anchor" and fixed_clock:
+            cmd.extend(["--fixed-daily-anchor-clock", fixed_clock])
+        return cmd
+
+    def _run_dayplot_bundle_subprocess(self, cmd: list[str]):
+        return _subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=self._repo_root_dir(),
+        )
+
+    @staticmethod
+    def _dayplot_bundle_failure_detail(proc) -> str:
+        stderr_tail = (proc.stderr or "").strip()[-1200:]
+        stdout_tail = (proc.stdout or "").strip()[-1200:]
+        return stderr_tail or stdout_tail or "(no subprocess output)"
+
     def _pick_rerender_variant_initial_image_path(self, sequence_paths: list[str]) -> str:
         if not sequence_paths:
             return ""
@@ -33369,34 +33661,9 @@ class MainWindow(QMainWindow):
             return
 
         ctx = self._completed_run_dayplot_context()
-        script_path = os.path.join(
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-            "tools",
-            "plot_phasic_dayplot_bundle.py",
+        cmd = self._build_marker_off_dff_dayplot_command(
+            phasic_out=phasic_out, roi=roi, out_dir=out_dir, ctx=ctx
         )
-        cmd = [
-            sys.executable,
-            script_path,
-            "--analysis-out", phasic_out,
-            "--roi", roi,
-            "--output-dir", out_dir,
-            "--sessions-per-hour", str(ctx["sessions_per_hour"]),
-            "--write-dff-grid",
-            "--no-write-sig-iso-grid",
-            "--no-write-stacked",
-            "--hide-peak-markers",
-            "--dff-render-mode", str(ctx["dff_render_mode"]),
-            "--source-run-profile", str(ctx["run_profile"]),
-        ]
-        session_duration_s = ctx.get("session_duration_s")
-        if session_duration_s is not None:
-            cmd.extend(["--session-duration-s", str(session_duration_s)])
-        timeline_anchor_mode = str(ctx.get("timeline_anchor_mode", "civil")).strip().lower()
-        if timeline_anchor_mode != "civil":
-            cmd.extend(["--timeline-anchor-mode", timeline_anchor_mode])
-        fixed_clock = str(ctx.get("fixed_daily_anchor_clock", "")).strip()
-        if timeline_anchor_mode == "fixed_daily_anchor" and fixed_clock:
-            cmd.extend(["--fixed-daily-anchor-clock", fixed_clock])
 
         self._rerender_dff_dayplots_btn.setEnabled(False)
         self._rerender_dff_dayplots_btn.setText("Rerendering...")
@@ -33406,16 +33673,9 @@ class MainWindow(QMainWindow):
         )
         try:
             with self._busy_cursor_scope():
-                proc = _subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-                )
+                proc = self._run_dayplot_bundle_subprocess(cmd)
             if proc.returncode != 0:
-                stderr_tail = (proc.stderr or "").strip()[-1200:]
-                stdout_tail = (proc.stdout or "").strip()[-1200:]
-                detail = stderr_tail or stdout_tail or "(no subprocess output)"
+                detail = self._dayplot_bundle_failure_detail(proc)
                 self._append_run_log(f"dF/F rerender failed: {detail}")
                 QMessageBox.critical(
                     self,

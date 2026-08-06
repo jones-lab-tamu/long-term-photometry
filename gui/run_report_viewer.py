@@ -1870,6 +1870,15 @@ class RunReportViewer(QWidget):
         """Return True when a native Guided continuous package is loaded."""
         return bool(self._native_continuous_mode)
 
+    def is_continuous_recording_results(self) -> bool:
+        """Return True for either continuous-recording presentation.
+
+        Covers the native saved-artifact package and the continuous-RWD
+        overview workspace, so a caller can tell a continuous recording from a
+        session-based (intermittent) run without reclassifying the run itself.
+        """
+        return bool(self._native_continuous_mode or self._continuous_overview is not None)
+
     def native_continuous_context(self) -> Dict[str, Any]:
         """Return the loaded native package's timeline/window/run-mode context."""
         return {
