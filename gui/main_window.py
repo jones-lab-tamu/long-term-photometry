@@ -6204,6 +6204,7 @@ class MainWindow(QMainWindow):
         self._append_run_log(
             f"Completed run opened through compact Review: {selected}"
         )
+        self._refresh_guided_continuous_marker_dayplot_availability()
 
     def _on_guided_start_open_results_failed(self, message: str) -> None:
         sender = self.sender()
@@ -19748,6 +19749,7 @@ class MainWindow(QMainWindow):
                     "The completed analysis could not be opened for review. "
                     "The output folder may be incomplete."
                 )
+            self._refresh_guided_continuous_marker_dayplot_availability()
             return
         self._current_run_dir = candidate
         self._set_guided_workflow_mode("open_results")
@@ -19759,6 +19761,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.setCurrentRow(review_index)
         if label is not None:
             label.setText("Completed run loaded for review.")
+        self._refresh_guided_continuous_marker_dayplot_availability()
 
     def _on_guided_completed_review_load_failed(self, message: str) -> None:
         sender = self.sender()
@@ -19777,6 +19780,7 @@ class MainWindow(QMainWindow):
                 "Check that the completed output folder is still available "
                 "and try again."
             )
+        self._refresh_guided_continuous_marker_dayplot_availability()
 
     def _cleanup_guided_completed_review_loader(self) -> None:
         self._guided_completed_review_load_thread = None
@@ -24570,14 +24574,251 @@ class MainWindow(QMainWindow):
         # second display widget instance, not shared mutable widget state.
         self._guided_report_viewer = RunReportViewer()
         self._guided_report_viewer.setObjectName("guidedReviewReportViewer")
+        self._guided_report_viewer.region_changed.connect(
+            lambda _region: self._refresh_guided_continuous_marker_dayplot_availability()
+        )
+
+        content = QWidget()
+        content.setObjectName("guidedReviewContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(self._guided_report_viewer, 1)
+        content_layout.addWidget(self._build_guided_continuous_marker_dayplot_group(), 0)
+
         return self._build_guided_step_scroll(
             "guidedStepReview",
             "Review",
             [
                 "Review summarizes completed-run outputs when results are loaded.",
             ],
-            self._guided_report_viewer,
+            content,
         )
+
+    def _build_guided_continuous_marker_dayplot_group(self) -> QGroupBox:
+        """Display-only QC copies of continuous dF/F day plots with peak markers."""
+        group = QGroupBox("Detected-peak day plots")
+        group.setObjectName("guidedContinuousMarkerDayplotGroup")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        row = QHBoxLayout()
+        self._guided_continuous_marker_dayplot_btn = QPushButton(
+            "Create dayplots with detected peaks"
+        )
+        self._guided_continuous_marker_dayplot_btn.setObjectName(
+            "guidedContinuousMarkerDayplotButton"
+        )
+        self._guided_continuous_marker_dayplot_btn.setToolTip(
+            "Creates QC copies with detected-event markers. Analysis results and "
+            "original dayplots are unchanged."
+        )
+        self._guided_continuous_marker_dayplot_btn.clicked.connect(
+            self._on_guided_create_continuous_marker_dayplots
+        )
+        row.addWidget(self._guided_continuous_marker_dayplot_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._guided_continuous_marker_dayplot_status_label = QLabel("")
+        self._guided_continuous_marker_dayplot_status_label.setObjectName(
+            "guidedContinuousMarkerDayplotStatus"
+        )
+        self._guided_continuous_marker_dayplot_status_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_continuous_marker_dayplot_status_label.setWordWrap(True)
+        self._guided_continuous_marker_dayplot_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._make_guided_widget_shrinkable(
+            self._guided_continuous_marker_dayplot_status_label
+        )
+        layout.addWidget(self._guided_continuous_marker_dayplot_status_label)
+
+        self._guided_continuous_marker_dayplot_group = group
+        self._refresh_guided_continuous_marker_dayplot_availability()
+        return group
+
+    def _guided_continuous_marker_dayplot_readiness(self) -> tuple[bool, str]:
+        """Whether marker-on continuous dF/F day-plot copies can be created now."""
+        viewer = getattr(self, "_guided_report_viewer", None)
+        if viewer is None or not viewer.has_loaded_results():
+            return False, "Open a completed analysis to create detected-peak day plots."
+        if not viewer.is_native_continuous_results():
+            return False, (
+                "Detected-peak day plots are available only for continuous "
+                "recordings. Day plots for session-based recordings already show "
+                "detected peaks."
+            )
+
+        context = viewer.native_continuous_context()
+        run_mode = context.get("run_mode") or {}
+        phasic = bool(run_mode.get("phasic_analysis"))
+        tonic = bool(run_mode.get("tonic_analysis"))
+        if not (phasic and tonic):
+            if phasic:
+                return False, (
+                    "This continuous analysis ran phasic analysis only, so it has "
+                    "no day plots to copy. Detected-peak day plots need the "
+                    "combined tonic and phasic analysis."
+                )
+            if tonic:
+                return False, (
+                    "This continuous analysis ran tonic analysis only, so it has "
+                    "no phasic day plots and no detected events."
+                )
+            return False, (
+                "This continuous analysis produced no phasic day plots to copy."
+            )
+
+        roi = viewer.selected_region().strip()
+        if not roi:
+            return False, "Select a region to create detected-peak day plots."
+        if not any(
+            str(record.get("family") or "") == "sampled_phasic_dff"
+            for record in viewer.available_artifacts(roi)
+        ):
+            return False, (
+                f"Region {roi} has no saved continuous dF/F day plots to copy."
+            )
+
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir or not os.path.isdir(run_dir):
+            return False, "The completed analysis folder is no longer available."
+        required = (
+            (
+                os.path.join(
+                    "_analysis", "phasic_out", "features",
+                    "continuous_phasic_events.csv",
+                ),
+                "detected-events table",
+            ),
+            ("continuous_corrected_trace_cache.h5", "corrected trace data"),
+            (
+                os.path.join("_analysis", "phasic_out", "phasic_trace_cache.h5"),
+                "phasic dF/F trace data",
+            ),
+        )
+        for relative_path, label in required:
+            if not os.path.isfile(os.path.join(run_dir, relative_path)):
+                return False, (
+                    "Detected-peak day plots are unavailable: this completed "
+                    f"analysis is missing its saved {label}."
+                )
+
+        timeline_mode = str(
+            (context.get("timeline") or {}).get("timeline_mode") or ""
+        ).strip().lower()
+        if timeline_mode not in {"elapsed", "civil", "fixed_daily_anchor"}:
+            return False, (
+                "Detected-peak day plots are unavailable: this completed analysis "
+                "has no recorded plotted-day timeline."
+            )
+
+        return True, (
+            "Creates QC copies with detected-event markers. Analysis results and "
+            "original dayplots are unchanged."
+        )
+
+    def _refresh_guided_continuous_marker_dayplot_availability(self) -> None:
+        button = getattr(self, "_guided_continuous_marker_dayplot_btn", None)
+        label = getattr(self, "_guided_continuous_marker_dayplot_status_label", None)
+        if button is None or label is None:
+            return
+        ready, message = self._guided_continuous_marker_dayplot_readiness()
+        running = bool(self._runner.is_running())
+        button.setEnabled(bool(ready and not running))
+        label.setText(message)
+        group = getattr(self, "_guided_continuous_marker_dayplot_group", None)
+        if group is not None:
+            viewer = getattr(self, "_guided_report_viewer", None)
+            group.setVisible(bool(viewer is not None and viewer.has_loaded_results()))
+
+    def _on_guided_create_continuous_marker_dayplots(self) -> None:
+        """Write display-only dF/F day-plot copies that show detected peaks."""
+        from photometry_pipeline.guided_continuous_saved_artifacts import (
+            GuidedContinuousSavedArtifactError,
+            build_continuous_marker_on_dff_dayplots,
+            load_continuous_marker_event_times,
+        )
+
+        ready, reason = self._guided_continuous_marker_dayplot_readiness()
+        if not ready:
+            self._refresh_guided_continuous_marker_dayplot_availability()
+            QMessageBox.information(
+                self, "Detected-Peak Day Plots Unavailable", reason
+            )
+            return
+
+        viewer = self._guided_report_viewer
+        roi = viewer.selected_region().strip()
+        run_dir = self._current_guided_completed_run_dir()
+        timeline_contract = dict(viewer.native_continuous_context().get("timeline") or {})
+
+        button = self._guided_continuous_marker_dayplot_btn
+        button.setEnabled(False)
+        button.setText("Creating...")
+        self._append_run_log(
+            f"Creating display-only detected-peak dF/F day plots for ROI={roi}."
+        )
+        try:
+            with self._busy_cursor_scope():
+                event_times_sec = load_continuous_marker_event_times(run_dir, roi)
+                result = build_continuous_marker_on_dff_dayplots(
+                    run_dir,
+                    roi=roi,
+                    timeline_contract=timeline_contract,
+                    event_times_sec=event_times_sec,
+                )
+        except (
+            GuidedContinuousSavedArtifactError,
+            CompletedContinuousRwdReviewError,
+        ) as exc:
+            self._append_run_log(f"Detected-peak day plots failed: {exc}")
+            QMessageBox.critical(self, "Detected-Peak Day Plots Failed", str(exc))
+            return
+        except Exception as exc:
+            self._append_run_log(f"Detected-peak day plots failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Detected-Peak Day Plots Failed",
+                "Could not create detected-peak day plots from the saved "
+                f"continuous results.\n\n{exc}",
+            )
+            return
+        finally:
+            button.setText("Create dayplots with detected peaks")
+            self._refresh_guided_continuous_marker_dayplot_availability()
+
+        paths = list(result["paths"])
+        output_dir = str(result["output_dir"])
+        self._append_run_log(
+            f"Detected-peak dF/F day plots created for ROI={roi}: "
+            f"{len(paths)} file(s), {int(result['total_markers'])} marker(s) "
+            f"-> {output_dir}"
+        )
+
+        displayed = bool(
+            viewer.show_external_image_sequence(paths, initial_path=paths[0])
+        ) and os.path.realpath(viewer.active_image_path()) in {
+            os.path.realpath(path) for path in paths
+        }
+        status = self._guided_continuous_marker_dayplot_status_label
+        if displayed:
+            status.setText(
+                f"Showing {len(paths)} detected-peak day plot copy(ies) for {roi}. "
+                f"Saved to: {output_dir}. Analysis results and original dayplots "
+                "are unchanged."
+            )
+        else:
+            status.setText(
+                f"Created {len(paths)} detected-peak day plot copy(ies) for {roi} "
+                f"in: {output_dir}. The viewer could not switch to them; open the "
+                "folder to view the copies. Analysis results and original dayplots "
+                "are unchanged."
+            )
 
     def _build_guided_open_results_unavailable_panel(
         self,

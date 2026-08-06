@@ -117,6 +117,11 @@ _CONTINUOUS_DAY_PLOT_FAMILIES = (
         "phasic_stacked_day_{day:03d}.png",
     ),
 )
+# Display-only copies live beside, never inside, the canonical day_plots root
+# and are never registered as manifest artifacts.
+CONTINUOUS_MARKER_ON_VARIANT_RELATIVE_DIR = os.path.join(
+    "day_plots", "rerendered_display_variants", "dff_peak_markers_on"
+)
 
 
 class GuidedContinuousSavedArtifactError(RuntimeError):
@@ -648,6 +653,13 @@ def _extract_continuous_day_plot_panels(
                     int(chunk.hour_rank)
                 ],
                 "t": selected_time - start,
+                # This display window's own recording-global bounds. Renderers
+                # ignore these keys; they exist so a display-only consumer can
+                # place already-saved recording-global coordinates (such as the
+                # saved continuous event times) onto this panel without
+                # recomputing the candidate grid.
+                "panel_start_sec": start,
+                "panel_end_sec": end,
                 "xlim_600": bool(float(selected_time[-1] - start) > 550.0),
             }
             for field in fields:
@@ -675,6 +687,196 @@ def _extract_continuous_day_plot_panels(
         "timeline_anchor_label": _timeline_anchor_label_for_day_plot(
             mode, timeline_contract.get("fixed_daily_anchor_clock")
         ),
+    }
+
+
+def _continuous_dff_display_limits(
+    dff_panels: dict[int, list[dict[str, Any]]]
+) -> tuple[float, float]:
+    """Resolve the shared dF/F day-plot y-limits for one ROI.
+
+    Single source of truth for the continuous dF/F display scale so the
+    canonical marker-free plot and any display-only copy of it are drawn on
+    exactly the same axis.
+    """
+    finite_dff = [
+        panel["dff"][np.isfinite(panel["dff"])]
+        for panels in dff_panels.values()
+        for panel in panels
+        if np.any(np.isfinite(panel["dff"]))
+    ]
+    if not finite_dff:
+        return -1.0, 1.0
+    values = np.concatenate(finite_dff)
+    global_ymin, global_ymax = np.percentile(values, [0.5, 99.9])
+    pad = 0.10 * (global_ymax - global_ymin)
+    if not np.isfinite(pad) or pad == 0.0:
+        pad = 0.1
+    return float(global_ymin - pad), float(global_ymax + pad)
+
+
+def map_continuous_event_times_to_panel_indices(
+    panel: dict[str, Any], event_times_sec: Any
+) -> np.ndarray:
+    """Map saved recording-global event seconds onto one display panel.
+
+    The panel's own recording-global axis is ``panel_start_sec + panel["t"]``,
+    which is the same ``window_start_sec + local_time`` axis the saved
+    continuous event table was written against, so no clock conversion is
+    involved.
+
+    Events are admitted on the half-open interval
+    ``[panel_start_sec, panel_end_sec)``: an event exactly at the panel end
+    belongs to the next display window and is excluded here rather than being
+    drawn twice. Admitted events are resolved to the nearest sample on the
+    panel's own axis, so every returned index is in range and the renderer is
+    never relied on to silently discard an out-of-range value.
+
+    This is arithmetic over already-saved coordinates. It never runs the
+    detector and never opens a trace cache.
+    """
+    panel_t = np.asarray(panel.get("t"), dtype=float).reshape(-1)
+    times = np.asarray(event_times_sec, dtype=float).reshape(-1)
+    if panel_t.size == 0 or times.size == 0:
+        return np.asarray([], dtype=int)
+
+    start = float(panel["panel_start_sec"])
+    end = float(panel["panel_end_sec"])
+    finite = times[np.isfinite(times)]
+    admitted = finite[(finite >= start) & (finite < end)]
+    if admitted.size == 0:
+        return np.asarray([], dtype=int)
+    if panel_t.size == 1:
+        return np.asarray([0], dtype=int)
+
+    global_axis = start + panel_t
+    right = np.clip(np.searchsorted(global_axis, admitted, side="left"), 1, panel_t.size - 1)
+    left = right - 1
+    nearest = np.where(
+        np.abs(admitted - global_axis[left]) <= np.abs(global_axis[right] - admitted),
+        left,
+        right,
+    )
+    return np.unique(nearest).astype(int)
+
+
+def load_continuous_marker_event_times(run_dir: str, roi: str) -> np.ndarray:
+    """Recording-global event seconds for one ROI from the saved event table.
+
+    Reads ``_analysis/phasic_out/features/continuous_phasic_events.csv``
+    through the existing completed-run event loader, which is the sole
+    authority for a continuous run's events and never reruns detection.
+    """
+    from photometry_pipeline.completed_continuous_rwd_review import (
+        load_continuous_phasic_events,
+    )
+
+    events = load_continuous_phasic_events(run_dir, roi_id=str(roi))
+    if events.empty:
+        return np.asarray([], dtype=float)
+    return events["global_time_sec"].to_numpy(dtype=float)
+
+
+def build_continuous_marker_on_dff_dayplots(
+    run_dir: str,
+    *,
+    roi: str,
+    timeline_contract: dict[str, Any],
+    event_times_sec: Any,
+    output_dir: str | None = None,
+) -> dict[str, Any]:
+    """Write display-only dF/F day-plot copies that show detected peaks.
+
+    Reuses the existing continuous panel extractor and the existing dF/F tile
+    renderer; it neither reruns correction or detection nor publishes a
+    manifest artifact. Output goes to an isolated variant directory and the
+    canonical marker-free day plots are never touched.
+    """
+    from tools.plot_phasic_dayplot_bundle import (
+        _compose_dff_day_tile_canvas_lightweight,
+        _dff_tile_layout,
+        build_day_slot_maps,
+    )
+
+    canonical_dir = os.path.realpath(os.path.join(run_dir, str(roi), "day_plots"))
+    target_dir = os.path.realpath(
+        output_dir
+        if output_dir
+        else os.path.join(run_dir, str(roi), CONTINUOUS_MARKER_ON_VARIANT_RELATIVE_DIR)
+    )
+    if target_dir == canonical_dir:
+        raise GuidedContinuousSavedArtifactError(
+            "Marker-on day-plot copies cannot be written into the canonical "
+            "day_plots folder."
+        )
+
+    extracted = _extract_continuous_day_plot_panels(
+        run_dir=run_dir,
+        roi=str(roi),
+        timeline_contract=timeline_contract,
+    )
+    dff_panels = extracted["phasic_dff"]
+    if not any(dff_panels.values()):
+        raise GuidedContinuousSavedArtifactError(
+            f"The saved continuous results contain no displayable dF/F day-plot "
+            f"windows for ROI {str(roi)!r}."
+        )
+
+    global_ymin, global_ymax = _continuous_dff_display_limits(dff_panels)
+    marked_panels: dict[int, list[dict[str, Any]]] = {}
+    marker_counts_by_day: dict[int, int] = {}
+    for day, panels in dff_panels.items():
+        marked = []
+        for panel in panels:
+            indices = map_continuous_event_times_to_panel_indices(
+                panel, event_times_sec
+            )
+            marker_counts_by_day[int(day)] = marker_counts_by_day.get(
+                int(day), 0
+            ) + int(indices.size)
+            marked.append({**panel, "peak_indices": indices})
+        marked_panels[int(day)] = marked
+
+    sph = 2
+    layout = _dff_tile_layout(sph, _CONTINUOUS_DAY_PLOT_DPI)
+    slot_maps = build_day_slot_maps(marked_panels, sph)
+    os.makedirs(target_dir, exist_ok=True)
+
+    written: list[str] = []
+    for day in sorted(extracted["layout"].chunks_by_day):
+        slot_map = slot_maps.get(int(day), {})
+        if not slot_map:
+            continue
+        image, _stats = _compose_dff_day_tile_canvas_lightweight(
+            day=day,
+            plot_roi=str(roi),
+            sph=sph,
+            slot_map=slot_map,
+            layout=layout,
+            global_ymin=global_ymin,
+            global_ymax=global_ymax,
+            show_peak_markers=True,
+            timeline_anchor_label=extracted["timeline_anchor_label"],
+            title_override=(
+                f"Sampled Phasic dF/F with detected peaks - Day {day} - ROI {roi}"
+            ),
+            column_labels=_CONTINUOUS_DAY_PLOT_COLUMN_LABELS,
+        )
+        path = os.path.join(target_dir, f"phasic_dFF_day_{int(day):03d}.png")
+        image.save(path, compress_level=1)
+        written.append(path)
+
+    if not written:
+        raise GuidedContinuousSavedArtifactError(
+            f"No displayable dF/F day plots could be produced for ROI {str(roi)!r}."
+        )
+
+    return {
+        "roi": str(roi),
+        "output_dir": target_dir,
+        "paths": written,
+        "marker_counts_by_day": marker_counts_by_day,
+        "total_markers": int(sum(marker_counts_by_day.values())),
     }
 
 
@@ -777,22 +979,7 @@ def _publish_continuous_day_plots(
         ]
 
     dff_panels = extracted["phasic_dff"]
-    finite_dff = [
-        panel["dff"][np.isfinite(panel["dff"])]
-        for panels in dff_panels.values()
-        for panel in panels
-        if np.any(np.isfinite(panel["dff"]))
-    ]
-    if finite_dff:
-        values = np.concatenate(finite_dff)
-        global_ymin, global_ymax = np.percentile(values, [0.5, 99.9])
-        pad = 0.10 * (global_ymax - global_ymin)
-        if not np.isfinite(pad) or pad == 0.0:
-            pad = 0.1
-        global_ymin -= pad
-        global_ymax += pad
-    else:
-        global_ymin, global_ymax = -1.0, 1.0
+    global_ymin, global_ymax = _continuous_dff_display_limits(dff_panels)
 
     smoothed_data: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     for panels in dff_panels.values():

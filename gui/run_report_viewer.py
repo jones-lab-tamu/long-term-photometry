@@ -1866,6 +1866,17 @@ class RunReportViewer(QWidget):
         """Return True when a completed run workspace is currently loaded."""
         return bool(self._region_paths)
 
+    def is_native_continuous_results(self) -> bool:
+        """Return True when a native Guided continuous package is loaded."""
+        return bool(self._native_continuous_mode)
+
+    def native_continuous_context(self) -> Dict[str, Any]:
+        """Return the loaded native package's timeline/window/run-mode context."""
+        return {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in (self._native_continuous_context or {}).items()
+        }
+
     def available_artifacts(self, roi: str | None = None) -> List[Dict[str, Any]]:
         """Return the current native saved-artifact records for inspection/tests."""
         if not self._native_continuous_mode:
@@ -1882,6 +1893,10 @@ class RunReportViewer(QWidget):
             return self.active_image_path()
         region = self._selected_region()
         label = self._selected_tab()
+        if self._external_tab_image_overrides.get((region, label)):
+            # A display-variant override is showing; report what is displayed
+            # rather than the manifest artifact it temporarily replaced.
+            return self.active_image_path()
         records = self._native_continuous_artifacts_by_tab.get((region, label), [])
         if not records:
             return ""
@@ -1993,6 +2008,11 @@ class RunReportViewer(QWidget):
         region, tab = key
         if not region or not tab:
             return []
+        # An explicit display-variant override wins in every mode. Without an
+        # override the native package keeps its manifest-backed behavior.
+        override = self._external_tab_image_overrides.get(key, [])
+        if override:
+            return list(override)
         if self._native_continuous_mode:
             return [
                 str(record.get("path") or "")
@@ -2000,9 +2020,6 @@ class RunReportViewer(QWidget):
                     (region, tab), []
                 )
             ]
-        override = self._external_tab_image_overrides.get(key, [])
-        if override:
-            return list(override)
         tab_map = self._region_tab_images.get(region, {})
         if tab == TAB_PHASIC_CORRECTION_REFERENCE:
             tab = TAB_PHASIC_DYNAMIC_FIT
@@ -2012,9 +2029,11 @@ class RunReportViewer(QWidget):
         return (self._selected_region(), self._selected_tab())
 
     def _refresh_active_image(self, reset_index: bool):
-        if self._native_continuous_mode:
+        key = self._tab_key()
+        has_override = bool(self._external_tab_image_overrides.get(key))
+        if self._native_continuous_mode and not has_override:
             if reset_index:
-                self._tab_indices[self._tab_key()] = 0
+                self._tab_indices[key] = 0
             self._refresh_native_artifact()
             return
         images = self._current_tab_images()
@@ -2022,13 +2041,21 @@ class RunReportViewer(QWidget):
             self._show_no_image("No images available for this tab.")
             return
 
-        key = self._tab_key()
         if reset_index:
             idx = 0
         else:
             idx = self._tab_indices.get(key, 0)
         idx = max(0, min(idx, len(images) - 1))
         self._tab_indices[key] = idx
+
+        if self._native_continuous_mode:
+            # A display-variant copy has no manifest record, so it carries no
+            # artifact metadata. Restore the plain image surface, which the
+            # native branch may have swapped for the saved-table view.
+            self._artifact_table_scroll.setVisible(False)
+            self._image_scroll.setVisible(True)
+            self._artifact_metadata_label.setText("")
+            self._artifact_metadata_label.setVisible(False)
 
         path = images[idx]
         self._active_image_path = path
