@@ -13971,6 +13971,11 @@ class MainWindow(QMainWindow):
 
         strategy_map = build_guided_per_roi_production_strategy_map(plan)
         blockers = set(strategy_map.blocking_categories)
+        # A choice retained for an ROI that is no longer included is outside
+        # this gate's scope. The per-included-ROI checks above already require
+        # exactly one current, explicitly confirmed, supported choice for
+        # every included ROI; an excluded ROI must not block continuation.
+        blockers.discard("unknown_strategy_roi")
         # Removed: mixed dynamic-fit/Signal-Only F0 choices used to be
         # blocked here with a message requiring applied-dF/F orchestration.
         # build_guided_per_roi_production_strategy_map never actually

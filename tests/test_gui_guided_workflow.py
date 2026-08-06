@@ -6313,6 +6313,138 @@ def test_guided_correction_gate_strategy_contracts(
     assert window._guided_correction_continue_status.text() == status
 
 
+def test_guided_correction_gate_ignores_confirmed_choice_for_excluded_roi(
+    window, monkeypatch
+):
+    _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        {
+            "CH1": "signal_only_f0",
+            "CH2": "signal_only_f0",
+        },
+    )
+    for roi_list in (window._roi_list, window._guided_roi_list):
+        roi_list.addItem("CH3")
+        roi_list.item(roi_list.count() - 1).setCheckState(Qt.Unchecked)
+
+    window._guided_strategy_choices[
+        ("local_correction_preview", "CH3")
+    ] = {
+        "strategy": "signal_only_f0",
+        "strategy_family": "signal_only_f0",
+        "dynamic_fit_mode": None,
+        "confirmed": True,
+        "choice_source": "explicit_user_mark",
+        "source_type": "local_correction_preview",
+        "current": True,
+        "stale": False,
+        "roi": "CH3",
+        "local_preview_evidence": {},
+    }
+
+    window._refresh_guided_correction_continue_state()
+
+    assert window._guided_correction_continue_btn.isEnabled() is True
+
+
+def test_guided_correction_gate_all_included_signal_only_needs_no_parameters(
+    window, monkeypatch
+):
+    strategies = {
+        f"CH{index}": "signal_only_f0"
+        for index in range(1, 9)
+    }
+    _configure_correction_to_draft_gate(window, monkeypatch, strategies)
+
+    included = window._guided_selected_roi_ids()[1]
+    confirmed = {
+        choice["roi"]
+        for choice in window._guided_strategy_choices.values()
+        if choice.get("confirmed") is True
+    }
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert len(included) == 8
+    assert confirmed == set(included)
+    assert len(plan.per_roi_correction_strategy_choices) == len(included)
+    assert all(
+        choice.selected_strategy == "signal_only_f0"
+        and choice.effective_parameters == ()
+        for choice in plan.per_roi_correction_strategy_choices
+    )
+    assert window._guided_correction_continue_btn.isEnabled() is True
+
+
+def test_guided_correction_gate_requires_each_included_choice_confirmed(
+    window, monkeypatch
+):
+    choices = _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        {
+            "CH1": "robust_global_event_reject",
+            "CH2": "adaptive_event_gated_regression",
+        },
+    )
+    choices[("local_correction_preview", "CH2")]["confirmed"] = False
+
+    window._refresh_guided_correction_continue_state()
+
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Confirm correction strategies for all included ROIs to continue."
+    )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "field", "value"),
+    [
+        (
+            "robust_global_event_reject",
+            "robust_event_reject_max_iters",
+            0,
+        ),
+        (
+            "adaptive_event_gated_regression",
+            "adaptive_event_gate_residual_z_thresh",
+            0.0,
+        ),
+    ],
+)
+def test_guided_correction_gate_rejects_invalid_dynamic_parameters(
+    window, monkeypatch, strategy, field, value
+):
+    _configure_correction_to_draft_gate(
+        window, monkeypatch, {"CH1": strategy}
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    choice = plan.per_roi_correction_strategy_choices[0]
+    invalid_parameters = dict(choice.effective_parameters)
+    invalid_parameters[field] = value
+    invalid_plan = replace(
+        plan,
+        per_roi_correction_strategy_choices=[
+            replace(
+                choice,
+                effective_parameters=tuple(invalid_parameters.items()),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        window,
+        "_build_guided_new_analysis_draft_plan",
+        lambda: invalid_plan,
+    )
+
+    window._refresh_guided_correction_continue_state()
+
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Confirm correction strategies for all included ROIs to continue."
+    )
+
+
 def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
