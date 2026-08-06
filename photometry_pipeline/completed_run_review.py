@@ -108,6 +108,9 @@ def resolve_analysis_plot_context(analysis_out: str | Path) -> AnalysisPlotConte
         requested, native_provenance = _validate_requested_provenance(
             metadata, report, analysis_kind
         )
+        requested = _resolve_missing_effective_correction_parameters(
+            analysis_path, requested
+        )
         if (
             analysis_kind == "tonic"
             and isinstance(metadata, dict)
@@ -146,6 +149,9 @@ def resolve_analysis_plot_context(analysis_out: str | Path) -> AnalysisPlotConte
         raise CompletedRunReviewError(
             f"Current native correction provenance is unreadable ({exc})."
         ) from exc
+    requested = _resolve_missing_effective_correction_parameters(
+        analysis_path, requested
+    )
     if (
         analysis_kind == "tonic"
         and isinstance(metadata, dict)
@@ -726,6 +732,9 @@ def _load_completed_branch_review(
     requested_by_roi, correction_native = _validate_requested_provenance(
         metadata, report, analysis_kind
     )
+    requested_by_roi = _resolve_missing_effective_correction_parameters(
+        analysis_dir, requested_by_roi
+    )
     guided_current_native = guided_state == GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE
     current_native = bool(correction_native or guided_current_native)
     if classification.is_current and not current_native:
@@ -1231,6 +1240,55 @@ def format_tonic_settings_summary(tonic_settings: Mapping[str, str]) -> str:
     return f"Tonic timeline: {timeline_label}\nSession shape: {shape_label}"
 
 
+def _resolve_missing_effective_correction_parameters(
+    analysis_dir: Path,
+    requested_by_roi: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Fill only absent per-ROI values for legacy Review reads.
+
+    Older completed runs have no per-ROI parameter field.  Their saved
+    ``config_used.yaml`` is the only historical run-wide authority available;
+    when it is absent or unusable, the current known Guided defaults provide
+    the documented legacy interpretation.  This is an in-memory read-time
+    normalization only: no old artifact is rewritten and no ROI differences
+    are inferred.
+    """
+    if not requested_by_roi:
+        return {}
+    config_path = Path(analysis_dir) / "config_used.yaml"
+    raw_config: Any = {}
+    if config_path.is_file():
+        try:
+            raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            raw_config = {}
+    config = raw_config if isinstance(raw_config, dict) else {}
+    from photometry_pipeline.guided_new_analysis_plan import (
+        guided_per_roi_editable_correction_fields,
+        resolve_guided_effective_correction_parameters,
+    )
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for roi, record in requested_by_roi.items():
+        copy = dict(record)
+        if "effective_parameters" not in copy:
+            strategy = str(copy.get("selected_strategy") or "")
+            fields = guided_per_roi_editable_correction_fields(strategy)
+            supplied = {name: config[name] for name in fields if name in config}
+            try:
+                copy["effective_parameters"] = dict(
+                    resolve_guided_effective_correction_parameters(
+                        strategy, values=supplied
+                    )
+                )
+            except (TypeError, ValueError):
+                copy["effective_parameters"] = dict(
+                    resolve_guided_effective_correction_parameters(strategy)
+                )
+        resolved[str(roi)] = copy
+    return resolved
+
+
 def _format_duration_natural(duration_sec: float) -> str:
     """Render a persisted expected-duration value as scientist-facing text,
     in whichever unit is exact for that value -- never a hardcoded figure."""
@@ -1430,6 +1488,9 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
     report = _read_json(analysis_dir / "run_report.json")
     requested_by_roi, native = _validate_requested_provenance(
         metadata, report, analysis_kind
+    )
+    requested_by_roi = _resolve_missing_effective_correction_parameters(
+        analysis_dir, requested_by_roi
     )
     if not native:
         raise CompletedRunReviewError(

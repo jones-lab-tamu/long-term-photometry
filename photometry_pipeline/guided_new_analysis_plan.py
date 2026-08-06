@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from collections.abc import Mapping
 import hashlib
 import json
+import math
 from typing import Any
 
 from photometry_pipeline.config import Config
@@ -159,6 +161,124 @@ _CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS = canonical_dynamic_fit_backend_defaults
 
 def _backend_dynamic_fit_default(field_name: str) -> Any:
     return _CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS[field_name]
+
+
+# Guided deliberately exposes only this small, strategy-specific subset of
+# dynamic-fit correction settings.  The ratio thresholds, adaptive freeze
+# interpolation policy, and fallback settings remain part of the accepted
+# run-wide Config contract.
+GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "robust_global_event_reject": (
+        "robust_event_reject_max_iters",
+        "robust_event_reject_residual_z_thresh",
+        "robust_event_reject_local_var_window_sec",
+        "robust_event_reject_min_keep_fraction",
+    ),
+    "adaptive_event_gated_regression": (
+        "adaptive_event_gate_residual_z_thresh",
+        "adaptive_event_gate_local_var_window_sec",
+        "adaptive_event_gate_smooth_window_sec",
+        "adaptive_event_gate_min_trust_fraction",
+    ),
+}
+
+
+def guided_per_roi_editable_correction_fields(strategy: str) -> tuple[str, ...]:
+    """Return the narrowly approved Guided fields for one strategy."""
+    return GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS.get(str(strategy), ())
+
+
+def _guided_parameter_items(values: object) -> tuple[tuple[str, Any], ...]:
+    if isinstance(values, Mapping):
+        items = tuple(values.items())
+    elif isinstance(values, (tuple, list)):
+        items = tuple(values)
+    else:
+        raise ValueError("Guided per-ROI correction parameters must be a mapping or pairs.")
+    normalized: list[tuple[str, Any]] = []
+    for item in items:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("Guided per-ROI correction parameters must contain name/value pairs.")
+        name, value = item
+        if not isinstance(name, str) or not name:
+            raise ValueError("Guided per-ROI correction parameter names must be non-empty text.")
+        normalized.append((name, value))
+    if len({name for name, _value in normalized}) != len(normalized):
+        raise ValueError("Guided per-ROI correction parameters contain duplicate names.")
+    return tuple(normalized)
+
+
+def validate_guided_effective_correction_parameters(
+    strategy: str,
+    values: object,
+) -> tuple[tuple[str, Any], ...]:
+    """Validate and normalize one complete Guided per-ROI parameter set.
+
+    This is intentionally not a general Config validator: it covers only the
+    eight fields that Guided permits to vary per ROI.
+    """
+    fields = guided_per_roi_editable_correction_fields(strategy)
+    items = _guided_parameter_items(values)
+    if not fields:
+        if items:
+            raise ValueError(
+                f"Strategy {strategy!r} does not accept per-ROI correction parameters."
+            )
+        return ()
+    by_name = dict(items)
+    if set(by_name) != set(fields):
+        missing = sorted(set(fields) - set(by_name))
+        extra = sorted(set(by_name) - set(fields))
+        raise ValueError(
+            "Guided per-ROI correction parameters must be complete; "
+            f"missing={missing}, extra={extra}."
+        )
+    for name in fields:
+        value = by_name[name]
+        if name == "robust_event_reject_max_iters":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be an integer >= 1.")
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a finite number.")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"{name} must be finite.")
+        if name.endswith("min_keep_fraction") or name.endswith("min_trust_fraction"):
+            if not 0.0 < numeric <= 1.0:
+                raise ValueError(f"{name} must be in (0, 1].")
+        elif numeric <= 0.0:
+            raise ValueError(f"{name} must be greater than zero.")
+    return tuple((name, by_name[name]) for name in fields)
+
+
+def resolve_guided_effective_correction_parameters(
+    strategy: str,
+    contract: "GuidedNewAnalysisDynamicFitParameterContract | None" = None,
+    values: object = (),
+) -> tuple[tuple[str, Any], ...]:
+    """Resolve complete current Guided defaults plus an optional ROI overlay."""
+    fields = guided_per_roi_editable_correction_fields(strategy)
+    if not fields:
+        return validate_guided_effective_correction_parameters(strategy, values)
+    if contract is None:
+        contract = GuidedNewAnalysisDynamicFitParameterContract()
+    defaults = {name: getattr(contract, name) for name in fields}
+    supplied = dict(_guided_parameter_items(values))
+    unknown = sorted(set(supplied) - set(fields))
+    if unknown:
+        raise ValueError(
+            f"Guided per-ROI correction parameters contain unsupported fields: {unknown}."
+        )
+    defaults.update(supplied)
+    return validate_guided_effective_correction_parameters(strategy, defaults)
+
+
+def guided_effective_correction_parameters_dict(
+    values: object,
+) -> dict[str, Any]:
+    """Return the plain mapping form used at Config/provenance boundaries."""
+    return dict(_guided_parameter_items(values))
 
 
 @dataclass(frozen=True)
@@ -725,6 +845,10 @@ class GuidedPlanCorrectionChoice:
     explicit_user_mark: bool = False
     selected_at_utc: str | None = None
     evidence_reference: dict[str, Any] = field(default_factory=dict)
+    # Complete, resolved values for the small Guided per-ROI editable subset.
+    # Empty is accepted for legacy/directly constructed plans and resolves to
+    # the current Guided defaults at the production-map boundary.
+    effective_parameters: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -826,6 +950,7 @@ class GuidedPerRoiProductionStrategy:
     evidence_reference: dict[str, Any]
     explicit_user_mark: bool
     current_or_stale: str
+    effective_parameters: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -886,6 +1011,18 @@ def build_guided_per_roi_production_strategy_map(
             if isinstance(choice.evidence_reference, dict)
             else {}
         )
+        effective_parameters: tuple[tuple[str, Any], ...] = ()
+        if family == "dynamic_fit":
+            try:
+                effective_parameters = resolve_guided_effective_correction_parameters(
+                    selected,
+                    plan.dynamic_fit_parameter_contract,
+                    choice.effective_parameters,
+                )
+            except (TypeError, ValueError):
+                blockers.append("invalid_per_roi_correction_parameters")
+        elif choice.effective_parameters:
+            blockers.append("invalid_per_roi_correction_parameters")
         entries.append(
             GuidedPerRoiProductionStrategy(
                 roi_id=roi,
@@ -900,6 +1037,7 @@ def build_guided_per_roi_production_strategy_map(
                 evidence_reference=dict(evidence_reference),
                 explicit_user_mark=bool(choice.explicit_user_mark),
                 current_or_stale=str(choice.current_or_stale or "stale"),
+                effective_parameters=effective_parameters,
             )
         )
 

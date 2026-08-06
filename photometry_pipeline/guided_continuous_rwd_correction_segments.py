@@ -56,6 +56,7 @@ from photometry_pipeline.guided_plan_identity import (
     compute_guided_new_analysis_draft_plan_identity,
 )
 from photometry_pipeline.guided_production_mapping import (
+    GuidedProductionTypedValue,
     GuidedProductionPerRoiStrategy,
     guided_production_strategy_map_to_correction_specs,
 )
@@ -134,6 +135,7 @@ class GuidedContinuousRwdCorrectionBinding:
     dynamic_fit_mode: str | None
     parameter_identity: str
     evidence_identity: str
+    effective_parameters: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,6 +357,7 @@ def _canonical_correction_bindings(
                 dynamic_fit_mode=spec.dynamic_fit_mode,
                 parameter_identity=spec.parameter_identity,
                 evidence_identity=spec.evidence_identity,
+                effective_parameters=tuple(spec.effective_parameters),
             )
         )
     return tuple(bindings)
@@ -515,6 +518,15 @@ def _resolve_accepted_correction_context(
             ),
             explicit_user_mark=entry.explicit_user_mark,
             current_or_stale=entry.current_or_stale,
+            effective_parameters=tuple(
+                GuidedProductionTypedValue(
+                    field_name=name,
+                    value_type=type(value).__name__,
+                    value=value,
+                    source_classification="applied_dynamic_fit_per_roi",
+                )
+                for name, value in entry.effective_parameters
+            ),
         )
         for entry in strategy_map.entries
     )
@@ -567,6 +579,7 @@ def _correction_payload_identity_from_bindings(
             dynamic_fit_mode=binding.dynamic_fit_mode,
             parameter_identity=binding.parameter_identity,
             evidence_identity=binding.evidence_identity,
+            effective_parameters=tuple(binding.effective_parameters),
         )
         for binding in bindings
     }

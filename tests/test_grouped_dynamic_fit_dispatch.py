@@ -54,6 +54,67 @@ def _multi_roi_chunk(rng, n_rois, n, fs, roi_names=None):
     return _make_chunk(uv_raw, sig_raw, roi_names, fs)
 
 
+def test_same_strategy_different_effective_parameters_use_distinct_groups(monkeypatch):
+    chunk = _multi_roi_chunk(np.random.default_rng(21), 2, 80, 20.0, ["ROI1", "ROI2"])
+    calls = []
+
+    def fake_robust(sub_chunk, cfg, mode):
+        calls.append(
+            (
+                tuple(sub_chunk.channel_names),
+                float(cfg.robust_event_reject_local_var_window_sec),
+            )
+        )
+        return np.zeros_like(sub_chunk.uv_raw, dtype=float)
+
+    monkeypatch.setattr(
+        regression,
+        "_compute_dynamic_fit_ref_robust_global_event_reject",
+        fake_robust,
+    )
+    specs = {
+        "ROI1": PerRoiCorrectionSpec(
+            roi_id="ROI1",
+            strategy_family="dynamic_fit",
+            selected_strategy="robust_global_event_reject",
+            dynamic_fit_mode="robust_global_event_reject",
+            effective_parameters=(
+                ("robust_event_reject_max_iters", 3),
+                ("robust_event_reject_residual_z_thresh", 3.5),
+                ("robust_event_reject_local_var_window_sec", 10.0),
+                ("robust_event_reject_min_keep_fraction", 0.5),
+            ),
+        ),
+        "ROI2": PerRoiCorrectionSpec(
+            roi_id="ROI2",
+            strategy_family="dynamic_fit",
+            selected_strategy="robust_global_event_reject",
+            dynamic_fit_mode="robust_global_event_reject",
+            effective_parameters=(
+                ("robust_event_reject_max_iters", 3),
+                ("robust_event_reject_residual_z_thresh", 3.5),
+                ("robust_event_reject_local_var_window_sec", 20.0),
+                ("robust_event_reject_min_keep_fraction", 0.5),
+            ),
+        ),
+    }
+    regression.fit_chunk_dynamic(
+        chunk,
+        Config(dynamic_fit_mode="robust_global_event_reject"),
+        mode="phasic",
+        per_roi_correction=specs,
+    )
+    assert sorted(calls) == [(('ROI1',), 10.0), (('ROI2',), 20.0)]
+    assert chunk.metadata["dynamic_fit_group_count"] == 2
+    assert chunk.metadata["dynamic_fit_effective_parameters_by_roi"]["ROI1"][
+        "robust_event_reject_local_var_window_sec"
+    ] == 10.0
+    assert chunk.metadata["dynamic_fit_effective_parameters_by_roi"]["ROI2"][
+        "robust_event_reject_local_var_window_sec"
+    ] == 20.0
+    assert len(chunk.metadata["dynamic_fit_engine_by_mode"]) == 2
+
+
 def _direct_dispatch(dynamic_fit_mode, chunk, cfg):
     """Call the exact old, ungrouped per-mode function for `dynamic_fit_mode`
     on the full chunk -- the "old path" side of every equivalence test."""

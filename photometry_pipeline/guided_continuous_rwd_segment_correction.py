@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -233,6 +233,7 @@ class GuidedContinuousRwdPerRoiCorrectionResult:
     dynamic_fit_mode: str | None
     parameter_identity: str
     evidence_identity: str
+    effective_parameters: tuple[tuple[str, Any], ...]
     reference_kind: str
     applied_strategy: str
     fallback_path: tuple[str, ...]
@@ -490,6 +491,18 @@ def _correct_dynamic_roi(
     scalar_f0: float,
     sampling_rate_hz: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, tuple[str, ...], str]:
+    correction_config = config
+    if spec.effective_parameters:
+        try:
+            correction_config = replace(config, **dict(spec.effective_parameters))
+        except (TypeError, ValueError) as exc:
+            raise GuidedContinuousRwdSegmentCorrectionError(
+                "dynamic_fit_failure",
+                "Per-ROI dynamic-fit parameters are invalid.",
+                roi=spec.roi_id,
+                segment_index=raw_segment.segment_index,
+                reason=str(exc),
+            ) from exc
     local_time = raw_segment.target_elapsed_seconds - raw_segment.target_elapsed_seconds[0]
     control = raw_segment.control_values[:, roi_index : roi_index + 1]
     signal = raw_segment.signal_values[:, roi_index : roi_index + 1]
@@ -506,10 +519,10 @@ def _correct_dynamic_roi(
     )
     try:
         chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(
-            chunk.uv_raw, chunk.fs_hz, config
+            chunk.uv_raw, chunk.fs_hz, correction_config
         )
         chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(
-            chunk.sig_raw, chunk.fs_hz, config
+            chunk.sig_raw, chunk.fs_hz, correction_config
         )
     except Exception as exc:
         raise GuidedContinuousRwdSegmentCorrectionError(
@@ -526,7 +539,7 @@ def _correct_dynamic_roi(
     try:
         fitted, delta = regression.fit_chunk_dynamic(
             chunk,
-            config,
+            correction_config,
             mode="phasic",
             per_roi_correction={spec.roi_id: spec},
         )
@@ -641,6 +654,8 @@ def _validate_result(
             or item.dynamic_fit_mode != binding.dynamic_fit_mode
             or item.parameter_identity != binding.parameter_identity
             or item.evidence_identity != binding.evidence_identity
+            or tuple(item.effective_parameters)
+            != tuple(binding.effective_parameters)
         ):
             _raise("segment_strategy_mismatch", "Per-ROI correction metadata was substituted.", roi=item.roi_id)
         if (
@@ -813,6 +828,7 @@ def correct_guided_continuous_rwd_segment(
                 dynamic_fit_mode=binding.dynamic_fit_mode,
                 parameter_identity=binding.parameter_identity,
                 evidence_identity=binding.evidence_identity,
+                effective_parameters=tuple(binding.effective_parameters),
                 reference_kind=reference_kind,
                 applied_strategy=applied,
                 fallback_path=path,

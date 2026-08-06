@@ -1751,6 +1751,274 @@ def test_guided_confirm_choices_are_independent_by_roi(window, tmp_path, monkeyp
     assert plan_text.count("- CH2:") == 1
 
 
+def test_guided_confirm_selector_restores_saved_strategy_after_roi_switchback(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+
+    robust_index = window._guided_confirm_strategy_combo.findData(
+        "robust_global_event_reject"
+    )
+    signal_only_index = window._guided_confirm_strategy_combo.findData(
+        "signal_only_f0"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(robust_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("CH2")
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(signal_only_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("CH1")
+    )
+
+    assert (
+        window._guided_confirm_strategy_combo.currentData()
+        == "robust_global_event_reject"
+    )
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+    assert window._guided_strategy_choices[
+        (str(run_dir.resolve()), "CH1")
+    ]["strategy"] == "robust_global_event_reject"
+
+
+def test_guided_correction_parameter_dialog_exposes_approved_fields_and_resets_locally(
+    window,
+):
+    dialog_a = main_window_module._GuidedRoiCorrectionParameterDialog(
+        "CH1", "robust_global_event_reject", parent=window
+    )
+    dialog_b = main_window_module._GuidedRoiCorrectionParameterDialog(
+        "CH2",
+        "robust_global_event_reject",
+        seed_values={"robust_event_reject_local_var_window_sec": 20.0},
+        parent=window,
+    )
+    try:
+        assert set(dialog_a._controls) == {
+            "robust_event_reject_max_iters",
+            "robust_event_reject_residual_z_thresh",
+            "robust_event_reject_local_var_window_sec",
+            "robust_event_reject_min_keep_fraction",
+        }
+        assert "robust_event_reject_local_var_ratio_thresh" not in dialog_a._controls
+        assert dialog_a._controls[
+            "robust_event_reject_local_var_window_sec"
+        ].value() == 10.0
+        assert dialog_b._controls[
+            "robust_event_reject_local_var_window_sec"
+        ].value() == 20.0
+        assert dialog_a._controls[
+            "robust_event_reject_max_iters"
+        ].minimum() == 1
+        assert dialog_a._controls[
+            "robust_event_reject_max_iters"
+        ].maximum() == 1000
+        assert dialog_a._controls[
+            "robust_event_reject_residual_z_thresh"
+        ].maximum() == 1_000_000.0
+        assert dialog_a._controls[
+            "robust_event_reject_residual_z_thresh"
+        ].decimals() == 4
+        assert dialog_a._controls[
+            "robust_event_reject_local_var_window_sec"
+        ].singleStep() == 0.5
+        assert dialog_a._controls[
+            "robust_event_reject_min_keep_fraction"
+        ].singleStep() == 0.05
+
+        dialog_a._controls["robust_event_reject_local_var_window_sec"].setValue(35.0)
+        dialog_a._on_reset()
+
+        assert dialog_a._controls[
+            "robust_event_reject_local_var_window_sec"
+        ].value() == 10.0
+        assert dialog_b._controls[
+            "robust_event_reject_local_var_window_sec"
+        ].value() == 20.0
+    finally:
+        dialog_a.close()
+        dialog_b.close()
+
+
+def _guided_correction_parameter_context(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(
+        window._guided_confirm_strategy_combo.findData(
+            "robust_global_event_reject"
+        )
+    )
+    from photometry_pipeline.guided_new_analysis_plan import (
+        resolve_guided_effective_correction_parameters,
+    )
+
+    return (
+        run_dir,
+        (str(run_dir.resolve()), "CH1"),
+        dict(
+            resolve_guided_effective_correction_parameters(
+                "robust_global_event_reject"
+            )
+        ),
+    )
+
+
+def _apply_fake_guided_correction_values(
+    window, monkeypatch, roi, values
+):
+    class _FakeCorrectionDialog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(values)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "_GuidedRoiCorrectionParameterDialog",
+        _FakeCorrectionDialog,
+    )
+    window._on_guided_customize_correction_parameters(
+        roi,
+        "robust_global_event_reject",
+        source_type="completed_run",
+        source_id=window._current_guided_completed_run_dir(),
+    )
+
+
+def test_guided_untouched_correction_defaults_are_not_stored_as_custom(
+    window, tmp_path, monkeypatch
+):
+    _run_dir, choice_key, defaults = _guided_correction_parameter_context(
+        window, tmp_path, monkeypatch
+    )
+
+    _apply_fake_guided_correction_values(window, monkeypatch, "CH1", defaults)
+
+    assert choice_key not in window._guided_correction_parameters_by_choice
+    assert "Guided defaults" in window._guided_confirm_correction_parameters_label.text()
+    assert window._guided_correction_parameter_values_for_choice(
+        choice_key, "robust_global_event_reject"
+    ) == defaults
+
+
+def test_guided_changed_correction_value_is_retained_as_customized(
+    window, tmp_path, monkeypatch
+):
+    _run_dir, choice_key, defaults = _guided_correction_parameter_context(
+        window, tmp_path, monkeypatch
+    )
+    customized = dict(defaults)
+    customized["robust_event_reject_local_var_window_sec"] = 20.0
+
+    _apply_fake_guided_correction_values(window, monkeypatch, "CH1", customized)
+
+    assert window._guided_correction_parameters_by_choice[choice_key]["values"] == (
+        customized
+    )
+    assert "customized" in window._guided_confirm_correction_parameters_label.text()
+
+
+def test_guided_reset_removes_only_current_roi_correction_customization(
+    window, tmp_path, monkeypatch
+):
+    _run_dir, choice_key_a, defaults = _guided_correction_parameter_context(
+        window, tmp_path, monkeypatch
+    )
+    customized_a = dict(defaults)
+    customized_a["robust_event_reject_local_var_window_sec"] = 20.0
+    customized_b = dict(defaults)
+    customized_b["robust_event_reject_max_iters"] = 7
+
+    _apply_fake_guided_correction_values(window, monkeypatch, "CH1", customized_a)
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("CH2")
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(
+        window._guided_confirm_strategy_combo.findData(
+            "robust_global_event_reject"
+        )
+    )
+    choice_key_b = (str(_run_dir.resolve()), "CH2")
+    _apply_fake_guided_correction_values(window, monkeypatch, "CH2", customized_b)
+
+    assert window._guided_correction_parameters_by_choice[choice_key_a]["values"] == (
+        customized_a
+    )
+    assert window._guided_correction_parameters_by_choice[choice_key_b]["values"] == (
+        customized_b
+    )
+
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("CH1")
+    )
+    _apply_fake_guided_correction_values(window, monkeypatch, "CH1", defaults)
+
+    assert choice_key_a not in window._guided_correction_parameters_by_choice
+    assert window._guided_correction_parameters_by_choice[choice_key_b]["values"] == (
+        customized_b
+    )
+    assert "Guided defaults" in window._guided_confirm_correction_parameters_label.text()
+    window._guided_confirm_roi_combo.setCurrentIndex(
+        window._guided_confirm_roi_combo.findData("CH2")
+    )
+    assert "customized" in window._guided_confirm_correction_parameters_label.text()
+
+
+def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
+    source_type = main_window_module.LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+    key_a = window._guided_confirm_choice_key(source_type, None, "ROI1")
+    key_b = window._guided_confirm_choice_key(source_type, None, "ROI2")
+    window._guided_correction_parameters_by_choice = {
+        key_a: {
+            "strategy": "robust_global_event_reject",
+            "values": {
+                "robust_event_reject_max_iters": 3,
+                "robust_event_reject_residual_z_thresh": 3.5,
+                "robust_event_reject_local_var_window_sec": 11.0,
+                "robust_event_reject_min_keep_fraction": 0.5,
+            },
+        },
+        key_b: {
+            "strategy": "robust_global_event_reject",
+            "values": {
+                "robust_event_reject_max_iters": 6,
+                "robust_event_reject_residual_z_thresh": 4.0,
+                "robust_event_reject_local_var_window_sec": 22.0,
+                "robust_event_reject_min_keep_fraction": 0.75,
+            },
+        },
+    }
+
+    overrides_a = window._guided_correction_parameter_overrides_for_preview(
+        "local_raw_segment", None, "ROI1", ["robust_global_event_reject"]
+    )
+    overrides_b = window._guided_correction_parameter_overrides_for_preview(
+        "local_raw_segment", None, "ROI2", ["robust_global_event_reject"]
+    )
+
+    assert overrides_a["robust_event_reject_local_var_window_sec"] == 11.0
+    assert overrides_b["robust_event_reject_local_var_window_sec"] == 22.0
+    assert overrides_a != overrides_b
+
+
 def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(window, tmp_path, monkeypatch):
     run_a = _make_preview_completed_run(tmp_path / "run_a_parent")
     run_b = _make_preview_completed_run(tmp_path / "run_b_parent")

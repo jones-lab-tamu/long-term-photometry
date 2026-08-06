@@ -7,6 +7,7 @@ without rereading chunks from disk. Writes to a temporary file, then renames
 to the final path upon success. Implements Safe Write Semantics.
 """
 import os
+import json
 import h5py
 import numpy as np
 
@@ -456,8 +457,11 @@ class Hdf5TraceCacheWriter:
                             # existing intermittent producers are unaffected.
                             ('correction_fallback_path', 'fallback_path'),
                             ('correction_qc_json', 'qc_json'),
+                            ('correction_effective_parameters', 'effective_parameters'),
                         ):
                             value = consumed_meta.get(key)
+                            if key == 'effective_parameters' and isinstance(value, dict):
+                                value = json.dumps(value, sort_keys=True, separators=(',', ':'))
                             if value is not None and str(value):
                                 grp.attrs[attr_name] = str(value)
                     roi_bleach = (
@@ -520,8 +524,16 @@ class Hdf5TraceCacheWriter:
                         grp.attrs['dynamic_fit_mode_resolved'] = fit_mode
                         engine_by_mode = chunk.metadata.get('dynamic_fit_engine_by_mode', {})
                         engine = ''
-                        if isinstance(engine_by_mode, dict) and fit_mode in engine_by_mode:
-                            engine = str(engine_by_mode[fit_mode].get('engine', '') or '').strip()
+                        group_key_by_roi = chunk.metadata.get(
+                            'dynamic_fit_group_key_by_roi', {}
+                        )
+                        metadata_key = (
+                            group_key_by_roi.get(str(roi), fit_mode)
+                            if isinstance(group_key_by_roi, dict)
+                            else fit_mode
+                        )
+                        if isinstance(engine_by_mode, dict) and metadata_key in engine_by_mode:
+                            engine = str(engine_by_mode[metadata_key].get('engine', '') or '').strip()
                         if not engine and not has_per_roi_contract:
                             engine = str(chunk.metadata.get('dynamic_fit_engine', '')).strip()
                         if engine:

@@ -29,7 +29,9 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def _compact_completed_run(root: Path) -> Path:
+def _compact_completed_run(
+    root: Path, *, selected_strategy: str = "global_linear_regression"
+) -> Path:
     run_id = "guided-run-overview"
     provenance = {
         "schema_version": CORRECTION_PROVENANCE_SCHEMA_VERSION,
@@ -40,8 +42,8 @@ def _compact_completed_run(root: Path) -> Path:
             {
                 "roi_id": "CH1",
                 "strategy_family": "dynamic_fit",
-                "selected_strategy": "global_linear_regression",
-                "dynamic_fit_mode": "global_linear_regression",
+                "selected_strategy": selected_strategy,
+                "dynamic_fit_mode": selected_strategy,
                 "parameter_identity": "parameters-1",
                 "evidence_identity": "evidence-1",
             }
@@ -138,6 +140,60 @@ def test_compact_overview_reads_exact_metadata_set_and_never_opens_hdf5(
         "global_linear_regression"
     )
     assert overview["full_resolution_traces_loaded"] is False
+
+
+def test_legacy_compact_overview_resolves_runwide_parameters_without_rewriting(
+    tmp_path,
+):
+    run = _compact_completed_run(
+        tmp_path / "run", selected_strategy="robust_global_event_reject"
+    )
+    analysis = run / "_analysis" / "phasic_out"
+    config = analysis / "config_used.yaml"
+    config.write_text(
+        "robust_event_reject_max_iters: 9\n"
+        "robust_event_reject_residual_z_thresh: 4.25\n"
+        "robust_event_reject_local_var_window_sec: 18.0\n"
+        "robust_event_reject_min_keep_fraction: 0.65\n",
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(run).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in run.rglob("*")
+        if path.is_file()
+    }
+
+    overview = load_completed_review_overview(run)
+
+    assert overview["requested_by_roi"]["CH1"]["effective_parameters"] == {
+        "robust_event_reject_max_iters": 9,
+        "robust_event_reject_residual_z_thresh": 4.25,
+        "robust_event_reject_local_var_window_sec": 18.0,
+        "robust_event_reject_min_keep_fraction": 0.65,
+    }
+    after = {
+        path.relative_to(run).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in run.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_legacy_compact_overview_uses_current_defaults_when_no_runwide_config_exists(
+    tmp_path,
+):
+    run = _compact_completed_run(
+        tmp_path / "run", selected_strategy="robust_global_event_reject"
+    )
+
+    overview = load_completed_review_overview(run)
+
+    assert overview["requested_by_roi"]["CH1"]["effective_parameters"] == {
+        "robust_event_reject_max_iters": 3,
+        "robust_event_reject_residual_z_thresh": 3.5,
+        "robust_event_reject_local_var_window_sec": 10.0,
+        "robust_event_reject_min_keep_fraction": 0.5,
+    }
 
 
 def test_compact_overview_refuses_inconsistent_terminal_metadata(tmp_path):

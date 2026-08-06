@@ -877,6 +877,7 @@ class GuidedBackendPerRoiProductionStrategy:
     evidence_reference_json: str
     explicit_user_mark: bool
     current_or_stale: str
+    effective_parameters: tuple[GuidedBackendTypedFieldValue, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2830,6 +2831,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "evidence_reference_json",
         "explicit_user_mark",
         "current_or_stale",
+        "effective_parameters",
     ),
     GuidedBackendCorrectionRequest: (
         "strategy_scope",

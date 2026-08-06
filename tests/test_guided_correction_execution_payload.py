@@ -13,7 +13,10 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
     LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
 )
-from photometry_pipeline.guided_production_mapping import GuidedProductionPerRoiStrategy
+from photometry_pipeline.guided_production_mapping import (
+    GuidedProductionPerRoiStrategy,
+    GuidedProductionTypedValue,
+)
 
 
 def _entry(roi, selected):
@@ -151,3 +154,61 @@ def test_cli_loader_refuses_native_file_mutated_after_authorization(tmp_path):
     path.write_bytes(correction_bytes + b" ")
     with pytest.raises(GuidedCorrectionPayloadError, match="authorized startup provenance"):
         load_guided_per_roi_correction(manifest)
+
+
+def test_payload_preserves_complete_effective_values_and_accepts_legacy_identity(tmp_path):
+    parameters = (
+        GuidedProductionTypedValue(
+            "robust_event_reject_max_iters", "int", 3, "applied_dynamic_fit_per_roi"
+        ),
+        GuidedProductionTypedValue(
+            "robust_event_reject_residual_z_thresh", "float", 3.5,
+            "applied_dynamic_fit_per_roi",
+        ),
+        GuidedProductionTypedValue(
+            "robust_event_reject_local_var_window_sec", "float", 20.0,
+            "applied_dynamic_fit_per_roi",
+        ),
+        GuidedProductionTypedValue(
+            "robust_event_reject_min_keep_fraction", "float", 0.5,
+            "applied_dynamic_fit_per_roi",
+        ),
+    )
+    entry = _entry("ROI1", "robust_global_event_reject")
+    entry = type(entry)(**{**entry.__dict__, "effective_parameters": parameters})
+    path = tmp_path / "current.json"
+    path.write_bytes(serialize_guided_correction_payload(("ROI1",), (entry,)))
+    current = json.loads(path.read_text())
+    assert current["per_roi_correction"][0]["effective_parameters"][
+        "robust_event_reject_local_var_window_sec"
+    ] == 20.0
+    assert dict(load_guided_correction_payload(path, ("ROI1",))["ROI1"].effective_parameters)[
+        "robust_event_reject_local_var_window_sec"
+    ] == 20.0
+
+    legacy = dict(current)
+    legacy_entries = []
+    for raw in current["per_roi_correction"]:
+        legacy_entries.append(
+            {
+                key: raw[key]
+                for key in (
+                    "roi_id",
+                    "strategy_family",
+                    "selected_strategy",
+                    "dynamic_fit_mode",
+                    "parameter_identity",
+                    "evidence_identity",
+                )
+            }
+        )
+    legacy["per_roi_correction"] = legacy_entries
+    legacy_basis = dict(legacy)
+    legacy_basis.pop("canonical_correction_payload_identity", None)
+    legacy["canonical_correction_payload_identity"] = hashlib.sha256(
+        json.dumps(legacy_basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    resolved_legacy = load_guided_correction_payload(legacy_path, ("ROI1",))
+    assert resolved_legacy["ROI1"].effective_parameters == ()

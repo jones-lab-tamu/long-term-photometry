@@ -58,6 +58,45 @@ def _mixed_map() -> dict[str, PerRoiCorrectionSpec]:
     }
 
 
+def test_per_roi_effective_correction_values_are_kept_in_requested_and_applied_provenance():
+    effective = (
+        ("robust_event_reject_max_iters", 7),
+        ("robust_event_reject_residual_z_thresh", 4.25),
+        ("robust_event_reject_local_var_window_sec", 20.0),
+        ("robust_event_reject_min_keep_fraction", 0.65),
+    )
+    spec = PerRoiCorrectionSpec(
+        "Region0",
+        "dynamic_fit",
+        "robust_global_event_reject",
+        "robust_global_event_reject",
+        effective_parameters=effective,
+    )
+    pipeline = Pipeline(
+        Config(), mode="phasic", per_roi_correction={"Region0": spec}
+    )
+
+    requested = pipeline._build_requested_correction_provenance(["Region0"])
+    assert requested["requested_by_roi"][0]["effective_parameters"] == dict(
+        effective
+    )
+
+    pipeline._requested_correction_provenance = requested
+    pipeline._record_applied_correction_records(
+        {
+            "Region0": {
+                "strategy_family": "dynamic_fit",
+                "applied_strategy": "robust_global_event_reject",
+                "applied_correction_source": "dynamic_fit",
+                "dynamic_fit_mode": "robust_global_event_reject",
+                "effective_parameters": dict(effective),
+            }
+        }
+    )
+    summary = pipeline._build_applied_correction_summary()
+    assert summary["by_roi"][0]["effective_parameters"] == dict(effective)
+
+
 @pytest.fixture
 def native_run(tmp_path):
     source = tmp_path / "input" / "2024_01_01-00_00_00" / "fluorescence.csv"

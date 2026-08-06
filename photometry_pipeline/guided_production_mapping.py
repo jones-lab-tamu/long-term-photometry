@@ -54,6 +54,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     GUIDED_SUPPORTED_TONIC_OUTPUT_MODES,
     GUIDED_SUPPORTED_TONIC_TIMELINE_MODES,
+    resolve_guided_effective_correction_parameters,
 )
 from photometry_pipeline.guided_timeline import (
     GUIDED_TIMELINE_CLOCK_SOURCE_SET,
@@ -455,6 +456,7 @@ class GuidedProductionPerRoiStrategy:
     evidence_reference_json: str
     explicit_user_mark: bool
     current_or_stale: str
+    effective_parameters: tuple[GuidedProductionTypedValue, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1488,6 +1490,7 @@ def map_guided_validation_request_to_execution_intent(
                         evidence_reference_json=entry.evidence_reference_json,
                         explicit_user_mark=entry.explicit_user_mark,
                         current_or_stale=entry.current_or_stale,
+                        effective_parameters=_typed(entry.effective_parameters),
                     )
                     for entry in correction.per_roi_production_strategy_map
                 ),
@@ -2250,6 +2253,7 @@ def _map_verified_guided_npm_request_to_execution_intent(
                 evidence_reference_json=entry.evidence_reference_json,
                 explicit_user_mark=entry.explicit_user_mark,
                 current_or_stale=entry.current_or_stale,
+                effective_parameters=_typed(entry.effective_parameters),
             )
         )
     if _unknown_typed(
@@ -2633,12 +2637,13 @@ def guided_production_per_roi_strategy_to_correction_spec(
       dynamic_fit_mode is one of RESOLVED_DYNAMIC_FIT_MODES and that
       selected_strategy == dynamic_fit_mode, which is this adapter's actual
       fit-mode-mapping fail-closed check.
-    - parameter_identity: left as "" (not mapped). GuidedProductionPerRoiStrategy
-      carries no per-ROI parameter data -- dynamic-fit tunable parameters are
-      a separate, run-wide field (GuidedProductionCorrection.dynamic_fit_parameter_values),
-      not yet per-ROI in the authoritative production representation. Mapping
-      a per-ROI field to a run-wide value would misrepresent it as ROI-specific;
-      left unmapped rather than guessed.
+    - effective_parameters: the complete, strategy-specific Guided editable
+      values, converted back to the immutable name/value tuple consumed by
+      Pipeline. They are validated here so malformed production payloads fail
+      closed before dispatch.
+    - parameter_identity: left as "" (not mapped); the existing opaque field
+      remains for compatibility and is not turned into a new parameter
+      identity subsystem.
     - evidence_identity: evidence_source_type and evidence_reference_json
       combined ("{source_type}::{reference_json}"), since either alone could
       collide across genuinely different evidence (e.g. the same JSON payload
@@ -2667,6 +2672,19 @@ def guided_production_per_roi_strategy_to_correction_spec(
             f"ROI {entry.roi_id!r} has unsupported strategy_family: {entry.strategy_family!r}"
         )
     evidence_identity = f"{entry.evidence_source_type}::{entry.evidence_reference_json}"
+    effective_parameters = tuple(
+        (item.field_name, item.value) for item in entry.effective_parameters
+    )
+    if entry.strategy_family == "dynamic_fit":
+        effective_parameters = resolve_guided_effective_correction_parameters(
+            entry.selected_strategy,
+            None,
+            effective_parameters,
+        )
+    elif effective_parameters:
+        raise ValueError(
+            f"ROI {entry.roi_id!r} has per-ROI parameters for a non-dynamic strategy"
+        )
     return PerRoiCorrectionSpec(
         roi_id=entry.roi_id,
         strategy_family=entry.strategy_family,
@@ -2674,6 +2692,7 @@ def guided_production_per_roi_strategy_to_correction_spec(
         dynamic_fit_mode=entry.dynamic_fit_mode,
         parameter_identity="",
         evidence_identity=evidence_identity,
+        effective_parameters=effective_parameters,
     )
 
 

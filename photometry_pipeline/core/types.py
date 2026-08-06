@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 import numpy as np
 
 # Resolved (post-alias) dynamic-fit modes Pipeline can dispatch a ROI to.
@@ -131,6 +131,7 @@ class PerRoiCorrectionSpec:
     dynamic_fit_mode: Optional[str] = None
     parameter_identity: str = ""
     evidence_identity: str = ""
+    effective_parameters: tuple[tuple[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.roi_id, str) or not self.roi_id:
@@ -155,3 +156,13 @@ class PerRoiCorrectionSpec:
                 raise ValueError(
                     "signal_only_f0 entries must have dynamic_fit_mode=None"
                 )
+        if not isinstance(self.effective_parameters, tuple):
+            raise ValueError("effective_parameters must be a tuple of name/value pairs")
+        for item in self.effective_parameters:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0]
+            ):
+                raise ValueError("effective_parameters must contain named pairs")

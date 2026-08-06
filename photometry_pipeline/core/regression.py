@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import replace
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from ..config import Config
@@ -2644,18 +2645,33 @@ def _resolve_full_channel_names(chunk: Chunk) -> List[str]:
 def _partition_rois_by_dynamic_fit_mode(
     channel_names: List[str],
     strategy_map: Dict[str, PerRoiCorrectionSpec],
-) -> Dict[str, List[int]]:
-    """Group ROI column indices by resolved dynamic_fit_mode, preserving
+) -> Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], List[int]]:
+    """Group ROI column indices by mode and effective settings, preserving
     each group's original relative column order. ROIs whose strategy_family
     is not "dynamic_fit" (e.g. signal_only_f0) are excluded -- callers must
     handle those separately."""
-    groups: Dict[str, List[int]] = {}
+    groups: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], List[int]] = {}
     for r_idx, roi in enumerate(channel_names):
         spec = strategy_map[str(roi)]
         if spec.strategy_family != "dynamic_fit":
             continue
-        groups.setdefault(spec.dynamic_fit_mode, []).append(r_idx)
+        group_key = (
+            str(spec.dynamic_fit_mode),
+            tuple(spec.effective_parameters),
+        )
+        groups.setdefault(group_key, []).append(r_idx)
     return groups
+
+
+def _dynamic_fit_group_metadata_key(
+    group_key: Tuple[str, Tuple[Tuple[str, Any], ...]],
+    mode_group_counts: Dict[str, int],
+) -> str:
+    """Keep legacy mode keys unless one mode has multiple parameter groups."""
+    resolved_mode, effective_parameters = group_key
+    if mode_group_counts.get(resolved_mode, 0) <= 1:
+        return resolved_mode
+    return f"{resolved_mode}|effective_parameters={effective_parameters!r}"
 
 
 def _build_roi_group_subchunk(
@@ -2701,6 +2717,8 @@ def _merge_group_metadata_into_chunk(
     roi_indices: List[int],
     resolved_mode: str,
     full_channel_names: List[str],
+    metadata_key: str | None = None,
+    effective_parameters: Tuple[Tuple[str, Any], ...] = (),
 ) -> None:
     """Fold one dispatch group's sub-chunk metadata back into the parent.
 
@@ -2724,26 +2742,35 @@ def _merge_group_metadata_into_chunk(
     for warning in sub_meta.get("qc_warnings", []) or []:
         chunk.metadata.setdefault("qc_warnings", []).append(warning)
 
+    metadata_key = metadata_key or resolved_mode
     engine_by_mode = chunk.metadata.setdefault("dynamic_fit_engine_by_mode", {})
-    engine_by_mode[resolved_mode] = {
+    engine_by_mode[metadata_key] = {
         "engine": sub_meta.get("dynamic_fit_engine"),
         "engine_info": sub_meta.get("dynamic_fit_engine_info"),
     }
 
     timing = sub_meta.get("dynamic_regression_timing")
     if timing is not None:
-        chunk.metadata.setdefault("dynamic_regression_timing_by_mode", {})[resolved_mode] = timing
+        chunk.metadata.setdefault("dynamic_regression_timing_by_mode", {})[metadata_key] = timing
 
     # Rolling-mode-only fallback signal. Namespaced per mode rather than
     # OR'd into one flat bool: a flat True on a mixed chunk cannot say which
     # ROI(s)/mode triggered it, which is exactly the kind of chunk-wide
     # value that misrepresents a single group's state (correction item 3).
     window_fallback = bool(sub_meta.get("window_fallback_global", False))
-    chunk.metadata.setdefault("window_fallback_global_by_mode", {})[resolved_mode] = window_fallback
+    chunk.metadata.setdefault("window_fallback_global_by_mode", {})[metadata_key] = window_fallback
+
+    effective_by_roi = chunk.metadata.setdefault(
+        "dynamic_fit_effective_parameters_by_roi", {}
+    )
+    group_key_by_roi = chunk.metadata.setdefault("dynamic_fit_group_key_by_roi", {})
 
     mode_resolved_by_roi = chunk.metadata.setdefault("dynamic_fit_mode_resolved_by_roi", {})
     for r_idx in roi_indices:
-        mode_resolved_by_roi[full_channel_names[r_idx]] = resolved_mode
+        roi_name = full_channel_names[r_idx]
+        mode_resolved_by_roi[roi_name] = resolved_mode
+        effective_by_roi[roi_name] = dict(effective_parameters)
+        group_key_by_roi[roi_name] = metadata_key
 
 
 def _dispatch_one_dynamic_fit_group(
@@ -2873,9 +2900,18 @@ def fit_chunk_dynamic(
     n_samples = int(chunk.uv_raw.shape[0])
     try:
         groups = _partition_rois_by_dynamic_fit_mode(channel_names, strategy_map)
+        mode_group_counts: Dict[str, int] = {}
+        for resolved_mode, _effective_parameters in groups:
+            mode_group_counts[resolved_mode] = mode_group_counts.get(resolved_mode, 0) + 1
         uv_fit = np.full_like(chunk.uv_raw, np.nan, dtype=float)
-        for resolved_mode, roi_indices in groups.items():
+        for (resolved_mode, effective_parameters), roi_indices in groups.items():
+            metadata_key = _dynamic_fit_group_metadata_key(
+                (resolved_mode, effective_parameters), mode_group_counts
+            )
             sub_chunk = _build_roi_group_subchunk(chunk, roi_indices, channel_names)
+            group_config = config
+            if effective_parameters:
+                group_config = replace(config, **dict(effective_parameters))
             # A per-mode function is contractually expected to return a
             # (possibly per-ROI-NaN) full array for its own group or raise;
             # it never returns None on a normal path (see
@@ -2890,7 +2926,9 @@ def fit_chunk_dynamic(
             # future dispatch target, or a mocked/monkeypatched one in a
             # test) fails loudly here, before it can corrupt another group's
             # columns via a mismatched scatter-back index.
-            sub_uv_fit = _dispatch_one_dynamic_fit_group(sub_chunk, config, mode, resolved_mode)
+            sub_uv_fit = _dispatch_one_dynamic_fit_group(
+                sub_chunk, group_config, mode, resolved_mode
+            )
             sub_uv_fit = _validate_group_dispatch_result(
                 sub_uv_fit,
                 resolved_mode=resolved_mode,
@@ -2899,7 +2937,15 @@ def fit_chunk_dynamic(
             )
             for local_i, r_idx in enumerate(roi_indices):
                 uv_fit[:, r_idx] = sub_uv_fit[:, local_i]
-            _merge_group_metadata_into_chunk(chunk, sub_chunk, roi_indices, resolved_mode, channel_names)
+            _merge_group_metadata_into_chunk(
+                chunk,
+                sub_chunk,
+                roi_indices,
+                resolved_mode,
+                channel_names,
+                metadata_key=metadata_key,
+                effective_parameters=effective_parameters,
+            )
     finally:
         chunk.sig_raw = orig_sig_raw
         chunk.uv_raw = orig_uv_raw
@@ -2926,16 +2972,16 @@ def fit_chunk_dynamic(
     # must never need a .get(..., {}) fallback to distinguish "no per-ROI
     # mode data was ever produced" from "the key was never written".
     chunk.metadata.setdefault("dynamic_fit_mode_resolved_by_roi", {})
-    resolved_modes_used = sorted(set(groups.keys()))
+    resolved_modes_used = sorted({group_key[0] for group_key in groups})
     if len(resolved_modes_used) == 0:
         mode_sentinel = "none"
     elif len(resolved_modes_used) == 1:
         mode_sentinel = resolved_modes_used[0]
     else:
         mode_sentinel = "mixed"
-    single_mode = resolved_modes_used[0] if len(resolved_modes_used) == 1 else None
+    single_mode = next(iter(groups))[0] if len(groups) == 1 else None
 
-    chunk.metadata["dynamic_fit_group_count"] = len(resolved_modes_used)
+    chunk.metadata["dynamic_fit_group_count"] = len(groups)
     chunk.metadata["dynamic_fit_mode_requested"] = (
         ("rolling_local_regression" if fit_mode_requested is None else str(fit_mode_requested))
         if per_roi_correction is None
@@ -2991,8 +3037,12 @@ def fit_chunk_dynamic(
     # than silently mirroring whichever mode was merged last. Any reader
     # needing per-mode engine info reads dynamic_fit_engine_by_mode.
     engine_by_mode = chunk.metadata.get("dynamic_fit_engine_by_mode", {})
-    for resolved_mode in resolved_modes_used:
-        entry = engine_by_mode.get(resolved_mode, {})
+    for group_key in groups:
+        resolved_mode, _effective_parameters = group_key
+        metadata_key = _dynamic_fit_group_metadata_key(
+            group_key, mode_group_counts
+        )
+        entry = engine_by_mode.get(metadata_key, {})
         engine_info = entry.get("engine_info")
         if isinstance(engine_info, dict):
             engine_info["bleach_correction_mode"] = bleach_mode_resolved
@@ -3001,7 +3051,9 @@ def fit_chunk_dynamic(
                 bleach_info.get("target", "signal_and_isosbestic_independent")
             )
     if single_mode is not None:
-        entry = engine_by_mode.get(single_mode, {})
+        only_group = next(iter(groups))
+        only_key = _dynamic_fit_group_metadata_key(only_group, mode_group_counts)
+        entry = engine_by_mode.get(only_key, {})
         chunk.metadata["dynamic_fit_engine"] = entry.get("engine")
         chunk.metadata["dynamic_fit_engine_info"] = entry.get("engine_info")
     else:

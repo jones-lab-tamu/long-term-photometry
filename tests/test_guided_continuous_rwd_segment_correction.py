@@ -447,6 +447,56 @@ def test_robust_and_adaptive_match_native_per_chunk_reference(accepted_case, str
         assert "coef_slope" in detail
 
 
+def test_continuous_dynamic_roi_applies_its_effective_parameters_to_filter_and_fit(
+    accepted_case, monkeypatch
+):
+    artifacts = _artifacts(_variant(accepted_case, "robust_global_event_reject"))
+    binding, grid, draft, contract, plan, f0, raw = artifacts
+    accepted = c4a._resolve_accepted_correction_context(binding, draft, contract)
+    spec = replace(
+        accepted.correction_specs["ROI1"],
+        effective_parameters=(
+            ("robust_event_reject_max_iters", 6),
+            ("robust_event_reject_residual_z_thresh", 4.0),
+            ("robust_event_reject_local_var_window_sec", 25.0),
+            ("robust_event_reject_min_keep_fraction", 0.7),
+        ),
+    )
+    config, _settings_identity = subject._resolve_segment_correction_settings(contract)
+    captured = {"filter_configs": []}
+
+    def passthrough_filter(values, _fs_hz, cfg):
+        captured["filter_configs"].append(cfg)
+        return np.asarray(values, dtype=float).copy(), {}
+
+    def fake_fit(chunk, cfg, **_kwargs):
+        captured["fit_config"] = cfg
+        chunk.metadata["dynamic_fit_event_reject"] = {"ROI1": {}}
+        return chunk.uv_raw.copy(), chunk.sig_raw - chunk.uv_raw
+
+    monkeypatch.setattr(
+        subject.preprocessing, "lowpass_filter_with_meta", passthrough_filter
+    )
+    monkeypatch.setattr(subject.regression, "fit_chunk_dynamic", fake_fit)
+
+    subject._correct_dynamic_roi(
+        raw,
+        0,
+        spec,
+        config,
+        float(f0.values[0].scalar_f0),
+        10.0,
+    )
+
+    assert [cfg.robust_event_reject_local_var_window_sec for cfg in captured["filter_configs"]] == [
+        25.0,
+        25.0,
+    ]
+    assert captured["fit_config"].robust_event_reject_max_iters == 6
+    assert captured["fit_config"].robust_event_reject_residual_z_thresh == 4.0
+    assert captured["fit_config"].robust_event_reject_min_keep_fraction == 0.7
+
+
 def test_event_contaminated_robust_segment_uses_native_accepted_path(accepted_case):
     artifacts = _artifacts(_variant(accepted_case, "robust_global_event_reject"))
     raw = artifacts[6]

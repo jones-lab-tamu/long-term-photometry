@@ -2129,6 +2129,10 @@ def _build_strategy(payload: Mapping[str, Any]) -> GuidedProductionPerRoiStrateg
         evidence_reference_json=_required_text(payload, "evidence_reference_json"),
         explicit_user_mark=_required(payload, "explicit_user_mark"),
         current_or_stale=_required_text(payload, "current_or_stale"),
+        effective_parameters=tuple(
+            _build_typed_value(item)
+            for item in payload.get("effective_parameters", ())
+        ),
     )
 
 

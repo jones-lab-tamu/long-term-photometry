@@ -30,7 +30,7 @@ from photometry_pipeline.guided_identity import (
 from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
 
 GUIDED_PLAN_IDENTITY_SCHEMA_NAME = "guided_new_analysis_draft_plan_identity"
-GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v4"
+GUIDED_PLAN_IDENTITY_SCHEMA_VERSION = "v5"
 
 
 def _canonical_path_or_raw(path: str | None) -> dict[str, Any]:
@@ -56,6 +56,10 @@ def _correction_choice_payload(choice) -> dict[str, Any]:
         "current_or_stale": str(choice.current_or_stale or ""),
         "explicit_user_mark": bool(choice.explicit_user_mark),
         "evidence_reference": dict(choice.evidence_reference or {}),
+        "effective_parameters": [
+            [str(name), value]
+            for name, value in tuple(choice.effective_parameters or ())
+        ],
     }
 
 

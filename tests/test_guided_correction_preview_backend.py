@@ -503,6 +503,31 @@ def test_preview_backend_success_from_completed_run_writes_only_preview_artifact
     assert not (phasic_out / "features").exists()
 
 
+def test_preview_backend_uses_and_records_complete_per_roi_effective_values(tmp_path):
+    run_dir = _make_completed_run(tmp_path)
+    effective = {
+        "robust_event_reject_max_iters": 5,
+        "robust_event_reject_residual_z_thresh": 4.0,
+        "robust_event_reject_local_var_window_sec": 20.0,
+        "robust_event_reject_min_keep_fraction": 0.6,
+    }
+
+    result = run_guided_correction_preview_comparison(
+        run_dir,
+        roi="CH1",
+        methods=["robust_global_event_reject"],
+        config_overrides=effective,
+        preview_id=PREVIEW_ID,
+        overwrite=True,
+    )
+
+    assert result["ok"] is True
+    provenance = _load_json(
+        Path(result["preview_output_dir"]) / PREVIEW_PROVENANCE_FILENAME
+    )
+    assert provenance["effective_correction_parameters"] == effective
+
+
 def test_preview_backend_success_from_phasic_cache_source_requires_external_output(tmp_path):
     run_dir = _make_completed_run(tmp_path)
     phasic_out = run_dir / "_analysis" / "phasic_out"

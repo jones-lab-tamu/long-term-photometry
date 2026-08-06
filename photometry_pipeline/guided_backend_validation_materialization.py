@@ -1802,6 +1802,15 @@ def _materialize_correction_facts(
                 ),
                 explicit_user_mark=entry.explicit_user_mark,
                 current_or_stale=entry.current_or_stale,
+                effective_parameters=tuple(
+                    GuidedBackendTypedFieldValue(
+                        field_name=name,
+                        value_type=type(value).__name__,
+                        value=value,
+                        source_classification="applied_dynamic_fit_per_roi",
+                    )
+                    for name, value in entry.effective_parameters
+                ),
             )
             for entry in strategy_map.entries
         ),

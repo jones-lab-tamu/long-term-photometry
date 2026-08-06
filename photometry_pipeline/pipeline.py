@@ -2125,6 +2125,9 @@ class Pipeline:
                      ),
                      "parameter_identity": str(spec.parameter_identity),
                      "evidence_identity": str(spec.evidence_identity),
+                     "effective_parameters": {
+                         name: value for name, value in spec.effective_parameters
+                     },
                      "execution_status": "consumed",
                  }
                  if spec.strategy_family == "signal_only_f0":
@@ -2286,6 +2289,9 @@ class Pipeline:
                 ),
                 "parameter_identity": str(spec.parameter_identity),
                 "evidence_identity": str(spec.evidence_identity),
+                "effective_parameters": {
+                    name: value for name, value in spec.effective_parameters
+                },
             }
             records.append(record)
 
@@ -2323,6 +2329,9 @@ class Pipeline:
                     str(record["dynamic_fit_mode"])
                     if record.get("dynamic_fit_mode") is not None
                     else None
+                ),
+                "effective_parameters": dict(
+                    record.get("effective_parameters") or {}
                 ),
             }
             previous = self._applied_correction_records_by_roi.get(roi)

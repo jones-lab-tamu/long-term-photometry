@@ -1472,6 +1472,10 @@ def _strategy(payload: Mapping[str, Any]) -> GuidedProductionPerRoiStrategy:
         evidence_reference_json=_required(payload, "evidence_reference_json"),
         explicit_user_mark=_required(payload, "explicit_user_mark"),
         current_or_stale=_required(payload, "current_or_stale"),
+        effective_parameters=tuple(
+            _typed_value(item)
+            for item in payload.get("effective_parameters", ())
+        ),
     )
 
 

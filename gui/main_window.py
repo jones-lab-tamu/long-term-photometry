@@ -3163,6 +3163,148 @@ class _GuidedRoiFeatureEventDialog(QDialog):
         return self._result_values
 
 
+class _GuidedRoiCorrectionParameterDialog(QDialog):
+    """Customize the approved correction fields for one ROI only."""
+
+    _FIELD_LABELS = {
+        "robust_event_reject_max_iters": "Maximum iterations:",
+        "robust_event_reject_residual_z_thresh": "Residual z threshold:",
+        "robust_event_reject_local_var_window_sec": "Local variance window (sec):",
+        "robust_event_reject_min_keep_fraction": "Minimum keep fraction:",
+        "adaptive_event_gate_residual_z_thresh": "Residual z threshold:",
+        "adaptive_event_gate_local_var_window_sec": "Local variance window (sec):",
+        "adaptive_event_gate_smooth_window_sec": "Smoothing window (sec):",
+        "adaptive_event_gate_min_trust_fraction": "Minimum trust fraction:",
+    }
+
+    def __init__(
+        self,
+        roi_id: str,
+        strategy: str,
+        seed_values: dict | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDynamicFitParameterContract,
+            guided_per_roi_editable_correction_fields,
+            resolve_guided_effective_correction_parameters,
+        )
+
+        self._roi_id = str(roi_id)
+        self._strategy = str(strategy)
+        self._resolve = resolve_guided_effective_correction_parameters
+        self._contract = GuidedNewAnalysisDynamicFitParameterContract()
+        self._fields = tuple(guided_per_roi_editable_correction_fields(self._strategy))
+        if not self._fields:
+            raise ValueError(
+                f"Guided correction parameter customization is unsupported for {strategy!r}."
+            )
+        self._defaults = dict(
+            self._resolve(self._strategy, self._contract, ())
+        )
+        supplied = dict(seed_values or {})
+        self._seed_values = dict(self._defaults)
+        self._seed_values.update(
+            {name: supplied[name] for name in self._fields if name in supplied}
+        )
+        self._result_values: dict | None = None
+        self._controls: dict[str, QSpinBox | QDoubleSpinBox] = {}
+        self.setWindowTitle(f"Customize correction parameters for {self._roi_id}")
+
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            f"These correction parameters apply to {self._roi_id} only. "
+            "Other ROIs keep their own selections and values."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("guidedRoiCorrectionParameterDialogNote")
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+        for field_name in self._fields:
+            if field_name == "robust_event_reject_max_iters":
+                control = QSpinBox()
+                control.setRange(1, 1000)
+                control.setValue(int(self._seed_values[field_name]))
+            else:
+                control = QDoubleSpinBox()
+                control.setRange(0.000001, 1_000_000.0)
+                if field_name.endswith("min_keep_fraction") or field_name.endswith(
+                    "min_trust_fraction"
+                ):
+                    control.setRange(0.000001, 1.0)
+                    control.setDecimals(4)
+                    control.setSingleStep(0.05)
+                elif field_name.endswith("local_var_window_sec"):
+                    control.setDecimals(4)
+                    control.setSingleStep(0.5)
+                elif field_name.endswith("smooth_window_sec"):
+                    control.setDecimals(4)
+                    control.setSingleStep(1.0)
+                else:
+                    control.setDecimals(4)
+                    control.setSingleStep(0.1)
+                control.setValue(float(self._seed_values[field_name]))
+            control.setObjectName(f"guidedCorrectionParameter_{field_name}")
+            self._controls[field_name] = control
+            form.addRow(self._FIELD_LABELS[field_name], control)
+        layout.addLayout(form)
+
+        self._error_label = QLabel("")
+        self._error_label.setObjectName("guidedRoiCorrectionParameterDialogError")
+        self._error_label.setWordWrap(True)
+        self._error_label.setVisible(False)
+        layout.addWidget(self._error_label)
+
+        button_row = QHBoxLayout()
+        reset_btn = QPushButton("Reset to defaults")
+        reset_btn.setObjectName("guidedRoiCorrectionParameterDialogResetButton")
+        reset_btn.clicked.connect(self._on_reset)
+        button_row.addWidget(reset_btn)
+        apply_btn = QPushButton(f"Apply to {self._roi_id}")
+        apply_btn.setObjectName("guidedRoiCorrectionParameterDialogApplyButton")
+        apply_btn.clicked.connect(self._on_apply)
+        button_row.addWidget(apply_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("guidedRoiCorrectionParameterDialogCancelButton")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def _on_reset(self) -> None:
+        for field_name, control in self._controls.items():
+            value = self._defaults[field_name]
+            if isinstance(control, QSpinBox):
+                control.setValue(int(value))
+            else:
+                control.setValue(float(value))
+        self._error_label.clear()
+        self._error_label.setVisible(False)
+
+    def _on_apply(self) -> None:
+        values = {
+            field_name: (
+                int(control.value())
+                if isinstance(control, QSpinBox)
+                else float(control.value())
+            )
+            for field_name, control in self._controls.items()
+        }
+        try:
+            resolved = self._resolve(self._strategy, self._contract, values)
+        except (TypeError, ValueError) as exc:
+            self._error_label.setText(str(exc))
+            self._error_label.setVisible(True)
+            return
+        self._result_values = dict(resolved)
+        self.accept()
+
+    def result_values(self) -> dict | None:
+        return self._result_values
+
+
 _ClickableImageLabel = InteractiveImageLabel
 
 
@@ -3668,6 +3810,10 @@ class MainWindow(QMainWindow):
         self._guided_roi_discovery_gui_thread_id = threading.get_ident()
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
+        # {(source_key, roi): {"strategy": str, "values": complete dict}}
+        # Values are draft-scoped and only enter the accepted plan when that
+        # ROI's strategy is explicitly confirmed.
+        self._guided_correction_parameters_by_choice = {}
         self._guided_local_preview_evidence_by_roi = {}
         self._guided_local_preview_row_strategy_by_roi = {}
         # Temporary in-memory Guided draft plan state until durable plan
@@ -10996,6 +11142,14 @@ class MainWindow(QMainWindow):
                     config_overrides["chunk_duration_sec"] = float(
                         duration_text
                     )
+                config_overrides.update(
+                    self._guided_correction_parameter_overrides_for_preview(
+                        source_type,
+                        source_id,
+                        roi,
+                        methods,
+                    )
+                )
                 preview_args = (
                     str(segment["source_path"]),
                     os.path.join(preview_root, preview_id),
@@ -11054,6 +11208,14 @@ class MainWindow(QMainWindow):
                     "source_type": source_type,
                     "overwrite": False,
                 }
+                kwargs["config_overrides"] = (
+                    self._guided_correction_parameter_overrides_for_preview(
+                        source_type,
+                        source_id,
+                        roi,
+                        methods,
+                    )
+                )
                 if source_type == "diagnostic_cache":
                     preview_id = f"diagnostic_cache_preview_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
                     kwargs["preview_id"] = preview_id
@@ -12127,6 +12289,180 @@ class MainWindow(QMainWindow):
                 return label
         return str(strategy or "")
 
+    def _guided_correction_parameter_values_for_choice(
+        self,
+        choice_key: object,
+        strategy: str,
+    ) -> dict[str, object]:
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDynamicFitParameterContract,
+            guided_effective_correction_parameters_dict,
+            resolve_guided_effective_correction_parameters,
+        )
+
+        contract = GuidedNewAnalysisDynamicFitParameterContract()
+        state = getattr(
+            self, "_guided_correction_parameters_by_choice", {}
+        ).get(choice_key)
+        supplied = (
+            state.get("values", {})
+            if isinstance(state, dict) and state.get("strategy") == strategy
+            else {}
+        )
+        resolved = resolve_guided_effective_correction_parameters(
+            strategy, contract, supplied
+        )
+        return guided_effective_correction_parameters_dict(resolved)
+
+    def _guided_correction_choice_key_for_target(
+        self,
+        source_type: str,
+        source_id: object,
+        roi: str,
+    ):
+        if source_type == "diagnostic_cache":
+            source = (
+                getattr(self, "_guided_confirm_source", None)
+                if getattr(self, "_guided_confirm_source_type", "")
+                == "diagnostic_cache"
+                else source_id
+            )
+            return self._guided_confirm_choice_key(source_type, source, roi)
+        if source_type in {
+            "local_raw_segment",
+            LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+        }:
+            return self._guided_confirm_choice_key(
+                LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
+            )
+        return self._guided_confirm_choice_key(source_type, source_id, roi)
+
+    def _guided_correction_parameter_overrides_for_preview(
+        self,
+        source_type: str,
+        source_id: object,
+        roi: str,
+        methods: object,
+    ) -> dict[str, object]:
+        from photometry_pipeline.guided_new_analysis_plan import (
+            guided_per_roi_editable_correction_fields,
+        )
+
+        choice_key = self._guided_correction_choice_key_for_target(
+            source_type, source_id, roi
+        )
+        overrides: dict[str, object] = {}
+        for strategy in tuple(methods or ()):
+            strategy = str(strategy)
+            if not guided_per_roi_editable_correction_fields(strategy):
+                continue
+            values = self._guided_correction_parameter_values_for_choice(
+                choice_key, strategy
+            )
+            overrides.update(values)
+        return overrides
+
+    def _on_guided_customize_correction_parameters(
+        self,
+        roi: str | None = None,
+        strategy: str | None = None,
+        *,
+        source_type: str | None = None,
+        source_id: object = None,
+    ) -> None:
+        roi = str(roi or self._selected_guided_confirm_roi()).strip()
+        strategy = str(strategy or self._selected_guided_confirm_strategy()).strip()
+        source_type = str(
+            source_type or getattr(self, "_guided_confirm_source_type", "") or ""
+        )
+        if not roi:
+            return
+        from photometry_pipeline.guided_new_analysis_plan import (
+            guided_per_roi_editable_correction_fields,
+            resolve_guided_effective_correction_parameters,
+        )
+
+        if not guided_per_roi_editable_correction_fields(strategy):
+            return
+        if source_id is None:
+            source_id = (
+                getattr(self, "_guided_confirm_source", None)
+                if source_type == "diagnostic_cache"
+                else self._current_guided_completed_run_dir()
+            )
+        choice_key = self._guided_correction_choice_key_for_target(
+            source_type, source_id, roi
+        )
+        seed = self._guided_correction_parameter_values_for_choice(
+            choice_key, strategy
+        )
+        dialog = _GuidedRoiCorrectionParameterDialog(
+            roi,
+            strategy,
+            seed_values=seed,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        values = dialog.result_values()
+        if not isinstance(values, dict):
+            return
+        values = dict(
+            resolve_guided_effective_correction_parameters(strategy, None, values)
+        )
+        defaults = dict(
+            resolve_guided_effective_correction_parameters(strategy, None, ())
+        )
+        parameter_state = getattr(
+            self, "_guided_correction_parameters_by_choice", {}
+        )
+        previous_state = parameter_state.get(choice_key)
+        previous_values = defaults
+        if (
+            isinstance(previous_state, dict)
+            and previous_state.get("strategy") == strategy
+        ):
+            try:
+                previous_values = dict(
+                    resolve_guided_effective_correction_parameters(
+                        strategy, None, previous_state.get("values", {})
+                    )
+                )
+            except (TypeError, ValueError):
+                previous_values = {}
+        is_customized = values != defaults
+        parameter_changed = (
+            previous_values != values
+            and (is_customized or previous_values != defaults)
+        )
+        if is_customized:
+            parameter_state[choice_key] = {
+                "strategy": strategy,
+                "values": values,
+            }
+        else:
+            parameter_state.pop(choice_key, None)
+        choice = getattr(self, "_guided_strategy_choices", {}).get(choice_key)
+        if isinstance(choice, dict):
+            updated = dict(choice)
+            updated["effective_parameters"] = values
+            if choice.get("confirmed") is True and parameter_changed:
+                updated["current"] = False
+                updated["stale"] = True
+                updated["stale_reason"] = (
+                    "Correction parameters changed; confirm the strategy again."
+                )
+            self._guided_strategy_choices[choice_key] = updated
+        if parameter_changed:
+            self._guided_preview_mark_stale(
+                "Correction parameters changed; regenerate the preview for this ROI."
+            )
+            self._invalidate_guided_backend_validation(
+                "per-ROI correction parameters changed"
+            )
+        self._refresh_guided_correction_continue_state()
+        self._refresh_guided_confirm_strategy_panel()
+
     @staticmethod
     def _guided_tonic_output_mode_label(value: str) -> str:
         for label, enum_value in GUIDED_TONIC_OUTPUT_MODE_CHOICES:
@@ -12490,11 +12826,19 @@ class MainWindow(QMainWindow):
         ):
             roi = self._selected_guided_confirm_roi()
             strategy = self._selected_guided_confirm_strategy()
-            entry = getattr(self, "_guided_strategy_choices", {}).get(
-                self._guided_confirm_choice_key(
-                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
-                )
+            choice_key = self._guided_confirm_choice_key(
+                LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
             )
+            entry = getattr(self, "_guided_strategy_choices", {}).get(choice_key)
+            parameter_state = getattr(
+                self, "_guided_correction_parameters_by_choice", {}
+            )
+            previous_parameter_state = parameter_state.get(choice_key)
+            if (
+                isinstance(previous_parameter_state, dict)
+                and previous_parameter_state.get("strategy") != strategy
+            ):
+                parameter_state.pop(choice_key, None)
             if (
                 isinstance(entry, dict)
                 and strategy
@@ -12504,6 +12848,30 @@ class MainWindow(QMainWindow):
                     "Selected strategy changed; confirm the new strategy.",
                     roi=roi,
                 )
+        else:
+            roi = self._selected_guided_confirm_roi()
+            strategy = self._selected_guided_confirm_strategy()
+            source_type = str(
+                getattr(self, "_guided_confirm_source_type", "") or ""
+            )
+            source_obj = getattr(self, "_guided_confirm_source", None)
+            source_id = (
+                source_obj
+                if source_type == "diagnostic_cache"
+                else self._current_guided_completed_run_dir()
+            )
+            choice_key = self._guided_correction_choice_key_for_target(
+                source_type, source_id, roi
+            )
+            parameter_state = getattr(
+                self, "_guided_correction_parameters_by_choice", {}
+            )
+            previous_parameter_state = parameter_state.get(choice_key)
+            if (
+                isinstance(previous_parameter_state, dict)
+                and previous_parameter_state.get("strategy") != strategy
+            ):
+                parameter_state.pop(choice_key, None)
         self._refresh_guided_confirm_strategy_panel()
 
     def _current_guided_completed_run_dir(self) -> str:
@@ -12951,6 +13319,15 @@ class MainWindow(QMainWindow):
         choice_key = self._guided_confirm_choice_key(
             LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, str(roi)
         )
+        parameter_state = getattr(
+            self, "_guided_correction_parameters_by_choice", {}
+        )
+        previous_parameter_state = parameter_state.get(choice_key)
+        if (
+            isinstance(previous_parameter_state, dict)
+            and previous_parameter_state.get("strategy") != strategy
+        ):
+            parameter_state.pop(choice_key, None)
         choice = self._guided_strategy_choices.get(choice_key)
         if (
             isinstance(choice, dict)
@@ -13036,6 +13413,9 @@ class MainWindow(QMainWindow):
             "choice_source": "explicit_user_mark",
             "no_auto_selection": True,
             "marked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "effective_parameters": self._guided_correction_parameter_values_for_choice(
+                source_key, strategy
+            ),
         }
         self._invalidate_guided_backend_validation("strategy mark changed")
         self._refresh_guided_correction_continue_state()
@@ -13263,7 +13643,14 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
         self._guided_local_preview_confirmation_rows = {}
         for column, heading in enumerate(
-            ("ROI", "Evidence reviewed", "Strategy", "Status", "Action")
+            (
+                "ROI",
+                "Evidence reviewed",
+                "Strategy",
+                "Status",
+                "Parameters",
+                "Action",
+            )
         ):
             label = QLabel(heading)
             label.setProperty("guidedTableHeader", True)
@@ -13363,6 +13750,19 @@ class MainWindow(QMainWindow):
                 if evidence is not None
                 else "Preview first"
             )
+            parameter_button = QPushButton("Customize")
+            parameter_button.setObjectName(
+                f"guidedCorrectionCustomizeParameters_{roi}"
+            )
+            parameter_button.setEnabled(
+                bool(
+                    combo.currentData()
+                    in {
+                        "robust_global_event_reject",
+                        "adaptive_event_gated_regression",
+                    }
+                )
+            )
             action = QPushButton(
                 "Confirmed"
                 if confirmed
@@ -13383,6 +13783,25 @@ class MainWindow(QMainWindow):
                 lambda _index, r=roi, c=combo, b=action:
                 self._on_guided_local_preview_row_strategy_changed(r, c, b)
             )
+            combo.currentIndexChanged.connect(
+                lambda _index, r=roi, c=combo, b=parameter_button:
+                b.setEnabled(
+                    str(c.currentData() or "")
+                    in {
+                        "robust_global_event_reject",
+                        "adaptive_event_gated_regression",
+                    }
+                )
+            )
+            parameter_button.clicked.connect(
+                lambda _checked=False, r=roi, c=combo:
+                self._on_guided_customize_correction_parameters(
+                    r,
+                    str(c.currentData() or ""),
+                    source_type=LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+                    source_id=None,
+                )
+            )
             action.clicked.connect(
                 lambda _checked=False, r=roi, c=combo:
                 self._confirm_guided_local_preview_row(r, c)
@@ -13391,11 +13810,13 @@ class MainWindow(QMainWindow):
             layout.addWidget(evidence_label, row_index, 1)
             layout.addWidget(combo, row_index, 2)
             layout.addWidget(status_label, row_index, 3)
-            layout.addWidget(action, row_index, 4)
+            layout.addWidget(parameter_button, row_index, 4)
+            layout.addWidget(action, row_index, 5)
             self._guided_local_preview_confirmation_rows[roi] = {
                 "evidence_label": evidence_label,
                 "strategy_combo": combo,
                 "status_label": status_label,
+                "parameter_button": parameter_button,
                 "action_button": action,
             }
 
@@ -14035,14 +14456,37 @@ class MainWindow(QMainWindow):
         )
         current_target = (current_source_key, current_roi, current_chunk)
         previous_target = getattr(self, "_guided_confirm_active_target", None)
-        if previous_target is None:
-            self._guided_confirm_active_target = current_target
-        elif current_target != previous_target:
-            previous_source = previous_target[0] if isinstance(previous_target, tuple) and previous_target else ""
+        target_changed = previous_target is None or current_target != previous_target
+        if target_changed:
             with QSignalBlocker(self._guided_confirm_ack_cb):
                 self._guided_confirm_ack_cb.setChecked(False)
-            if current_source_key != previous_source:
-                with QSignalBlocker(self._guided_confirm_strategy_combo):
+            source_id_for_choice = (
+                getattr(self, "_guided_confirm_source", None)
+                if source_type == "diagnostic_cache"
+                else current_source_key
+            )
+            choice_key = self._guided_confirm_choice_key(
+                source_type, source_id_for_choice, current_roi
+            )
+            saved_entry = getattr(self, "_guided_strategy_choices", {}).get(
+                choice_key
+            )
+            saved_strategy = (
+                str(saved_entry.get("strategy") or "")
+                if isinstance(saved_entry, dict)
+                else ""
+            )
+            saved_index = self._guided_confirm_strategy_combo.findData(
+                saved_strategy
+            )
+            with QSignalBlocker(self._guided_confirm_strategy_combo):
+                if saved_strategy and saved_index >= 0:
+                    self._guided_confirm_strategy_combo.setCurrentIndex(saved_index)
+                elif (
+                    previous_target is None
+                    or not isinstance(previous_target, tuple)
+                    or current_source_key != previous_target[0]
+                ):
                     self._guided_confirm_strategy_combo.setCurrentIndex(0)
             self._guided_confirm_active_target = current_target
 
@@ -14073,6 +14517,50 @@ class MainWindow(QMainWindow):
         self._guided_confirm_marked_choice_label.setText(self._guided_marked_choice_text())
         self._refresh_guided_draft_run_plan_preview()
         selected_strategy = self._selected_guided_confirm_strategy()
+        customize_button = getattr(
+            self, "_guided_confirm_customize_parameters_btn", None
+        )
+        parameter_summary = getattr(
+            self, "_guided_confirm_correction_parameters_label", None
+        )
+        supported_parameter_strategies = {
+            "robust_global_event_reject",
+            "adaptive_event_gated_regression",
+        }
+        if customize_button is not None:
+            customize_button.setEnabled(
+                bool(source_ok and selected_strategy in supported_parameter_strategies)
+            )
+        if parameter_summary is not None:
+            if selected_strategy in supported_parameter_strategies:
+                source_id_for_parameters = (
+                    getattr(self, "_guided_confirm_source", None)
+                    if source_type == "diagnostic_cache"
+                    else current_source_key
+                )
+                parameter_key = self._guided_correction_choice_key_for_target(
+                    source_type, source_id_for_parameters, current_roi
+                )
+                effective = self._guided_correction_parameter_values_for_choice(
+                    parameter_key, selected_strategy
+                )
+                parameter_state = getattr(
+                    self, "_guided_correction_parameters_by_choice", {}
+                ).get(parameter_key)
+                source_label = (
+                    "customized"
+                    if isinstance(parameter_state, dict)
+                    and parameter_state.get("strategy") == selected_strategy
+                    else "Guided defaults"
+                )
+                parameter_summary.setText(
+                    f"{source_label}: "
+                    + ", ".join(
+                        f"{name}={value}" for name, value in effective.items()
+                    )
+                )
+            else:
+                parameter_summary.setText("Not applicable for this strategy.")
         local_reference = (
             self._guided_local_preview_evidence_reference(
                 selected_strategy, roi=self._selected_guided_confirm_roi()
@@ -18978,7 +19466,8 @@ class MainWindow(QMainWindow):
             GuidedNewAnalysisDraftPlan,
             GuidedNewAnalysisExecutionIntent,
             GuidedNewAnalysisTonicSettingsContract,
-            GuidedPlanCorrectionChoice
+            GuidedPlanCorrectionChoice,
+            resolve_guided_effective_correction_parameters,
         )
 
         # Draft construction is the shared consumption boundary for Draft Plan,
@@ -19083,6 +19572,9 @@ class MainWindow(QMainWindow):
                 diagnostic_scope_signature = active_source.diagnostic_scope_signature or None
                 build_request_signature = active_source.build_request_signature or None
 
+        dynamic_fit_parameter_contract = (
+            GuidedNewAnalysisDynamicFitParameterContract()
+        )
         per_roi_choices = []
         choices = getattr(self, "_guided_strategy_choices", {})
         active_cache_source_key = self._diagnostic_cache_source_key(record) if record is not None else None
@@ -19117,6 +19609,14 @@ class MainWindow(QMainWindow):
                 if is_current and not choice.get("stale", False)
                 else "stale"
             )
+            effective_parameters = resolve_guided_effective_correction_parameters(
+                str(choice.get("strategy") or ""),
+                dynamic_fit_parameter_contract,
+                self._guided_correction_parameter_values_for_choice(
+                    (choice_source_key, roi_id),
+                    str(choice.get("strategy") or ""),
+                ),
+            )
 
             per_roi_choices.append(
                 GuidedPlanCorrectionChoice(
@@ -19137,6 +19637,7 @@ class MainWindow(QMainWindow):
                     evidence_reference=dict(
                         choice.get("local_preview_evidence") or {}
                     ),
+                    effective_parameters=effective_parameters,
                 )
             )
 
@@ -19177,9 +19678,6 @@ class MainWindow(QMainWindow):
                 == ["signal_only_f0"]
                 for roi in included
             )
-        )
-        dynamic_fit_parameter_contract = (
-            GuidedNewAnalysisDynamicFitParameterContract()
         )
         if unanimous_confirmed_mode is not None:
             dynamic_fit_parameter_contract = dataclasses.replace(
@@ -20243,6 +20741,9 @@ class MainWindow(QMainWindow):
             "choice_source": "explicit_user_mark",
             "no_auto_selection": True,
             "marked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "effective_parameters": self._guided_correction_parameter_values_for_choice(
+                source_key, strategy
+            ),
         }
         self._invalidate_guided_backend_validation("strategy mark changed")
         self._refresh_guided_confirm_strategy_panel()
@@ -23021,6 +23522,36 @@ class MainWindow(QMainWindow):
         )
         choice_layout.addRow(
             "Strategy for this ROI:", self._guided_confirm_strategy_combo
+        )
+        self._guided_confirm_customize_parameters_btn = QPushButton(
+            "Customize parameters"
+        )
+        self._guided_confirm_customize_parameters_btn.setObjectName(
+            "guidedCorrectionCustomizeParametersButton"
+        )
+        self._guided_confirm_customize_parameters_btn.setToolTip(
+            "Optional values for this ROI only."
+        )
+        self._guided_confirm_customize_parameters_btn.clicked.connect(
+            self._on_guided_customize_correction_parameters
+        )
+        choice_layout.addRow(
+            "Optional parameters:",
+            self._guided_confirm_customize_parameters_btn,
+        )
+        self._guided_confirm_correction_parameters_label = QLabel(
+            "Using current Guided defaults."
+        )
+        self._guided_confirm_correction_parameters_label.setObjectName(
+            "guidedCorrectionParameterSummary"
+        )
+        self._guided_confirm_correction_parameters_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_confirm_correction_parameters_label.setWordWrap(True)
+        choice_layout.addRow(
+            "Effective values:",
+            self._guided_confirm_correction_parameters_label,
         )
         self._guided_confirm_local_preview_evidence_label = QLabel("")
         self._guided_confirm_local_preview_evidence_label.setObjectName(

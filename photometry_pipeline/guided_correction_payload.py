@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Iterable
 
@@ -11,6 +12,9 @@ from photometry_pipeline.core.types import PerRoiCorrectionSpec
 from photometry_pipeline.guided_production_mapping import (
     GuidedProductionPerRoiStrategy,
     guided_production_strategy_map_to_correction_specs,
+)
+from photometry_pipeline.guided_new_analysis_plan import (
+    validate_guided_effective_correction_parameters,
 )
 
 
@@ -31,6 +35,9 @@ def _entry(spec: PerRoiCorrectionSpec) -> dict[str, object]:
         "dynamic_fit_mode": spec.dynamic_fit_mode,
         "parameter_identity": spec.parameter_identity,
         "evidence_identity": spec.evidence_identity,
+        "effective_parameters": {
+            name: value for name, value in spec.effective_parameters
+        },
     }
 
 
@@ -41,6 +48,35 @@ def _semantic_basis(included_roi_ids: tuple[str, ...], specs: dict[str, PerRoiCo
         "included_roi_ids": sorted(included_roi_ids),
         "per_roi_correction": [_entry(specs[roi]) for roi in sorted(specs)],
     }
+
+
+def _legacy_entry(spec: PerRoiCorrectionSpec) -> dict[str, object]:
+    return {
+        "roi_id": spec.roi_id,
+        "strategy_family": spec.strategy_family,
+        "selected_strategy": spec.selected_strategy,
+        "dynamic_fit_mode": spec.dynamic_fit_mode,
+        "parameter_identity": spec.parameter_identity,
+        "evidence_identity": spec.evidence_identity,
+    }
+
+
+def _legacy_correction_payload_identity(
+    included_roi_ids: tuple[str, ...],
+    specs: dict[str, PerRoiCorrectionSpec],
+) -> str:
+    basis = {
+        "schema_name": GUIDED_PER_ROI_CORRECTION_SCHEMA_NAME,
+        "schema_version": GUIDED_PER_ROI_CORRECTION_SCHEMA_VERSION,
+        "included_roi_ids": sorted(included_roi_ids),
+        "per_roi_correction": [
+            _legacy_entry(specs[roi]) for roi in sorted(specs)
+        ],
+    }
+    encoded = json.dumps(
+        basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def correction_payload_identity(included_roi_ids: tuple[str, ...], specs: dict[str, PerRoiCorrectionSpec]) -> str:
@@ -86,14 +122,58 @@ def load_guided_correction_payload(path: str | Path, expected_roi_ids: Iterable[
     if not isinstance(raw_entries, list):
         raise GuidedCorrectionPayloadError("Guided correction map is malformed.")
     specs: dict[str, PerRoiCorrectionSpec] = {}
-    required = {"roi_id", "strategy_family", "selected_strategy", "dynamic_fit_mode", "parameter_identity", "evidence_identity"}
+    required = {
+        "roi_id",
+        "strategy_family",
+        "selected_strategy",
+        "dynamic_fit_mode",
+        "parameter_identity",
+        "evidence_identity",
+    }
+    allowed = required | {"effective_parameters"}
     try:
         for raw in raw_entries:
-            if not isinstance(raw, dict) or set(raw) != required:
+            if (
+                not isinstance(raw, dict)
+                or not required.issubset(set(raw))
+                or not set(raw).issubset(allowed)
+            ):
                 raise GuidedCorrectionPayloadError("Guided correction entry is malformed.")
             if not isinstance(raw["parameter_identity"], str) or not isinstance(raw["evidence_identity"], str):
                 raise GuidedCorrectionPayloadError("Guided correction identities must be strings.")
-            spec = PerRoiCorrectionSpec(**raw)
+            has_effective_parameters = "effective_parameters" in raw
+            raw_parameters = raw.get("effective_parameters", {})
+            if has_effective_parameters and not isinstance(raw_parameters, Mapping):
+                raise GuidedCorrectionPayloadError(
+                    "Guided correction effective_parameters must be an object."
+                )
+            if isinstance(raw_parameters, Mapping) and any(
+                not isinstance(name, str) for name in raw_parameters
+            ):
+                raise GuidedCorrectionPayloadError(
+                    "Guided correction parameter names must be strings."
+                )
+            effective_parameters = tuple(
+                raw_parameters.items()
+            ) if isinstance(raw_parameters, Mapping) else ()
+            strategy = str(raw.get("selected_strategy") or "")
+            if has_effective_parameters:
+                try:
+                    effective_parameters = validate_guided_effective_correction_parameters(
+                        strategy,
+                        effective_parameters,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise GuidedCorrectionPayloadError(str(exc)) from exc
+            spec = PerRoiCorrectionSpec(
+                roi_id=raw["roi_id"],
+                strategy_family=raw["strategy_family"],
+                selected_strategy=raw["selected_strategy"],
+                dynamic_fit_mode=raw["dynamic_fit_mode"],
+                parameter_identity=raw["parameter_identity"],
+                evidence_identity=raw["evidence_identity"],
+                effective_parameters=effective_parameters,
+            )
             if spec.roi_id in specs:
                 raise GuidedCorrectionPayloadError("Guided correction map contains a duplicate ROI.")
             specs[spec.roi_id] = spec
@@ -103,5 +183,14 @@ def load_guided_correction_payload(path: str | Path, expected_roi_ids: Iterable[
         raise GuidedCorrectionPayloadError("Guided correction coverage does not exactly match included ROIs.")
     identity = correction_payload_identity(tuple(included), specs)
     if document.get("canonical_correction_payload_identity") != identity:
-        raise GuidedCorrectionPayloadError("Guided correction payload identity mismatch.")
+        legacy_entries = all(
+            isinstance(raw, dict) and "effective_parameters" not in raw
+            for raw in raw_entries
+        )
+        if not legacy_entries or document.get(
+            "canonical_correction_payload_identity"
+        ) != _legacy_correction_payload_identity(tuple(included), specs):
+            raise GuidedCorrectionPayloadError(
+                "Guided correction payload identity mismatch."
+            )
     return specs

@@ -55,8 +55,12 @@ from photometry_pipeline.guided_new_analysis_plan import (
     evaluate_guided_new_analysis_execution_subset_readiness,
     evaluate_new_analysis_plan_issues,
     evaluate_new_analysis_plan_readiness,
+    resolve_guided_effective_correction_parameters,
 )
 from photometry_pipeline.workflow_safety import feature_event_defaults_from_config
+from photometry_pipeline.guided_plan_identity import (
+    compute_guided_new_analysis_draft_plan_identity,
+)
 
 
 def _complete_new_analysis_plan(**overrides):
@@ -4006,3 +4010,165 @@ def test_guided_new_analysis_durable_fields_4J11i():
     assert restored.output_overwrite is False
     assert restored.global_correction_strategy is None
     assert restored.dynamic_fit_mode is None
+
+
+def test_guided_per_roi_correction_parameters_resolve_defaults_and_stay_independent():
+    robust_defaults = dict(
+        resolve_guided_effective_correction_parameters(
+            "robust_global_event_reject"
+        )
+    )
+    assert robust_defaults == {
+        "robust_event_reject_max_iters": 3,
+        "robust_event_reject_residual_z_thresh": 3.5,
+        "robust_event_reject_local_var_window_sec": 10.0,
+        "robust_event_reject_min_keep_fraction": 0.5,
+    }
+    choices = [
+        GuidedPlanCorrectionChoice(
+            roi_id="ROI1",
+            selected_strategy="robust_global_event_reject",
+            source_type="local_correction_preview",
+            current_or_stale="current",
+            explicit_user_mark=True,
+            effective_parameters=(
+                ("robust_event_reject_max_iters", 3),
+                ("robust_event_reject_residual_z_thresh", 3.5),
+                ("robust_event_reject_local_var_window_sec", 10.0),
+                ("robust_event_reject_min_keep_fraction", 0.5),
+            ),
+        ),
+        GuidedPlanCorrectionChoice(
+            roi_id="ROI2",
+            selected_strategy="robust_global_event_reject",
+            source_type="local_correction_preview",
+            current_or_stale="current",
+            explicit_user_mark=True,
+            effective_parameters=(
+                ("robust_event_reject_max_iters", 3),
+                ("robust_event_reject_residual_z_thresh", 3.5),
+                ("robust_event_reject_local_var_window_sec", 20.0),
+                ("robust_event_reject_min_keep_fraction", 0.5),
+            ),
+        ),
+    ]
+    plan = GuidedNewAnalysisDraftPlan(
+        included_roi_ids=["ROI1", "ROI2"],
+        per_roi_correction_strategy_choices=choices,
+    )
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+    assert strategy_map.blocking_categories == ()
+    effective_by_roi = {
+        entry.roi_id: dict(entry.effective_parameters)
+        for entry in strategy_map.entries
+    }
+    assert effective_by_roi["ROI1"]["robust_event_reject_local_var_window_sec"] == 10.0
+    assert effective_by_roi["ROI2"]["robust_event_reject_local_var_window_sec"] == 20.0
+
+
+def test_guided_adaptive_parameters_reset_to_current_defaults_and_identity_changes():
+    adaptive_fields = (
+        ("adaptive_event_gate_residual_z_thresh", 4.0),
+        ("adaptive_event_gate_local_var_window_sec", 20.0),
+        ("adaptive_event_gate_smooth_window_sec", 80.0),
+        ("adaptive_event_gate_min_trust_fraction", 0.7),
+    )
+    base_choice = GuidedPlanCorrectionChoice(
+        roi_id="ROI1",
+        selected_strategy="adaptive_event_gated_regression",
+        source_type="local_correction_preview",
+        current_or_stale="current",
+        explicit_user_mark=True,
+        effective_parameters=adaptive_fields,
+    )
+    roi2_choice = dataclasses.replace(
+        base_choice,
+        roi_id="ROI2",
+        effective_parameters=(
+            ("adaptive_event_gate_residual_z_thresh", 4.5),
+            ("adaptive_event_gate_local_var_window_sec", 25.0),
+            ("adaptive_event_gate_smooth_window_sec", 90.0),
+            ("adaptive_event_gate_min_trust_fraction", 0.8),
+        ),
+    )
+    unchanged_choice = dataclasses.replace(
+        base_choice,
+        effective_parameters=tuple(
+            resolve_guided_effective_correction_parameters(
+                "adaptive_event_gated_regression"
+            )
+        ),
+    )
+    plan = GuidedNewAnalysisDraftPlan(
+        included_roi_ids=["ROI1", "ROI2"],
+        per_roi_correction_strategy_choices=[base_choice, roi2_choice],
+    )
+    changed = dataclasses.replace(
+        plan,
+        per_roi_correction_strategy_choices=[unchanged_choice, roi2_choice],
+    )
+    assert compute_guided_new_analysis_draft_plan_identity(plan) != (
+        compute_guided_new_analysis_draft_plan_identity(changed)
+    )
+    assert dict(
+        resolve_guided_effective_correction_parameters(
+            "adaptive_event_gated_regression"
+        )
+    ) == {
+        "adaptive_event_gate_residual_z_thresh": 3.5,
+        "adaptive_event_gate_local_var_window_sec": 10.0,
+        "adaptive_event_gate_smooth_window_sec": 60.0,
+        "adaptive_event_gate_min_trust_fraction": 0.5,
+    }
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+    assert strategy_map.blocking_categories == ()
+    effective_by_roi = {
+        entry.roi_id: dict(entry.effective_parameters)
+        for entry in strategy_map.entries
+    }
+    assert effective_by_roi["ROI1"]["adaptive_event_gate_smooth_window_sec"] == 80.0
+    assert effective_by_roi["ROI2"]["adaptive_event_gate_smooth_window_sec"] == 90.0
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("robust_event_reject_max_iters", 0),
+        ("robust_event_reject_residual_z_thresh", float("nan")),
+        ("robust_event_reject_local_var_window_sec", 0.0),
+        ("robust_event_reject_min_keep_fraction", 1.1),
+    ],
+)
+def test_guided_per_roi_correction_parameters_reject_invalid_values(field, value):
+    values = dict(
+        resolve_guided_effective_correction_parameters(
+            "robust_global_event_reject"
+        )
+    )
+    values[field] = value
+    with pytest.raises(ValueError):
+        resolve_guided_effective_correction_parameters(
+            "robust_global_event_reject", values=values
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("adaptive_event_gate_residual_z_thresh", 0.0),
+        ("adaptive_event_gate_local_var_window_sec", float("inf")),
+        ("adaptive_event_gate_smooth_window_sec", -1.0),
+        ("adaptive_event_gate_min_trust_fraction", 0.0),
+    ],
+)
+def test_guided_adaptive_correction_parameters_reject_invalid_values(field, value):
+    values = dict(
+        resolve_guided_effective_correction_parameters(
+            "adaptive_event_gated_regression"
+        )
+    )
+    values[field] = value
+    with pytest.raises(ValueError):
+        resolve_guided_effective_correction_parameters(
+            "adaptive_event_gated_regression", values=values
+        )

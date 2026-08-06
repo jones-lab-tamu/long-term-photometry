@@ -85,6 +85,9 @@ def _per_roi_consumed_metadata(
             "dynamic_fit_mode": result.dynamic_fit_mode,
             "parameter_identity": result.parameter_identity,
             "evidence_identity": result.evidence_identity,
+            "effective_parameters": {
+                name: value for name, value in result.effective_parameters
+            },
             "execution_status": "consumed",
             "applied_strategy": result.applied_strategy,
             "fallback_path": ";".join(result.fallback_path),

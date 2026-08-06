@@ -47,6 +47,9 @@ from photometry_pipeline.io.adapters import (
     resolve_continuous_window_for_source,
 )
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
+from photometry_pipeline.guided_new_analysis_plan import (
+    GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS,
+)
 from photometry_pipeline.run_completion_contract import classify_run_terminal_state
 from photometry_pipeline.signal_only_f0 import compute_signal_only_f0_dff
 
@@ -1802,6 +1805,7 @@ def build_preview_provenance(
     source_paths: Iterable[str | os.PathLike[str]] | None = None,
     source_artifact_hashes: dict[str, str] | None = None,
     diagnostic_cache_metadata: dict[str, Any] | None = None,
+    effective_correction_parameters: dict[str, Any] | None = None,
     created_at_utc: str | None = None,
 ) -> dict[str, Any]:
     """Build preview-only provenance in memory; does not write files."""
@@ -1828,6 +1832,9 @@ def build_preview_provenance(
         "correction_methods_compared": list(method_result.methods),
         "backend_method_values": dict(backend_method_values or {}),
         "config_values": dict(config_values or {}),
+        "effective_correction_parameters": dict(
+            effective_correction_parameters or {}
+        ),
         "config_source_path": _resolve_path(config_source_path),
         "source_artifact_hashes": dict(source_artifact_hashes or {}),
         "diagnostic_cache": dict(diagnostic_cache_metadata or {}),
@@ -1878,6 +1885,7 @@ def run_guided_correction_preview_comparison(
     preview_id: str | None = None,
     source_type: str | None = None,
     overwrite: bool = False,
+    config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate preview-only correction comparison artifacts for one ROI/chunk.
 
@@ -1944,6 +1952,15 @@ def run_guided_correction_preview_comparison(
 
     try:
         base_cfg = Config.from_yaml(source_result.config_path)
+        applied_config_overrides = {
+            str(key): value
+            for key, value in (config_overrides or {}).items()
+            if str(key) in Config.__dataclass_fields__
+        }
+        if applied_config_overrides:
+            config_values = dataclasses.asdict(base_cfg)
+            config_values.update(applied_config_overrides)
+            base_cfg = Config(**config_values)
     except Exception as exc:
         return _result_failed(preview_id=pid, preview_output_dir=preview_dir, errors=[str(exc)])
 
@@ -2041,6 +2058,16 @@ def run_guided_correction_preview_comparison(
         source_paths=[source],
         source_artifact_hashes=source_hashes,
         diagnostic_cache_metadata=source_result.diagnostic_cache_metadata,
+        effective_correction_parameters={
+            name: value
+            for name, value in applied_config_overrides.items()
+            if name
+            in {
+                field_name
+                for fields in GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS.values()
+                for field_name in fields
+            }
+        },
     )
     provenance["source_file"] = str(record["source_file"])
     provenance["selected_window_tuple"] = _json_safe(record.get("window"))
@@ -2393,6 +2420,18 @@ def run_guided_local_correction_preview(
         "config_source_path": config_source,
         "config_sha256": _file_sha256(config_source),
         "config_overrides": _json_safe(applied_config_overrides),
+        "effective_correction_parameters": _json_safe(
+            {
+                name: value
+                for name, value in applied_config_overrides.items()
+                if name
+                in {
+                    field_name
+                    for fields in GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS.values()
+                    for field_name in fields
+                }
+            }
+        ),
         "effective_config_values": {
             "target_fs_hz": float(base_cfg.target_fs_hz),
             "chunk_duration_sec": float(base_cfg.chunk_duration_sec),
