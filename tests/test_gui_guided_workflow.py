@@ -1851,6 +1851,33 @@ def test_guided_correction_parameter_dialog_exposes_approved_fields_and_resets_l
         dialog_b.close()
 
 
+def test_guided_correction_parameter_tooltips_apply_to_controls_and_labels(
+    window,
+):
+    dialogs = [
+        main_window_module._GuidedRoiCorrectionParameterDialog(
+            "CH1", "robust_global_event_reject", parent=window
+        ),
+        main_window_module._GuidedRoiCorrectionParameterDialog(
+            "CH1", "adaptive_event_gated_regression", parent=window
+        ),
+    ]
+    try:
+        for dialog in dialogs:
+            for field_name, control in dialog._controls.items():
+                tooltip = control.toolTip()
+                assert tooltip
+                label = dialog.findChild(
+                    QLabel,
+                    f"guidedCorrectionParameterLabel_{field_name}",
+                )
+                assert label is not None
+                assert label.toolTip() == tooltip
+    finally:
+        for dialog in dialogs:
+            dialog.close()
+
+
 def _guided_correction_parameter_context(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
@@ -1903,6 +1930,34 @@ def _apply_fake_guided_correction_values(
     )
 
 
+def _patch_fake_guided_correction_dialog(monkeypatch, values_by_strategy):
+    class _FakeCorrectionDialog:
+        def __init__(self, _roi, strategy, **_kwargs):
+            self._strategy = strategy
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(values_by_strategy[self._strategy])
+
+    monkeypatch.setattr(
+        main_window_module,
+        "_GuidedRoiCorrectionParameterDialog",
+        _FakeCorrectionDialog,
+    )
+
+
+def _guided_parameter_values(strategy, **overrides):
+    from photometry_pipeline.guided_new_analysis_plan import (
+        resolve_guided_effective_correction_parameters,
+    )
+
+    values = dict(resolve_guided_effective_correction_parameters(strategy))
+    values.update(overrides)
+    return values
+
+
 def test_guided_untouched_correction_defaults_are_not_stored_as_custom(
     window, tmp_path, monkeypatch
 ):
@@ -1933,7 +1988,7 @@ def test_guided_changed_correction_value_is_retained_as_customized(
     assert window._guided_correction_parameters_by_choice[choice_key]["values"] == (
         customized
     )
-    assert "customized" in window._guided_confirm_correction_parameters_label.text()
+    assert "customized" in window._guided_confirm_correction_parameters_label.text().lower()
 
 
 def test_guided_reset_removes_only_current_roi_correction_customization(
@@ -1979,7 +2034,7 @@ def test_guided_reset_removes_only_current_roi_correction_customization(
     window._guided_confirm_roi_combo.setCurrentIndex(
         window._guided_confirm_roi_combo.findData("CH2")
     )
-    assert "customized" in window._guided_confirm_correction_parameters_label.text()
+    assert "customized" in window._guided_confirm_correction_parameters_label.text().lower()
 
 
 def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
@@ -2017,6 +2072,290 @@ def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
     assert overrides_a["robust_event_reject_local_var_window_sec"] == 11.0
     assert overrides_b["robust_event_reject_local_var_window_sec"] == 22.0
     assert overrides_a != overrides_b
+
+
+def test_guided_step1_owns_editable_parameter_controls_and_step2_is_read_only(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    assert set(window._guided_preview_parameter_controls) == {
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    }
+    assert window.findChild(
+        QPushButton,
+        "guidedCorrectionPreviewParameterCustomizeGlobalLinearRegression",
+    ) is None
+    assert window.findChild(
+        QPushButton,
+        "guidedCorrectionPreviewParameterCustomizeSignalOnlyF0",
+    ) is None
+    assert (
+        "These settings are used for this preview and for the final analysis"
+        in window.findChild(
+            QLabel, "guidedCorrectionPreviewParameterScope"
+        ).text()
+    )
+    assert all(
+        button.text() != "Customize"
+        for button in window._guided_confirm_choice_group.findChildren(
+            QPushButton
+        )
+    )
+    parameter_usage_message = (
+        "Confirming this method will use the parameter settings shown above."
+    )
+    confirmation_labels = window._guided_confirm_choice_group.findChildren(QLabel)
+    assert parameter_usage_message in [label.text() for label in confirmation_labels]
+    assert [label.text() for label in confirmation_labels].count(
+        parameter_usage_message
+    ) == 1
+
+
+def test_guided_step1_parameters_feed_preview_and_step2_summary_per_roi(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    robust = _guided_parameter_values(
+        "robust_global_event_reject",
+        robust_event_reject_local_var_window_sec=20.0,
+    )
+    _patch_fake_guided_correction_dialog(
+        monkeypatch,
+        {"robust_global_event_reject": robust},
+    )
+
+    window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["customize_button"].click()
+
+    run_key = str(run_dir.resolve())
+    assert window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["state_label"].text() == "Customized"
+    roi1_overrides = window._guided_correction_parameter_overrides_for_preview(
+        "completed_run",
+        run_key,
+        "CH1",
+        ["robust_global_event_reject"],
+    )
+    assert roi1_overrides["robust_event_reject_local_var_window_sec"] == 20.0
+
+    window._guided_preview_roi_combo.setCurrentIndex(
+        window._guided_preview_roi_combo.findData("CH2")
+    )
+    assert window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["state_label"].text() == "Guided defaults"
+    roi2_overrides = window._guided_correction_parameter_overrides_for_preview(
+        "completed_run",
+        run_key,
+        "CH2",
+        ["robust_global_event_reject"],
+    )
+    assert roi2_overrides["robust_event_reject_local_var_window_sec"] == 10.0
+
+    window._guided_confirm_strategy_combo.setCurrentIndex(
+        window._guided_confirm_strategy_combo.findData(
+            "robust_global_event_reject"
+        )
+    )
+    summary = window._guided_confirm_correction_parameters_label.text()
+    assert summary.startswith("Parameters from Step 1: Customized")
+    assert "Local variance window (sec): 20" in summary
+
+
+def test_guided_step1_keeps_strategy_values_independent_and_reset_is_shared(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    robust = _guided_parameter_values(
+        "robust_global_event_reject",
+        robust_event_reject_local_var_window_sec=20.0,
+    )
+    adaptive = _guided_parameter_values(
+        "adaptive_event_gated_regression",
+        adaptive_event_gate_smooth_window_sec=80.0,
+    )
+    adaptive_defaults = _guided_parameter_values(
+        "adaptive_event_gated_regression"
+    )
+    values_by_strategy = {
+        "robust_global_event_reject": robust,
+        "adaptive_event_gated_regression": adaptive,
+    }
+    _patch_fake_guided_correction_dialog(monkeypatch, values_by_strategy)
+
+    window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["customize_button"].click()
+    window._guided_preview_parameter_controls[
+        "adaptive_event_gated_regression"
+    ]["customize_button"].click()
+
+    key = (str(run_dir.resolve()), "CH1")
+    assert window._guided_correction_parameter_values_for_choice(
+        key, "robust_global_event_reject"
+    )["robust_event_reject_local_var_window_sec"] == 20.0
+    assert window._guided_correction_parameter_values_for_choice(
+        key, "adaptive_event_gated_regression"
+    )["adaptive_event_gate_smooth_window_sec"] == 80.0
+
+    values_by_strategy["adaptive_event_gated_regression"] = adaptive_defaults
+    window._guided_preview_parameter_controls[
+        "adaptive_event_gated_regression"
+    ]["customize_button"].click()
+
+    assert window._guided_correction_parameter_values_for_choice(
+        key, "robust_global_event_reject"
+    )["robust_event_reject_local_var_window_sec"] == 20.0
+    assert window._guided_correction_parameter_values_for_choice(
+        key, "adaptive_event_gated_regression"
+    ) == adaptive_defaults
+    assert key in window._guided_correction_parameters_by_choice
+
+    window._guided_confirm_strategy_combo.setCurrentIndex(
+        window._guided_confirm_strategy_combo.findData(
+            "adaptive_event_gated_regression"
+        )
+    )
+    assert window._guided_confirm_correction_parameters_label.text().startswith(
+        "Parameters from Step 1: Guided defaults"
+    )
+
+
+def test_guided_step1_parameter_change_stales_preview_and_confirmation(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    run_key = str(run_dir.resolve())
+    choice_key = (run_key, "CH1")
+    window._guided_preview_has_result = True
+    window._guided_preview_result_stale = False
+    window._guided_preview_last_result = {
+        "status": "success",
+        "source_type": "completed_run",
+        "completed_run_dir": run_key,
+        "roi": "CH1",
+        "chunk_index": 0,
+    }
+    window._guided_strategy_choices[choice_key] = {
+        "strategy": "robust_global_event_reject",
+        "source_type": "completed_run",
+        "confirmed": True,
+        "choice_source": "explicit_user_mark",
+        "current": True,
+        "stale": False,
+        "roi": "CH1",
+    }
+    custom = _guided_parameter_values(
+        "robust_global_event_reject",
+        robust_event_reject_local_var_window_sec=20.0,
+    )
+    _patch_fake_guided_correction_dialog(
+        monkeypatch,
+        {"robust_global_event_reject": custom},
+    )
+
+    window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["customize_button"].click()
+
+    assert window._guided_preview_result_stale is True
+    assert window._guided_strategy_choices[choice_key]["current"] is False
+    assert window._guided_strategy_choices[choice_key]["stale"] is True
+    assert "Correction parameters changed" in window._guided_strategy_choices[
+        choice_key
+    ]["stale_reason"]
+
+
+def test_guided_step2_local_table_shows_step1_values_without_editor(
+    window, monkeypatch
+):
+    _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        {
+            "CH1": "robust_global_event_reject",
+            "CH2": "adaptive_event_gated_regression",
+        },
+    )
+    setup_signature = window._guided_local_preview_setup_signature()
+    entries = {
+        roi: {
+            "result": {
+                "status": "success",
+                "source_type": "local_raw_segment",
+                "preview_only": True,
+                "production_analysis": False,
+                "preview_id": f"preview-{roi}",
+                "roi": roi,
+                "chunk_index": 0,
+                "method_statuses": {
+                    "robust_global_event_reject": {"status": "success"},
+                    "adaptive_event_gated_regression": {"status": "success"},
+                    "global_linear_regression": {"status": "success"},
+                },
+            },
+            "provenance": {"selected_segment_label": "segment-0"},
+            "setup_signature": setup_signature,
+        }
+        for roi in ("CH1", "CH2")
+    }
+    monkeypatch.setattr(
+        window,
+        "_guided_local_preview_evidence_for_roi",
+        lambda roi, require_current=True: entries.get(str(roi)),
+    )
+    robust = _guided_parameter_values(
+        "robust_global_event_reject",
+        robust_event_reject_local_var_window_sec=20.0,
+    )
+    window._guided_correction_parameters_by_choice[
+        (main_window_module.LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, "CH1")
+    ] = {
+        "strategy": "robust_global_event_reject",
+        "values": robust,
+    }
+    window._guided_local_preview_row_strategy_by_roi.update(
+        {
+            "CH1": "robust_global_event_reject",
+            "CH2": "adaptive_event_gated_regression",
+        }
+    )
+
+    window._rebuild_guided_local_preview_confirmation_rows()
+    rows = window._guided_local_preview_confirmation_rows
+
+    assert rows["CH1"]["parameter_summary_label"].text().startswith(
+        "Parameters from Step 1: Customized"
+    )
+    assert "Local variance window (sec): 20" in rows["CH1"][
+        "parameter_summary_label"
+    ].text()
+    assert rows["CH2"]["parameter_summary_label"].text().startswith(
+        "Parameters from Step 1: Guided defaults"
+    )
+    assert "parameter_button" not in rows["CH1"]
+    assert all(
+        button.text() != "Customize"
+        for button in window._guided_local_preview_confirmation_group.findChildren(
+            QPushButton
+        )
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    plan_choices = {
+        choice.roi_id: choice
+        for choice in plan.per_roi_correction_strategy_choices
+    }
+    assert dict(plan_choices["CH1"].effective_parameters)[
+        "robust_event_reject_local_var_window_sec"
+    ] == 20.0
 
 
 def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -7768,6 +8107,97 @@ def test_local_preview_failure_reports_selected_segment_without_fallback(
     assert "Input format: rwd" in details
     assert "selected session has invalid timestamps" in details
     assert window._guided_strategy_choices == {}
+
+
+def test_guided_preview_details_report_generated_method_settings_and_stale_state(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    robust = _guided_parameter_values(
+        "robust_global_event_reject",
+        robust_event_reject_max_iters=17,
+        robust_event_reject_residual_z_thresh=17.25,
+        robust_event_reject_local_var_window_sec=27.5,
+        robust_event_reject_min_keep_fraction=0.61,
+    )
+    adaptive = _guided_parameter_values(
+        "adaptive_event_gated_regression",
+        adaptive_event_gate_residual_z_thresh=18.5,
+        adaptive_event_gate_local_var_window_sec=37.5,
+        adaptive_event_gate_smooth_window_sec=47.5,
+        adaptive_event_gate_min_trust_fraction=0.71,
+    )
+    values_by_strategy = {
+        "robust_global_event_reject": robust,
+        "adaptive_event_gated_regression": adaptive,
+    }
+    _patch_fake_guided_correction_dialog(monkeypatch, values_by_strategy)
+
+    window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["customize_button"].click()
+    window._guided_preview_parameter_controls[
+        "adaptive_event_gated_regression"
+    ]["customize_button"].click()
+    window._guided_preview_generate_btn.click()
+
+    result = window._guided_preview_last_result
+    settings = result["preview_parameter_settings"]
+    assert settings["robust_global_event_reject"][
+        "effective_parameters"
+    ] == robust
+    assert settings["robust_global_event_reject"][
+        "parameter_source"
+    ] == "Customized"
+    assert settings["adaptive_event_gated_regression"][
+        "effective_parameters"
+    ] == adaptive
+    assert settings["adaptive_event_gated_regression"][
+        "parameter_source"
+    ] == "Customized"
+
+    details = window._guided_preview_artifacts_label.text()
+    assert "Settings used for this preview" in details
+    assert "Method: Robust Global Event-Reject Fit" in details
+    assert "Parameter source: Customized" in details
+    assert "Residual z threshold: 17.25" in details
+    assert "Local variance window (sec): 27.5" in details
+    assert "Smoothing window (sec): 47.5" not in details
+
+    window._guided_preview_next_btn.click()
+    details = window._guided_preview_artifacts_label.text()
+    assert "Method: Adaptive Event-Gated Fit" in details
+    assert "Residual z threshold: 18.5" in details
+    assert "Local variance window (sec): 37.5" in details
+    assert "Smoothing window (sec): 47.5" in details
+    assert "Maximum iterations: 17" not in details
+
+    window._guided_preview_next_btn.click()
+    details = window._guided_preview_artifacts_label.text()
+    assert "Method: Global Linear Regression" in details
+    assert "No per-ROI parameters for this method." in details
+    assert "Residual z threshold:" not in details
+
+    window._guided_preview_previous_btn.click()
+    window._guided_preview_previous_btn.click()
+    assert "Method: Robust Global Event-Reject Fit" in (
+        window._guided_preview_artifacts_label.text()
+    )
+    updated_robust = dict(robust)
+    updated_robust["robust_event_reject_residual_z_thresh"] = 99.5
+    values_by_strategy["robust_global_event_reject"] = updated_robust
+    window._guided_preview_parameter_controls[
+        "robust_global_event_reject"
+    ]["customize_button"].click()
+
+    stale_details = window._guided_preview_artifacts_label.text()
+    assert window._guided_preview_result_stale is True
+    assert "Technical details below are for the last generated preview" in (
+        stale_details
+    )
+    assert "Residual z threshold: 17.25" in stale_details
+    assert "Residual z threshold: 99.5" not in stale_details
 
 
 def test_correction_preview_ready_has_openable_review_summary(

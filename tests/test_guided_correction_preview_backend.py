@@ -528,6 +528,166 @@ def test_preview_backend_uses_and_records_complete_per_roi_effective_values(tmp_
     assert provenance["effective_correction_parameters"] == effective
 
 
+def _capture_preview_fit_config(monkeypatch):
+    captured = []
+
+    def fake_fit(chunk, config, *, mode):
+        captured.append((config, mode))
+        uv_fit = np.asarray(chunk.uv_raw, dtype=float).copy()
+        return uv_fit, np.asarray(chunk.sig_raw, dtype=float) - uv_fit
+
+    monkeypatch.setattr(
+        correction_preview_module.regression,
+        "fit_chunk_dynamic",
+        fake_fit,
+    )
+    return captured
+
+
+def test_robust_preview_passes_custom_residual_threshold_to_runtime(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+    captured = _capture_preview_fit_config(monkeypatch)
+
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "robust-preview",
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=["robust_global_event_reject"],
+        include_signal_only_f0_preview=False,
+        config_overrides={
+            "robust_event_reject_residual_z_thresh": 17.25,
+        },
+        preview_id="robust_runtime_config",
+    )
+
+    assert result["ok"] is True
+    assert len(captured) == 1
+    runtime_config, mode = captured[0]
+    assert mode == "phasic"
+    assert runtime_config.dynamic_fit_mode == "robust_global_event_reject"
+    assert runtime_config.robust_event_reject_residual_z_thresh == 17.25
+
+
+def test_adaptive_preview_passes_custom_local_variance_window_to_runtime(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+    captured = _capture_preview_fit_config(monkeypatch)
+
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "adaptive-preview",
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=["adaptive_event_gated_regression"],
+        include_signal_only_f0_preview=False,
+        config_overrides={
+            "adaptive_event_gate_local_var_window_sec": 37.5,
+        },
+        preview_id="adaptive_runtime_config",
+    )
+
+    assert result["ok"] is True
+    assert len(captured) == 1
+    runtime_config, mode = captured[0]
+    assert mode == "phasic"
+    assert runtime_config.dynamic_fit_mode == "adaptive_event_gated_regression"
+    assert runtime_config.adaptive_event_gate_local_var_window_sec == 37.5
+
+
+def test_preview_result_reports_method_specific_effective_parameter_settings(
+    tmp_path,
+):
+    run_dir = _make_completed_run(tmp_path)
+    effective = {
+        "robust_event_reject_max_iters": 17,
+        "robust_event_reject_residual_z_thresh": 17.25,
+        "robust_event_reject_local_var_window_sec": 27.5,
+        "robust_event_reject_min_keep_fraction": 0.61,
+        "adaptive_event_gate_residual_z_thresh": 18.5,
+        "adaptive_event_gate_local_var_window_sec": 37.5,
+        "adaptive_event_gate_smooth_window_sec": 47.5,
+        "adaptive_event_gate_min_trust_fraction": 0.71,
+    }
+
+    result = run_guided_correction_preview_comparison(
+        run_dir,
+        roi="CH1",
+        methods=[
+            "robust_global_event_reject",
+            "adaptive_event_gated_regression",
+        ],
+        config_overrides=effective,
+        parameter_sources={
+            "robust_global_event_reject": "Customized",
+            "adaptive_event_gated_regression": "Customized",
+        },
+        preview_id=PREVIEW_ID,
+        overwrite=True,
+    )
+
+    assert result["ok"] is True
+    settings = result["preview_parameter_settings"]
+    assert settings["robust_global_event_reject"] == {
+        "method": "robust_global_event_reject",
+        "parameter_source": "Customized",
+        "effective_parameters": {
+            name: effective[name]
+            for name in (
+                "robust_event_reject_max_iters",
+                "robust_event_reject_residual_z_thresh",
+                "robust_event_reject_local_var_window_sec",
+                "robust_event_reject_min_keep_fraction",
+            )
+        },
+    }
+    assert settings["adaptive_event_gated_regression"] == {
+        "method": "adaptive_event_gated_regression",
+        "parameter_source": "Customized",
+        "effective_parameters": {
+            name: effective[name]
+            for name in (
+                "adaptive_event_gate_residual_z_thresh",
+                "adaptive_event_gate_local_var_window_sec",
+                "adaptive_event_gate_smooth_window_sec",
+                "adaptive_event_gate_min_trust_fraction",
+            )
+        },
+    }
+    provenance = _load_json(
+        Path(result["preview_output_dir"]) / PREVIEW_PROVENANCE_FILENAME
+    )
+    assert "preview_parameter_settings" not in provenance
+    assert "parameter_sources" not in provenance
+
+
 def test_preview_backend_success_from_phasic_cache_source_requires_external_output(tmp_path):
     run_dir = _make_completed_run(tmp_path)
     phasic_out = run_dir / "_analysis" / "phasic_out"

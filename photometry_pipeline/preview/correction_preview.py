@@ -1532,6 +1532,53 @@ def _config_for_method(base_cfg: Config, method: str) -> Config:
     return Config(**cfg_data)
 
 
+def _preview_parameter_settings(
+    methods: Iterable[str],
+    cfg: Config,
+    *,
+    config_overrides: dict[str, Any] | None = None,
+    parameter_sources: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    supplied = {
+        str(key): value for key, value in (config_overrides or {}).items()
+    }
+    requested_sources = {
+        str(key): str(value or "").strip()
+        for key, value in (parameter_sources or {}).items()
+    }
+    settings: dict[str, dict[str, Any]] = {}
+    for raw_method in methods:
+        method = str(raw_method)
+        fields = GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS.get(method, ())
+        if not fields:
+            settings[method] = {
+                "method": method,
+                "effective_parameters": {},
+                "parameter_source": "Not applicable",
+            }
+            continue
+        source = requested_sources.get(method, "")
+        if source.lower() == "customized":
+            source = "Customized"
+        elif source.lower() == "guided defaults":
+            source = "Guided defaults"
+        else:
+            source = (
+                "Customized"
+                if any(field_name in supplied for field_name in fields)
+                else "Guided defaults"
+            )
+        settings[method] = {
+            "method": method,
+            "effective_parameters": {
+                field_name: getattr(cfg, field_name)
+                for field_name in fields
+            },
+            "parameter_source": source,
+        }
+    return settings
+
+
 def _numeric_summary(values: np.ndarray | None) -> dict[str, Any]:
     if values is None:
         return {"available": False}
@@ -1886,6 +1933,7 @@ def run_guided_correction_preview_comparison(
     source_type: str | None = None,
     overwrite: bool = False,
     config_overrides: dict[str, Any] | None = None,
+    parameter_sources: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Generate preview-only correction comparison artifacts for one ROI/chunk.
 
@@ -2108,6 +2156,12 @@ def run_guided_correction_preview_comparison(
         "preview_summary_path": summary_path,
         "generated_artifacts": generated_artifacts,
         "method_statuses": method_statuses,
+        "preview_parameter_settings": _preview_parameter_settings(
+            method_result.methods,
+            base_cfg,
+            config_overrides=applied_config_overrides,
+            parameter_sources=parameter_sources,
+        ),
         "warnings": warnings,
         "errors": errors,
     }
@@ -2175,6 +2229,7 @@ def run_guided_local_correction_preview(
     include_signal_only_f0_preview: bool = True,
     preview_id: str | None = None,
     config_overrides: dict[str, Any] | None = None,
+    parameter_sources: dict[str, str] | None = None,
     continuous_window_index: int | None = None,
     continuous_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2519,6 +2574,12 @@ def run_guided_local_correction_preview(
         "preview_summary_path": summary_path,
         "generated_artifacts": generated_artifacts,
         "method_statuses": method_statuses,
+        "preview_parameter_settings": _preview_parameter_settings(
+            method_result.methods,
+            base_cfg,
+            config_overrides=applied_config_overrides,
+            parameter_sources=parameter_sources,
+        ),
         "signal_only_f0_preview_requested": bool(
             include_signal_only_f0_preview
         ),
