@@ -280,7 +280,7 @@ def test_guided_demo_tonic_is_added_to_signal_only(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         synthetic_demo_generator,
         "_guided_demo_tonic_value",
-        lambda _session_index, _roi_index: 0.0,
+        lambda _session_index, _roi_index, **_kwargs: 0.0,
     )
     without_tonic = synthetic_demo_generator._guided_demo_session_arrays(
         session_index,

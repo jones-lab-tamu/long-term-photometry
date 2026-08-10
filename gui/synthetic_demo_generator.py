@@ -107,15 +107,18 @@ class DemoGenerationResult:
     stderr_path: Path | None = None
 
 
-def guided_demo_readme_text() -> str:
-    return """# Synthetic Guided CSV Demo
+def guided_demo_readme_text(
+    *, session_count: int = GUIDED_DEMO_SESSION_COUNT
+) -> str:
+    scheduled_hours = float(session_count) / float(GUIDED_DEMO_SESSIONS_PER_HOUR)
+    return f"""# Synthetic Guided CSV Demo
 
 These CSV files are synthetic demonstration data, not real biological data.
 Select this containing folder in Guided Mode.
 
 - Format: CSV files
 - Recording structure: Intermittent/session-based recording
-- Sessions: 96 files across 48 scheduled hours
+- Sessions: {int(session_count)} files across {scheduled_hours:g} scheduled hours
 - Sessions per hour: 2
 - Session duration: 600 seconds
 - Time column: `ElapsedSeconds`
@@ -155,12 +158,23 @@ def guided_demo_session_filename(session_index: int) -> str:
     )
 
 
-def _guided_demo_tonic_value(session_index: int, roi_index: int) -> float:
-    """Return the exact signal-only tonic component for one session and ROI."""
+def _guided_demo_tonic_amplitude_au(roi_index: int, tonic_scale: float) -> float:
+    """Return this ROI's tonic amplitude after the optional developer scaling."""
+    return float(GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index]) * float(tonic_scale)
+
+
+def _guided_demo_tonic_value(
+    session_index: int, roi_index: int, *, tonic_scale: float = 1.0
+) -> float:
+    """Return the exact signal-only tonic component for one session and ROI.
+
+    ``tonic_scale`` scales only the rhythm's amplitude; period, phase, and
+    offset are untouched. The default of 1.0 reproduces the shipped demo.
+    """
     elapsed_hours = float(session_index) / float(GUIDED_DEMO_SESSIONS_PER_HOUR)
     return float(
         GUIDED_DEMO_TONIC_OFFSET_AU[roi_index]
-        + GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+        + _guided_demo_tonic_amplitude_au(roi_index, tonic_scale)
         * np.cos(
             2.0
             * np.pi
@@ -170,14 +184,30 @@ def _guided_demo_tonic_value(session_index: int, roi_index: int) -> float:
     )
 
 
+def _guided_continuous_demo_tonic_amplitude_au(
+    roi_index: int, tonic_scale: float
+) -> float:
+    """Return this ROI's tonic amplitude after the optional developer scaling."""
+    return float(GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[roi_index]) * float(
+        tonic_scale
+    )
+
+
 def _guided_continuous_demo_tonic_value(
-    elapsed_seconds: np.ndarray | float, roi_index: int
+    elapsed_seconds: np.ndarray | float,
+    roi_index: int,
+    *,
+    tonic_scale: float = 1.0,
 ) -> np.ndarray:
-    """Return the exact signal-only tonic component for continuous time."""
+    """Return the exact signal-only tonic component for continuous time.
+
+    ``tonic_scale`` scales only the rhythm's amplitude; period, phase, and
+    offset are untouched. The default of 1.0 reproduces the shipped demo.
+    """
     elapsed_hours = np.asarray(elapsed_seconds, dtype=np.float64) / 3600.0
     return (
         GUIDED_CONTINUOUS_DEMO_TONIC_OFFSET_AU[roi_index]
-        + GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[roi_index]
+        + _guided_continuous_demo_tonic_amplitude_au(roi_index, tonic_scale)
         * np.cos(
             2.0
             * np.pi
@@ -191,7 +221,7 @@ def _guided_continuous_demo_tonic_value(
 
 
 def _guided_continuous_demo_tonic_truth_payload(
-    duration_sec: float, fs_hz: int
+    duration_sec: float, fs_hz: int, *, tonic_scale: float = 1.0
 ) -> dict:
     rois = []
     for roi_index, roi_id in enumerate(("ROI1", "ROI2")):
@@ -201,9 +231,9 @@ def _guided_continuous_demo_tonic_truth_payload(
                 "tonic_period_hours": GUIDED_CONTINUOUS_DEMO_TONIC_PERIOD_HOURS[
                     roi_index
                 ],
-                "tonic_amplitude_au": GUIDED_CONTINUOUS_DEMO_TONIC_AMPLITUDE_AU[
-                    roi_index
-                ],
+                "tonic_amplitude_au": _guided_continuous_demo_tonic_amplitude_au(
+                    roi_index, tonic_scale
+                ),
                 "tonic_offset_au": GUIDED_CONTINUOUS_DEMO_TONIC_OFFSET_AU[
                     roi_index
                 ],
@@ -231,7 +261,9 @@ def _guided_continuous_demo_tonic_truth_payload(
     }
 
 
-def _guided_demo_tonic_truth_payload(session_count: int) -> dict:
+def _guided_demo_tonic_truth_payload(
+    session_count: int, *, tonic_scale: float = 1.0
+) -> dict:
     records = []
     for session_index in range(int(session_count)):
         session_start = guided_demo_session_start_time(session_index)
@@ -249,11 +281,13 @@ def _guided_demo_tonic_truth_payload(session_count: int) -> dict:
                     "authoritative_session_start_time": session_start.isoformat(),
                     "elapsed_hours": elapsed_hours,
                     "tonic_value_au": _guided_demo_tonic_value(
-                        session_index, roi_index
+                        session_index, roi_index, tonic_scale=tonic_scale
                     ),
                     "tonic_offset_au": GUIDED_DEMO_TONIC_OFFSET_AU[roi_index],
                     "tonic_period_hours": GUIDED_DEMO_TONIC_PERIOD_HOURS[roi_index],
-                    "tonic_amplitude_au": GUIDED_DEMO_TONIC_AMPLITUDE_AU[roi_index],
+                    "tonic_amplitude_au": _guided_demo_tonic_amplitude_au(
+                        roi_index, tonic_scale
+                    ),
                     "tonic_phase_hours": GUIDED_DEMO_TONIC_PHASE_HOURS[roi_index],
                 }
             )
@@ -372,6 +406,7 @@ def _guided_demo_session_arrays(
     rows_per_session: int,
     fs_hz: int,
     rng: np.random.Generator,
+    tonic_scale: float = 1.0,
 ) -> np.ndarray:
     time_sec = np.arange(rows_per_session, dtype=np.float64) / float(fs_hz)
     duration_sec = float(rows_per_session) / float(fs_hz)
@@ -451,21 +486,28 @@ def _guided_demo_session_arrays(
         )
         # The known tonic is a session-level signal-only component.  It is
         # deliberately absent from the reference/control channel and from all
-        # shared, phasic, and nuisance terms above.
-        signal += _guided_demo_tonic_value(session_index, roi_index)
+        # shared, phasic, and nuisance terms above.  It is also added after
+        # every random draw for this ROI, so scaling it leaves the rest of the
+        # session bit-identical.
+        signal += _guided_demo_tonic_value(
+            session_index, roi_index, tonic_scale=tonic_scale
+        )
         columns.extend([signal, reference])
     return np.column_stack(columns)
 
 
-def guided_continuous_demo_readme_text() -> str:
-    return """# Synthetic Guided Continuous Demo
+def guided_continuous_demo_readme_text(
+    *, duration_sec: float = GUIDED_CONTINUOUS_DEMO_DURATION_SEC
+) -> str:
+    total_hours = float(duration_sec) / 3600.0
+    return f"""# Synthetic Guided Continuous Demo
 
 These data are synthetic demonstration data, not real biological data.
 Select this containing folder in Guided Mode.
 
 - Source type: CSV files, one continuous recording
 - Recording structure: continuous, one uninterrupted recording
-- Total duration: 48 hours
+- Total duration: {total_hours:g} hours
 - Sampling rate: 8 Hz
 - Time column: `ElapsedSeconds`
 - Time unit: seconds
@@ -677,8 +719,14 @@ def generate_guided_continuous_demo(
     *,
     progress: Callable[[int, int], None] | None = None,
     _duration_sec: float = GUIDED_CONTINUOUS_DEMO_DURATION_SEC,
+    _tonic_scale: float = 1.0,
 ) -> DemoGenerationResult:
-    """Generate the one fixed end-user Guided continuous demo transactionally."""
+    """Generate the one fixed end-user Guided continuous demo transactionally.
+
+    The leading-underscore parameters are developer/test overrides only. Their
+    defaults reproduce the shipped demo exactly; no application caller passes
+    them (see examples/generate_guided_demo_variant.py).
+    """
     parent = Path(destination_parent).expanduser()
     final_folder = parent / GUIDED_CONTINUOUS_DEMO_FOLDER_NAME
     temporary_folder: Path | None = None
@@ -773,8 +821,10 @@ def generate_guided_continuous_demo(
                     )
                     # Keep the known tonic separate from phasic events,
                     # shared nuisance, motion-like artifacts, and reference.
+                    # It is also added after every random draw for this ROI, so
+                    # scaling it leaves the rest of the block bit-identical.
                     signal += _guided_continuous_demo_tonic_value(
-                        block_time, roi_index
+                        block_time, roi_index, tonic_scale=float(_tonic_scale)
                     )
                     columns.extend([signal, reference])
                 values = np.column_stack(columns)
@@ -793,7 +843,9 @@ def generate_guided_continuous_demo(
                     progress(block_index + 1, block_count)
         (temporary_folder / GUIDED_CONTINUOUS_DEMO_TONIC_TRUTH_FILENAME).write_text(
             json.dumps(
-                _guided_continuous_demo_tonic_truth_payload(duration_sec, fs_hz),
+                _guided_continuous_demo_tonic_truth_payload(
+                    duration_sec, fs_hz, tonic_scale=float(_tonic_scale)
+                ),
                 indent=2,
                 sort_keys=False,
             )
@@ -801,7 +853,8 @@ def generate_guided_continuous_demo(
             encoding="utf-8",
         )
         (temporary_folder / "README.md").write_text(
-            guided_continuous_demo_readme_text(), encoding="utf-8"
+            guided_continuous_demo_readme_text(duration_sec=duration_sec),
+            encoding="utf-8",
         )
         _validate_guided_continuous_demo_folder(
             temporary_folder,
@@ -926,8 +979,14 @@ def generate_guided_csv_demo(
     progress: Callable[[int, int], None] | None = None,
     _session_count: int = GUIDED_DEMO_SESSION_COUNT,
     _rows_per_session: int = GUIDED_DEMO_ROWS_PER_SESSION,
+    _tonic_scale: float = 1.0,
 ) -> DemoGenerationResult:
-    """Generate the one fixed end-user Guided CSV demo transactionally."""
+    """Generate the one fixed end-user Guided CSV demo transactionally.
+
+    The leading-underscore parameters are developer/test overrides only. Their
+    defaults reproduce the shipped demo exactly; no application caller passes
+    them (see examples/generate_guided_demo_variant.py).
+    """
     parent = Path(destination_parent).expanduser()
     final_folder = parent / GUIDED_DEMO_FOLDER_NAME
     temporary_folder: Path | None = None
@@ -952,6 +1011,7 @@ def generate_guided_csv_demo(
                 rows_per_session=int(_rows_per_session),
                 fs_hz=GUIDED_DEMO_FS_HZ,
                 rng=rng,
+                tonic_scale=float(_tonic_scale),
             )
             if not np.isfinite(values).all():
                 raise RuntimeError(
@@ -969,7 +1029,9 @@ def generate_guided_csv_demo(
                 progress(session_index + 1, int(_session_count))
         (temporary_folder / GUIDED_DEMO_TONIC_TRUTH_FILENAME).write_text(
             json.dumps(
-                _guided_demo_tonic_truth_payload(int(_session_count)),
+                _guided_demo_tonic_truth_payload(
+                    int(_session_count), tonic_scale=float(_tonic_scale)
+                ),
                 indent=2,
                 sort_keys=False,
             )
@@ -977,7 +1039,8 @@ def generate_guided_csv_demo(
             encoding="utf-8",
         )
         (temporary_folder / "README.md").write_text(
-            guided_demo_readme_text(), encoding="utf-8"
+            guided_demo_readme_text(session_count=int(_session_count)),
+            encoding="utf-8",
         )
         _validate_guided_demo_folder(
             temporary_folder,
