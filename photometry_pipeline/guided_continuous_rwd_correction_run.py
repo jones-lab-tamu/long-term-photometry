@@ -267,14 +267,55 @@ def _per_roi_provenance(
     cache = open_phasic_cache(cache_path)
     try:
         provenance: dict[str, dict] = {}
+        chunk_ids = [int(chunk_id) for chunk_id in list_cache_chunk_ids(cache)]
         for roi_id in included_roi_ids:
             attrs = load_cache_chunk_attrs(cache, roi_id, first_chunk_id)
-            provenance[roi_id] = {
+            record = {
                 "strategy_family": attrs.get("correction_strategy_family"),
                 "selected_strategy": attrs.get("correction_selected_strategy"),
                 "parameter_identity": attrs.get("correction_parameter_identity"),
                 "evidence_identity": attrs.get("correction_evidence_identity"),
             }
+            if attrs.get("correction_f0_method") is not None:
+                record.update(
+                    {
+                        "f0_method": attrs.get("correction_f0_method"),
+                        "f0_aggregation": attrs.get("correction_f0_aggregation"),
+                        "f0_scope": attrs.get("correction_f0_scope"),
+                        "global_fit_method": attrs.get("correction_global_fit_method"),
+                        "global_fit_policy_identity": attrs.get(
+                            "correction_global_fit_policy_identity"
+                        ),
+                        "global_fit_slope": attrs.get("correction_global_fit_slope"),
+                        "global_fit_intercept": attrs.get(
+                            "correction_global_fit_intercept"
+                        ),
+                        "global_fit_max_points": attrs.get(
+                            "correction_global_fit_max_points"
+                        ),
+                        "global_fit_n_iter": attrs.get("correction_global_fit_n_iter"),
+                        "global_fit_z_thresh": attrs.get(
+                            "correction_global_fit_z_thresh"
+                        ),
+                        "global_fit_n_pairs": attrs.get("correction_global_fit_n_pairs"),
+                        "global_fit_n_used": attrs.get("correction_global_fit_n_used"),
+                        "f0_values": [],
+                    }
+                )
+                for chunk_id in chunk_ids:
+                    segment_attrs = load_cache_chunk_attrs(cache, roi_id, chunk_id)
+                    if segment_attrs.get("correction_f0_value") is None:
+                        continue
+                    record["f0_values"].append(
+                        {
+                            "segment_index": chunk_id,
+                            "f0": segment_attrs.get("correction_f0_value"),
+                            "finite_fitted_count": segment_attrs.get(
+                                "correction_f0_finite_fitted_count"
+                            ),
+                        }
+                    )
+            provenance[roi_id] = record
         return provenance
     finally:
         cache.close()

@@ -47,6 +47,7 @@ from .core.correction_policy_proposal import (
 )
 from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
+from .core.tonic_dff import apply_global_fit, compute_global_iso_fit_robust
 from .core.reporting import (
     append_applied_correction_summary,
     append_run_report_warnings,
@@ -67,6 +68,22 @@ from .guided_manifest_verification import (
 # from .viz import plots # Moved to run() to avoid side effects
 
 TONIC_GLOBAL_FIT_SAMPLE_CAPACITY = 200_000
+GUIDED_REFERENCE_GLOBAL_FIT_N_ITER = 3
+GUIDED_REFERENCE_GLOBAL_FIT_Z_THRESH = 4.0
+GUIDED_REFERENCE_GLOBAL_FIT_METHOD = "compute_global_iso_fit_robust"
+GUIDED_REFERENCE_GLOBAL_FIT_APPLY_METHOD = "apply_global_fit"
+GUIDED_REFERENCE_GLOBAL_FIT_POLICY_IDENTITY = (
+    "tonic-equivalent-global-isosbestic-robust-v1"
+)
+GUIDED_REFERENCE_F0_AGGREGATION = "median"
+GUIDED_REFERENCE_F0_SCOPE = "session"
+GUIDED_REFERENCE_DYNAMIC_STRATEGIES = frozenset(
+    {
+        "global_linear_regression",
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    }
+)
 
 
 class CorrectionProcessingError(RuntimeError):
@@ -323,6 +340,8 @@ class Pipeline:
         self._guided_npm_consumed_authority_callback = None
         self._guided_npm_consumed_authority_callback_invoked = False
         self._applied_correction_records_by_roi = {}
+        self._guided_reference_global_fit_provenance = {}
+        self._guided_reference_f0_records_by_roi = {}
         self._rwd_contract_validation = dict(
             getattr(config, "rwd_contract_validation", {}) or {}
         )
@@ -1797,6 +1816,256 @@ class Pipeline:
         if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
             self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(exc)})
 
+    def _guided_reference_dynamic_strategy_map(self) -> dict[str, PerRoiCorrectionSpec]:
+        """Return the current Guided reference-based subset, if applicable.
+
+        An explicit Guided map is the authority for this path.  Legacy uniform
+        callers, and explicit maps outside the three current reference-based
+        strategies, retain the existing baseline behavior.
+        """
+        if self.per_roi_correction is None:
+            return {}
+        strategy_map = getattr(self, "_requested_correction_strategy_map", None)
+        if not isinstance(strategy_map, dict):
+            strategy_map = dict(self.per_roi_correction)
+        dynamic: dict[str, PerRoiCorrectionSpec] = {}
+        for roi_id, spec in strategy_map.items():
+            if spec.strategy_family == "signal_only_f0":
+                continue
+            if (
+                spec.strategy_family != "dynamic_fit"
+                or spec.selected_strategy not in GUIDED_REFERENCE_DYNAMIC_STRATEGIES
+            ):
+                return {}
+            dynamic[str(roi_id)] = spec
+        return dynamic
+
+    @staticmethod
+    def _guided_global_fit_sample_positions(n_pairs: int) -> np.ndarray:
+        """Match ``compute_global_iso_fit_robust`` chronological sampling."""
+        n_pairs = int(n_pairs)
+        if n_pairs <= TONIC_GLOBAL_FIT_SAMPLE_CAPACITY:
+            return np.arange(max(0, n_pairs), dtype=np.int64)
+        step = n_pairs / float(TONIC_GLOBAL_FIT_SAMPLE_CAPACITY)
+        positions = np.arange(0, n_pairs, step).astype(np.int64)
+        positions = np.unique(positions)
+        return positions[positions < n_pairs]
+
+    def _run_guided_reference_global_fit_pass1(
+        self,
+        dynamic_strategy_map: dict[str, PerRoiCorrectionSpec],
+        force_format: str,
+    ) -> None:
+        """Fit tonic-equivalent global references with bounded exact sampling."""
+        roi_ids = tuple(dynamic_strategy_map)
+        self.stats.global_fit_params.clear()
+        finite_pair_counts = {roi_id: 0 for roi_id in roi_ids}
+
+        for _chunk_id, fpath, chunk, _load_elapsed in self._iter_entry_chunks_for_pass(
+            self.file_list, force_format, "guided_global_fit_count"
+        ):
+            try:
+                if self._selected_rois is not None:
+                    chunk = self._apply_roi_filter(chunk)
+                if not self.roi_map and chunk.metadata.get("roi_map"):
+                    self.roi_map = chunk.metadata["roi_map"]
+                channel_index = {
+                    str(name): index for index, name in enumerate(chunk.channel_names)
+                }
+                for roi_id in roi_ids:
+                    index = channel_index.get(roi_id)
+                    if index is None:
+                        continue
+                    finite_pair_counts[roi_id] += int(
+                        np.count_nonzero(
+                            np.isfinite(chunk.uv_raw[:, index])
+                            & np.isfinite(chunk.sig_raw[:, index])
+                        )
+                    )
+                if fpath not in self._pass1_manifest:
+                    self._pass1_manifest.append(fpath)
+            except Exception as exc:
+                self._handle_pass_chunk_exception(fpath, "guided_global_fit_count", exc)
+
+        sample_positions = {
+            roi_id: self._guided_global_fit_sample_positions(finite_pair_counts[roi_id])
+            for roi_id in roi_ids
+        }
+        sample_uv = {
+            roi_id: np.empty(positions.size, dtype=np.float64)
+            for roi_id, positions in sample_positions.items()
+        }
+        sample_sig = {
+            roi_id: np.empty(positions.size, dtype=np.float64)
+            for roi_id, positions in sample_positions.items()
+        }
+        pair_offsets = {roi_id: 0 for roi_id in roi_ids}
+        sample_fills = {roi_id: 0 for roi_id in roi_ids}
+
+        for _chunk_id, fpath, chunk, _load_elapsed in self._iter_entry_chunks_for_pass(
+            self.file_list, force_format, "guided_global_fit_sample"
+        ):
+            try:
+                if self._selected_rois is not None:
+                    chunk = self._apply_roi_filter(chunk)
+                channel_index = {
+                    str(name): index for index, name in enumerate(chunk.channel_names)
+                }
+                for roi_id in roi_ids:
+                    index = channel_index.get(roi_id)
+                    if index is None:
+                        continue
+                    uv = np.asarray(chunk.uv_raw[:, index], dtype=np.float64)
+                    sig = np.asarray(chunk.sig_raw[:, index], dtype=np.float64)
+                    finite_indices = np.flatnonzero(np.isfinite(uv) & np.isfinite(sig))
+                    n_finite = int(finite_indices.size)
+                    if n_finite == 0:
+                        continue
+                    global_positions = pair_offsets[roi_id] + np.arange(
+                        n_finite, dtype=np.int64
+                    )
+                    selected = sample_positions[roi_id]
+                    destinations = np.searchsorted(
+                        selected, global_positions, side="left"
+                    )
+                    in_range = destinations < selected.size
+                    matches = np.zeros(n_finite, dtype=bool)
+                    matches[in_range] = (
+                        selected[destinations[in_range]]
+                        == global_positions[in_range]
+                    )
+                    if np.any(matches):
+                        selected_destinations = destinations[matches]
+                        sample_uv[roi_id][selected_destinations] = uv[
+                            finite_indices[matches]
+                        ]
+                        sample_sig[roi_id][selected_destinations] = sig[
+                            finite_indices[matches]
+                        ]
+                        sample_fills[roi_id] += int(np.count_nonzero(matches))
+                    pair_offsets[roi_id] += n_finite
+            except Exception as exc:
+                self._handle_pass_chunk_exception(fpath, "guided_global_fit_sample", exc)
+
+        provenance: dict[str, dict] = {}
+        for roi_id in roi_ids:
+            total_pairs = finite_pair_counts[roi_id]
+            selected = sample_positions[roi_id]
+            if total_pairs <= 0:
+                raise RuntimeError(
+                    "Guided reference-based F0 global fit has no finite paired "
+                    f"UV/signal support for ROI {roi_id!r}."
+                )
+            if pair_offsets[roi_id] != total_pairs or sample_fills[roi_id] != selected.size:
+                raise RuntimeError(
+                    "Guided reference-based F0 global-fit sampling lost paired "
+                    f"samples for ROI {roi_id!r}."
+                )
+            slope, intercept, fit_ok, n_used = compute_global_iso_fit_robust(
+                sample_uv[roi_id],
+                sample_sig[roi_id],
+                max_points=TONIC_GLOBAL_FIT_SAMPLE_CAPACITY,
+                n_iter=GUIDED_REFERENCE_GLOBAL_FIT_N_ITER,
+                z_thresh=GUIDED_REFERENCE_GLOBAL_FIT_Z_THRESH,
+            )
+            if (
+                not fit_ok
+                or not np.isfinite(slope)
+                or not np.isfinite(intercept)
+            ):
+                raise RuntimeError(
+                    "Guided reference-based F0 global fit is scientifically "
+                    f"unusable for ROI {roi_id!r}; no pooled raw-reference "
+                    "fallback is permitted."
+                )
+            self.stats.global_fit_params[roi_id] = {
+                "a": float(slope),
+                "b": float(intercept),
+            }
+            provenance[roi_id] = {
+                "method": GUIDED_REFERENCE_GLOBAL_FIT_METHOD,
+                "apply_method": GUIDED_REFERENCE_GLOBAL_FIT_APPLY_METHOD,
+                "model_identity": GUIDED_REFERENCE_GLOBAL_FIT_POLICY_IDENTITY,
+                "finite_pair_policy": "finite(uv_raw)&finite(sig_raw)",
+                "sampling_policy": "deterministic chronological finite-pair sampling",
+                "max_points": TONIC_GLOBAL_FIT_SAMPLE_CAPACITY,
+                "n_iter": GUIDED_REFERENCE_GLOBAL_FIT_N_ITER,
+                "z_thresh": GUIDED_REFERENCE_GLOBAL_FIT_Z_THRESH,
+                "samples_seen": int(total_pairs),
+                "samples_used": int(n_used),
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "fit_ok": bool(fit_ok),
+                "f0_aggregation": GUIDED_REFERENCE_F0_AGGREGATION,
+                "f0_scope": GUIDED_REFERENCE_F0_SCOPE,
+            }
+
+        self.stats.f0_values.clear()
+        self.stats.method_used = "guided_global_fit_reference_session_median"
+        self._guided_reference_global_fit_provenance = provenance
+
+    def _compute_guided_reference_session_f0(
+        self, chunk: Chunk, *, roi_id: str, roi_index: int, chunk_id: int
+    ) -> tuple[float, int]:
+        params = self.stats.global_fit_params.get(str(roi_id))
+        if not isinstance(params, dict):
+            raise RuntimeError(
+                f"Guided reference-based F0 fit is missing for ROI {roi_id!r}."
+            )
+        fitted = np.asarray(
+            apply_global_fit(
+                chunk.uv_raw[:, roi_index], params["a"], params["b"]
+            ),
+            dtype=np.float64,
+        )
+        finite = np.isfinite(fitted)
+        finite_count = int(np.count_nonzero(finite))
+        if finite_count <= 0:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="guided_global_fit_reference_session_median",
+                reason="no finite fitted-reference values in session",
+            )
+        scalar = float(np.median(fitted[finite]))
+        if not np.isfinite(scalar) or scalar <= float(self.config.f0_min_value):
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="guided_global_fit_reference_session_median",
+                reason="session median fitted-reference F0 is invalid",
+            )
+        self._guided_reference_f0_records_by_roi.setdefault(str(roi_id), []).append(
+            {
+                "unit_kind": "session",
+                "unit_id": self._entry_session_id(str(chunk.source_file)),
+                "chunk_id": int(chunk_id),
+                "source_file": str(chunk.source_file),
+                "roi_id": str(roi_id),
+                "f0": scalar,
+                "finite_fitted_count": finite_count,
+            }
+        )
+        return scalar, finite_count
+
+    def _guided_reference_f0_provenance_payload(self) -> dict:
+        if not self._guided_reference_global_fit_provenance:
+            return {}
+        by_roi = {}
+        for roi_id, fit in self._guided_reference_global_fit_provenance.items():
+            item = dict(fit)
+            item["f0_values"] = [
+                dict(record)
+                for record in self._guided_reference_f0_records_by_roi.get(roi_id, [])
+            ]
+            by_roi[roi_id] = item
+        return {
+            "authority": "current_guided_reference_f0",
+            "by_roi": by_roi,
+        }
+
     def run_pass_1(self, force_format: str = 'auto'):
         """
         Baseline Computation.
@@ -1812,7 +2081,17 @@ class Pipeline:
         method = self.config.baseline_method
         reservoir = baseline.DeterministicReservoir(seed=self.config.seed)
         
-        if method == 'uv_raw_percentile_session':
+        guided_reference_dynamic_map = self._guided_reference_dynamic_strategy_map()
+
+        if guided_reference_dynamic_map:
+            print("Pass 1 (Guided tonic-equivalent global reference fit)...")
+            t_f0 = time.perf_counter()
+            self._run_guided_reference_global_fit_pass1(
+                guided_reference_dynamic_map, force_format
+            )
+            pass1_f0_compute_sec += time.perf_counter() - t_f0
+
+        elif method == 'uv_raw_percentile_session':
             print("Pass 1 (Reservoir)...")
             for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "pass1"):
                 try:
@@ -1923,7 +2202,10 @@ class Pipeline:
             self._add_phasic_detail_bucket("pass1.remainder", max(0.0, pass1_total_sec - pass1_explicit))
             self._set_phasic_metric("pass1.files_seen", len(self.file_list))
             self._set_phasic_metric("pass1.manifest_size", len(self._pass1_manifest))
-            self._set_phasic_metric("pass1.baseline_method", method)
+            self._set_phasic_metric(
+                "pass1.baseline_method",
+                self.stats.method_used or method,
+            )
         
         # Robustness: Check for Missing/Invalid Baselines
         from .core.reporting import append_run_report_warnings
@@ -2128,8 +2410,49 @@ class Pipeline:
                      "effective_parameters": {
                          name: value for name, value in spec.effective_parameters
                      },
-                     "execution_status": "consumed",
+                    "execution_status": "consumed",
                  }
+                 if (
+                    spec.strategy_family == "dynamic_fit"
+                    and self._guided_reference_global_fit_provenance
+                 ):
+                    session_f0, finite_fitted_count = (
+                        self._compute_guided_reference_session_f0(
+                            chunk,
+                            roi_id=roi_name,
+                            roi_index=roi_index,
+                            chunk_id=chunk_id,
+                        )
+                    )
+                    fit_provenance = self._guided_reference_global_fit_provenance.get(
+                        roi_name
+                    )
+                    if fit_provenance is None:
+                        raise RuntimeError(
+                            f"Guided reference F0 provenance is missing for ROI {roi_name!r}."
+                        )
+                    consumed.update(
+                        {
+                            "f0_method": GUIDED_REFERENCE_GLOBAL_FIT_METHOD,
+                            "f0_source": "global_fitted_reference_session_median",
+                            "f0_aggregation": GUIDED_REFERENCE_F0_AGGREGATION,
+                            "f0_scope": GUIDED_REFERENCE_F0_SCOPE,
+                            "f0_value": session_f0,
+                            "f0_finite_fitted_count": finite_fitted_count,
+                            "global_fit_method": GUIDED_REFERENCE_GLOBAL_FIT_METHOD,
+                            "global_fit_policy_identity": GUIDED_REFERENCE_GLOBAL_FIT_POLICY_IDENTITY,
+                            "global_fit_slope": fit_provenance["slope"],
+                            "global_fit_intercept": fit_provenance["intercept"],
+                            "global_fit_max_points": fit_provenance["max_points"],
+                            "global_fit_n_iter": fit_provenance["n_iter"],
+                            "global_fit_z_thresh": fit_provenance["z_thresh"],
+                            "global_fit_n_pairs": fit_provenance["samples_seen"],
+                            "global_fit_n_used": fit_provenance["samples_used"],
+                        }
+                    )
+                    chunk.dff[:, roi_index] = (
+                        100.0 * chunk.delta_f[:, roi_index] / session_f0
+                    )
                  if spec.strategy_family == "signal_only_f0":
                      (
                          canonical_delta_f,
@@ -2391,6 +2714,8 @@ class Pipeline:
     @staticmethod
     def _correction_aware_run_metadata_fields(
         applied_correction_summary: dict | None,
+        *,
+        guided_reference_f0_active: bool = False,
     ) -> dict[str, str]:
         if applied_correction_summary is None:
             return {}
@@ -2398,6 +2723,13 @@ class Pipeline:
             applied_correction_summary.get("classification", "")
         )
         if classification == "all_reference_based":
+            if guided_reference_f0_active:
+                return {
+                    "baseline_method": "guided_global_fit_reference_session_median",
+                    "f0_source": "global_fitted_reference_session_median",
+                    "phasic_uv_fit_method": "dynamic",
+                    "regression_mode": "dynamic",
+                }
             return {}
         if classification == "all_signal_only_f0":
             return {
@@ -2833,6 +3165,7 @@ class Pipeline:
             'global_fit_params': self.stats.global_fit_params,
             # Validation Metadata for Paper Alignment
             'f0_source': self.stats.method_used,
+            'guided_reference_f0_provenance': self._guided_reference_f0_provenance_payload(),
             'phasic_uv_fit_method': 'dynamic', # Strict requirement for this pipeline version
             'f0_is_from_uv_fit': False,        # Constraint: explicit separation
             'regression_window_sec': self.config.window_sec,
@@ -2854,7 +3187,10 @@ class Pipeline:
         }
         run_meta.update(
             self._correction_aware_run_metadata_fields(
-                applied_correction_summary
+                applied_correction_summary,
+                guided_reference_f0_active=bool(
+                    self._guided_reference_global_fit_provenance
+                ),
             )
         )
         if applied_correction_summary is not None:
@@ -2903,7 +3239,11 @@ class Pipeline:
             json.dump(_sanitize_metadata(run_meta), f, indent=2)
         if applied_correction_summary is not None:
             append_applied_correction_summary(
-                output_dir, applied_correction_summary
+                output_dir,
+                applied_correction_summary,
+                guided_reference_f0_active=bool(
+                    self._guided_reference_global_fit_provenance
+                ),
             )
         pass2_run_metadata_write_sec += (time.perf_counter() - t_meta_write)
             
@@ -3419,17 +3759,19 @@ class Pipeline:
         self.qc_summary['invalid_baseline_rois'] = []
         self.qc_summary['baseline_invalid_roi_count'] = 0
         
-        # D2: ROI Union
-        keys_map = list(self.roi_map.keys()) if self.roi_map else []
-        keys_stats = list(self.stats.f0_values.keys())
-        all_known_rois = sorted(list(set(keys_map) | set(keys_stats)))
-        
         t_baseline_check = time.perf_counter()
-        for roi in all_known_rois:
-            f0 = self.stats.f0_values.get(roi, float('nan'))
-            if np.isnan(f0) or np.isinf(f0) or f0 <= self.config.f0_min_value:
-                invalid_rois.append(roi)
-                baseline_warnings.append(f"Invalid F0 for ROI '{roi}': {f0}. (Min allowed: {self.config.f0_min_value})")
+        if not self._guided_reference_global_fit_provenance:
+            # D2: ROI Union.  Current Guided reference-based runs validate each
+            # session denominator at the point it is consumed instead of
+            # treating the legacy stats.f0_values map as authoritative.
+            keys_map = list(self.roi_map.keys()) if self.roi_map else []
+            keys_stats = list(self.stats.f0_values.keys())
+            all_known_rois = sorted(list(set(keys_map) | set(keys_stats)))
+            for roi in all_known_rois:
+                f0 = self.stats.f0_values.get(roi, float('nan'))
+                if np.isnan(f0) or np.isinf(f0) or f0 <= self.config.f0_min_value:
+                    invalid_rois.append(roi)
+                    baseline_warnings.append(f"Invalid F0 for ROI '{roi}': {f0}. (Min allowed: {self.config.f0_min_value})")
                 
         if baseline_warnings:
              append_run_report_warnings(output_dir, baseline_warnings)
@@ -3462,6 +3804,12 @@ class Pipeline:
                 self._continuous_csv_reading,
             )
         if self.mode != "tonic":
+            if self._guided_reference_global_fit_provenance:
+                _append_run_report_section(
+                    output_dir,
+                    "guided_reference_f0_provenance",
+                    self._guided_reference_f0_provenance_payload(),
+                )
             _append_run_report_section(
                 output_dir,
                 "dynamic_fit_slope_warning_summary",

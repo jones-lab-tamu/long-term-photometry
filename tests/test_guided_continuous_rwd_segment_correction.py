@@ -160,7 +160,7 @@ def _artifacts(accepted_case):
         grid,
         block_plan,
         segment_plan,
-        _projected(binding, grid, block_plan),
+        lambda: _projected(binding, grid, block_plan),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )
@@ -227,7 +227,13 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
         subject.REFERENCE_FITTED_CONTROL,
         subject.REFERENCE_SIGNAL_DERIVED_F0,
     ]
-    assert result.per_roi_results[0].scalar_f0 == f0.values[0].scalar_f0
+    expected_segment_fitted = subject.apply_global_fit(
+        raw.control_values[:, 0],
+        f0.values[0].global_slope,
+        f0.values[0].global_intercept,
+    )
+    expected_segment_f0 = float(np.median(expected_segment_fitted[np.isfinite(expected_segment_fitted)]))
+    assert result.per_roi_results[0].scalar_f0 == expected_segment_f0
     assert result.per_roi_results[1].scalar_f0 is None
     np.testing.assert_array_equal(result.raw_control_values, raw.control_values)
     np.testing.assert_array_equal(result.raw_signal_values, raw.signal_values)
@@ -261,7 +267,7 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
     np.testing.assert_allclose(result.delta_f_values[:, 0], expected_delta[:, 0], rtol=1e-14, atol=1e-14)
     np.testing.assert_allclose(
         result.dff_values[:, 0],
-        100.0 * expected_delta[:, 0] / f0.values[0].scalar_f0,
+        100.0 * expected_delta[:, 0] / expected_segment_f0,
         rtol=1e-11,
         atol=1e-12,
     )
@@ -306,6 +312,78 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
     ):
         assert array.dtype == np.float64
         assert not array.flags.writeable
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "global_linear_regression",
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    ],
+)
+def test_reference_f0_is_a_segment_local_global_fit_median(
+    accepted_case, strategy
+):
+    binding, grid, draft, contract = _variant(accepted_case, strategy)
+    block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
+    segment_plan = c4a.build_guided_continuous_rwd_correction_segment_plan(
+        binding,
+        grid,
+        accepted_draft=draft,
+        startup_mapping_contract=contract,
+    )
+    projected = tuple(_projected(binding, grid, block_plan))
+    authority = c4a.prepare_guided_continuous_rwd_dynamic_f0_authority(
+        binding,
+        grid,
+        block_plan,
+        segment_plan,
+        lambda: iter(projected),
+        accepted_draft=draft,
+        startup_mapping_contract=contract,
+    )
+    raw_segments = tuple(
+        c4a.iter_assemble_guided_continuous_rwd_correction_segments(
+            binding,
+            grid,
+            block_plan,
+            segment_plan,
+            iter(projected),
+            accepted_draft=draft,
+            startup_mapping_contract=contract,
+        )
+    )
+    assert len(raw_segments) >= 2
+    results = [
+        subject.correct_guided_continuous_rwd_segment(
+            binding,
+            grid,
+            segment_plan,
+            authority,
+            raw,
+            accepted_draft=draft,
+            startup_mapping_contract=contract,
+        )
+        for raw in (raw_segments[0], raw_segments[-1])
+    ]
+    expected_f0 = []
+    for result, raw in zip(results, (raw_segments[0], raw_segments[-1])):
+        fitted = subject.apply_global_fit(
+            raw.control_values[:, 0],
+            authority.values[0].global_slope,
+            authority.values[0].global_intercept,
+        )
+        scalar = float(np.median(fitted[np.isfinite(fitted)]))
+        expected_f0.append(scalar)
+        assert result.per_roi_results[0].scalar_f0 == scalar
+        np.testing.assert_allclose(
+            result.dff_values[:, 0],
+            100.0 * result.delta_f_values[:, 0] / scalar,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    assert expected_f0[0] != expected_f0[1]
 
 
 @pytest.mark.parametrize(
@@ -484,7 +562,15 @@ def test_continuous_dynamic_roi_applies_its_effective_parameters_to_filter_and_f
         0,
         spec,
         config,
-        float(f0.values[0].scalar_f0),
+        float(
+            np.median(
+                subject.apply_global_fit(
+                    raw.control_values[:, 0],
+                    f0.values[0].global_slope,
+                    f0.values[0].global_intercept,
+                )
+            )
+        ),
         10.0,
     )
 
@@ -583,7 +669,11 @@ def test_adjacent_segments_are_independent_and_neighbor_changes_do_not_leak(acce
         binding, grid, accepted_draft=draft, startup_mapping_contract=contract
     )
     f0 = c4a.prepare_guided_continuous_rwd_dynamic_f0_authority(
-        binding, grid, block_plan, plan, _projected(binding, grid, block_plan),
+        binding,
+        grid,
+        block_plan,
+        plan,
+        lambda: _projected(binding, grid, block_plan),
         accepted_draft=draft, startup_mapping_contract=contract,
     )
     raw_segments = list(c4a.iter_assemble_guided_continuous_rwd_correction_segments(

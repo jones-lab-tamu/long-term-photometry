@@ -12,6 +12,7 @@ import numpy as np
 
 from photometry_pipeline.config import Config
 from photometry_pipeline.core import preprocessing, regression
+from photometry_pipeline.core.tonic_dff import apply_global_fit
 from photometry_pipeline.core.signal_only_f0_candidate import (
     DEFAULTS as _SIGNAL_ONLY_F0_CANDIDATE_DEFAULTS,
 )
@@ -26,6 +27,7 @@ from photometry_pipeline.guided_continuous_rwd_correction_segments import (
     SIGNAL_ONLY_STRATEGY,
     GuidedContinuousRwdCorrectionSegmentPlan,
     GuidedContinuousRwdDynamicF0Authority,
+    GuidedContinuousRwdDynamicF0Value,
     GuidedContinuousRwdRawCorrectionSegment,
     _resolve_accepted_correction_context,
     _validate_dynamic_f0_authority,
@@ -75,8 +77,9 @@ SETTINGS_IDENTITY_DOMAIN = "guided-continuous-rwd-segment-correction-settings:v1
 # baseline_subtract_before_fit only applies to the rolling_* dynamic-fit
 # modes, config.dynamic_fit_mode is never consulted because C4b always
 # supplies an explicit per_roi_correction map, and baseline_method/
-# baseline_percentile/seed only feed C4a's F0 reservoir, already bound via
-# fixed_correction_settings_identity and dynamic_f0_authority_identity).
+# baseline_percentile/seed are legacy fixed-input fields retained in the
+# accepted Guided binding, but are not consumed by the tonic-equivalent C4a F0
+# authority or this segment-local correction path.
 _C4B_DYNAMIC_FIT_SETTING_NAMES = (
     "lowpass_hz",
     "filter_order",
@@ -239,6 +242,19 @@ class GuidedContinuousRwdPerRoiCorrectionResult:
     fallback_path: tuple[str, ...]
     qc_json: str
     scalar_f0: float | None
+    f0_method: str | None = None
+    f0_aggregation: str | None = None
+    f0_scope: str | None = None
+    f0_finite_fitted_count: int | None = None
+    global_fit_method: str | None = None
+    global_fit_policy_identity: str | None = None
+    global_fit_slope: float | None = None
+    global_fit_intercept: float | None = None
+    global_fit_max_points: int | None = None
+    global_fit_n_iter: int | None = None
+    global_fit_z_thresh: float | None = None
+    global_fit_n_pairs: int | None = None
+    global_fit_n_used: int | None = None
 
 
 @dataclass(frozen=True)
@@ -483,6 +499,46 @@ def _dynamic_qc_and_fallback(
     return applied, path, _qc_json({"detail": detail, "warnings": warnings})
 
 
+def _compute_dynamic_segment_f0(
+    raw_segment: GuidedContinuousRwdRawCorrectionSegment,
+    roi_index: int,
+    authority_value: GuidedContinuousRwdDynamicF0Value,
+    f0_min_value: float,
+) -> tuple[float, int]:
+    """Evaluate the recording-global model on one raw segment and take its median."""
+    if (
+        not math.isfinite(authority_value.global_slope)
+        or not math.isfinite(authority_value.global_intercept)
+    ):
+        _raise(
+            "invalid_dynamic_f0",
+            "Dynamic ROI global-fit coefficients are invalid.",
+            roi=authority_value.roi_id,
+            segment_index=raw_segment.segment_index,
+        )
+    fitted = np.asarray(
+        apply_global_fit(
+            raw_segment.control_values[:, roi_index],
+            authority_value.global_slope,
+            authority_value.global_intercept,
+        ),
+        dtype=np.float64,
+    )
+    finite = np.isfinite(fitted)
+    finite_count = int(np.count_nonzero(finite))
+    scalar = float(np.median(fitted[finite])) if finite_count else float("nan")
+    if not math.isfinite(scalar) or scalar <= float(f0_min_value):
+        _raise(
+            "invalid_dynamic_f0",
+            "Dynamic ROI segment median fitted-reference F0 is invalid.",
+            roi=authority_value.roi_id,
+            segment_index=raw_segment.segment_index,
+            finite_fitted_count=finite_count,
+            f0_min_value=float(f0_min_value),
+        )
+    return scalar, finite_count
+
+
 def _correct_dynamic_roi(
     raw_segment: GuidedContinuousRwdRawCorrectionSegment,
     roi_index: int,
@@ -644,7 +700,7 @@ def _validate_result(
         _raise("segment_strategy_mismatch", "Per-ROI result contract is invalid.")
     if tuple(item.roi_id for item in result.per_roi_results) != result.included_roi_ids:
         _raise("segment_strategy_mismatch", "Per-ROI result order is not canonical.")
-    value_by_roi = {item.roi_id: item.scalar_f0 for item in dynamic_f0_authority.values}
+    value_by_roi = {item.roi_id: item for item in dynamic_f0_authority.values}
     binding_by_roi = {item.roi_id: item for item in accepted.bindings}
     for index, item in enumerate(result.per_roi_results):
         binding = binding_by_roi[item.roi_id]
@@ -678,8 +734,35 @@ def _validate_result(
         if not np.allclose(result.delta_f_values[:, index], expected_delta, rtol=1e-12, atol=1e-12):
             _raise("result_identity_mismatch", "Delta-F formula is inconsistent.", roi=item.roi_id)
         if item.strategy_family == "dynamic_fit":
-            scalar = value_by_roi.get(item.roi_id)
-            if item.reference_kind != REFERENCE_FITTED_CONTROL or item.scalar_f0 != scalar:
+            authority_value = value_by_roi.get(item.roi_id)
+            if authority_value is None:
+                _raise("invalid_dynamic_f0", "Dynamic ROI global-fit evidence is missing.", roi=item.roi_id)
+            scalar, finite_fitted_count = _compute_dynamic_segment_f0(
+                raw_segment,
+                index,
+                authority_value,
+                dynamic_f0_authority.f0_min_value,
+            )
+            if (
+                item.reference_kind != REFERENCE_FITTED_CONTROL
+                or item.scalar_f0 != scalar
+                or item.f0_method != dynamic_f0_authority.global_fit_method
+                or item.f0_aggregation != dynamic_f0_authority.f0_aggregation
+                or item.f0_scope != dynamic_f0_authority.f0_scope
+                or item.global_fit_method != dynamic_f0_authority.global_fit_method
+                or item.global_fit_policy_identity
+                != dynamic_f0_authority.global_fit_policy_identity
+                or item.global_fit_slope != authority_value.global_slope
+                or item.global_fit_intercept != authority_value.global_intercept
+                or item.global_fit_max_points
+                != dynamic_f0_authority.global_fit_max_points
+                or item.global_fit_n_iter != dynamic_f0_authority.global_fit_n_iter
+                or item.global_fit_z_thresh != dynamic_f0_authority.global_fit_z_thresh
+                or item.global_fit_n_pairs
+                != authority_value.global_fit_n_pairs
+                or item.global_fit_n_used != authority_value.global_fit_n_used
+                or item.f0_finite_fitted_count != finite_fitted_count
+            ):
                 _raise("invalid_dynamic_f0", "Dynamic ROI denominator or reference kind is invalid.", roi=item.roi_id)
             expected_dff = 100.0 * result.delta_f_values[:, index] / scalar
         else:
@@ -748,7 +831,7 @@ def correct_guided_continuous_rwd_segment(
         ) from exc
     _check_cancellation(cancellation_requested)
 
-    f0_by_roi = {item.roi_id: item.scalar_f0 for item in dynamic_f0_authority.values}
+    f0_by_roi = {item.roi_id: item for item in dynamic_f0_authority.values}
     dynamic_expected = tuple(
         item.roi_id for item in accepted.bindings if item.strategy_family == "dynamic_fit"
     )
@@ -765,11 +848,15 @@ def correct_guided_continuous_rwd_segment(
         _check_cancellation(cancellation_requested)
         spec = accepted.correction_specs[binding.roi_id]
         if binding.strategy_family == "dynamic_fit":
-            scalar = f0_by_roi.get(binding.roi_id)
-            if scalar is None:
-                _raise("missing_dynamic_f0", "Dynamic ROI lacks finalized scalar F0.", roi=binding.roi_id)
-            if not math.isfinite(scalar) or scalar <= dynamic_f0_authority.f0_min_value:
-                _raise("invalid_dynamic_f0", "Dynamic ROI scalar F0 is invalid.", roi=binding.roi_id)
+            authority_value = f0_by_roi.get(binding.roi_id)
+            if authority_value is None:
+                _raise("missing_dynamic_f0", "Dynamic ROI lacks finalized global-fit F0 evidence.", roi=binding.roi_id)
+            scalar, finite_fitted_count = _compute_dynamic_segment_f0(
+                raw,
+                roi_index,
+                authority_value,
+                dynamic_f0_authority.f0_min_value,
+            )
             ref, delta, normalized, applied, path, qc = _correct_dynamic_roi(
                 raw,
                 roi_index,
@@ -780,6 +867,21 @@ def correct_guided_continuous_rwd_segment(
             )
             reference_kind = REFERENCE_FITTED_CONTROL
             scalar_result: float | None = scalar
+            f0_provenance = {
+                "f0_method": dynamic_f0_authority.global_fit_method,
+                "f0_aggregation": dynamic_f0_authority.f0_aggregation,
+                "f0_scope": dynamic_f0_authority.f0_scope,
+                "f0_finite_fitted_count": finite_fitted_count,
+                "global_fit_method": dynamic_f0_authority.global_fit_method,
+                "global_fit_policy_identity": dynamic_f0_authority.global_fit_policy_identity,
+                "global_fit_slope": authority_value.global_slope,
+                "global_fit_intercept": authority_value.global_intercept,
+                "global_fit_max_points": dynamic_f0_authority.global_fit_max_points,
+                "global_fit_n_iter": dynamic_f0_authority.global_fit_n_iter,
+                "global_fit_z_thresh": dynamic_f0_authority.global_fit_z_thresh,
+                "global_fit_n_pairs": authority_value.global_fit_n_pairs,
+                "global_fit_n_used": authority_value.global_fit_n_used,
+            }
         elif binding.selected_strategy == SIGNAL_ONLY_STRATEGY:
             try:
                 signal_only = compute_signal_only_f0_production(
@@ -815,6 +917,7 @@ def correct_guided_continuous_rwd_segment(
             )
             reference_kind = REFERENCE_SIGNAL_DERIVED_F0
             scalar_result = None
+            f0_provenance = {}
         else:
             _raise("segment_strategy_mismatch", "Accepted ROI strategy is unsupported.", roi=binding.roi_id)
         reference[:, roi_index] = ref
@@ -834,6 +937,7 @@ def correct_guided_continuous_rwd_segment(
                 fallback_path=path,
                 qc_json=qc,
                 scalar_f0=scalar_result,
+                **f0_provenance,
             )
         )
         _check_cancellation(cancellation_requested)

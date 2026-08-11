@@ -1590,7 +1590,7 @@ class _GuidedContinuousRwdPreparationWorker(QObject):
                     target_grid,
                     block_plan,
                     segment_plan,
-                    iter_project_guided_continuous_rwd_blocks(
+                    lambda: iter_project_guided_continuous_rwd_blocks(
                         binding, target_grid, block_plan
                     ),
                     accepted_draft=draft,

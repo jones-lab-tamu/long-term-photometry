@@ -134,7 +134,7 @@ def _pass_inputs(case):
         grid,
         block_plan,
         segment_plan,
-        iter_project_guided_continuous_rwd_blocks(binding, grid, block_plan),
+        lambda: iter_project_guided_continuous_rwd_blocks(binding, grid, block_plan),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )

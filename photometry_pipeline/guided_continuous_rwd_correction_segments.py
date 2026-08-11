@@ -18,8 +18,8 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 import numpy as np
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.baseline import DeterministicReservoir
 from photometry_pipeline.core.preprocessing import get_lowpass_sos
+from photometry_pipeline.core.tonic_dff import apply_global_fit, compute_global_iso_fit_robust
 from photometry_pipeline.core.types import PerRoiCorrectionSpec
 from photometry_pipeline.guided_continuous_rwd_block_plan import (
     GuidedContinuousRwdBlockPlan,
@@ -77,10 +77,10 @@ RAW_SEGMENT_SCHEMA_NAME = "guided_continuous_rwd_raw_correction_segment"
 RAW_SEGMENT_SCHEMA_VERSION = "v1"
 
 F0_SCHEMA_NAME = "guided_continuous_rwd_dynamic_f0_authority"
-F0_SCHEMA_VERSION = "v1"
-F0_POLICY_NAME = "raw-control-deterministic-reservoir-percentile"
+F0_SCHEMA_VERSION = "v2"
+F0_POLICY_NAME = "tonic-equivalent-global-fit-local-median"
 F0_POLICY_VERSION = "v1"
-F0_IDENTITY_DOMAIN = "guided-continuous-rwd-dynamic-f0-authority:v1"
+F0_IDENTITY_DOMAIN = "guided-continuous-rwd-dynamic-f0-authority:v2"
 CORRECTION_CONTRACT_IDENTITY_DOMAIN = (
     "guided-continuous-rwd-correction-contract:v1"
 )
@@ -91,8 +91,14 @@ DYNAMIC_STRATEGIES = (
     "adaptive_event_gated_regression",
 )
 SIGNAL_ONLY_STRATEGY = "signal_only_f0"
-FINITE_VALUE_POLICY = "discard-nonfinite-before-reservoir"
-STORAGE_DTYPE = "float32"
+FINITE_VALUE_POLICY = "finite(uv_raw)&finite(sig_raw); chronological"
+GLOBAL_FIT_METHOD = "compute_global_iso_fit_robust"
+GLOBAL_FIT_POLICY_IDENTITY = "tonic-equivalent-global-isosbestic-robust-v1"
+GLOBAL_FIT_MAX_POINTS = 200_000
+GLOBAL_FIT_N_ITER = 3
+GLOBAL_FIT_Z_THRESH = 4.0
+F0_AGGREGATION = "median"
+F0_SCOPE = "segment"
 
 ERROR_CATEGORIES = frozenset(
     {
@@ -199,6 +205,10 @@ class GuidedContinuousRwdDynamicF0Value:
     finite_value_count: int
     retained_value_count: int
     scalar_f0: float
+    global_slope: float
+    global_intercept: float
+    global_fit_n_pairs: int
+    global_fit_n_used: int
 
 
 @dataclass(frozen=True)
@@ -217,10 +227,13 @@ class GuidedContinuousRwdDynamicF0Authority:
     canonical_roi_order: tuple[str, ...]
     dynamic_roi_ids: tuple[str, ...]
     correction_bindings: tuple[GuidedContinuousRwdCorrectionBinding, ...]
-    percentile: float
-    seed: int
-    capacity: int
-    storage_dtype: str
+    f0_aggregation: str
+    f0_scope: str
+    global_fit_method: str
+    global_fit_policy_identity: str
+    global_fit_max_points: int
+    global_fit_n_iter: int
+    global_fit_z_thresh: float
     finite_value_policy: str
     values: tuple[GuidedContinuousRwdDynamicF0Value, ...]
     f0_min_value: float
@@ -1086,6 +1099,17 @@ def iter_assemble_guided_continuous_rwd_correction_segments(
         _raise("target_coverage_mismatch", "Assembled segments do not cover the target grid.")
 
 
+def _global_fit_sample_positions(n_pairs: int) -> np.ndarray:
+    """Match the bounded deterministic sampling in the tonic fit helper."""
+    n_pairs = int(n_pairs)
+    if n_pairs <= GLOBAL_FIT_MAX_POINTS:
+        return np.arange(max(0, n_pairs), dtype=np.int64)
+    step = n_pairs / float(GLOBAL_FIT_MAX_POINTS)
+    positions = np.arange(0, n_pairs, step).astype(np.int64)
+    positions = np.unique(positions)
+    return positions[positions < n_pairs]
+
+
 def _f0_authority_payload(
     authority: GuidedContinuousRwdDynamicF0Authority,
 ) -> dict[str, Any]:
@@ -1227,29 +1251,41 @@ def _validate_dynamic_f0_authority(
     if tuple(item.roi_id for item in authority.values) != authority.dynamic_roi_ids:
         _raise("invalid_final_f0", "F0 value order does not match the dynamic ROI subset.")
     binding_by_roi = {item.roi_id: item for item in authority.correction_bindings}
-    if authority.storage_dtype != STORAGE_DTYPE or authority.finite_value_policy != FINITE_VALUE_POLICY:
-        _raise("invalid_final_f0", "F0 estimator storage policy is invalid.")
     if (
-        not _integer(authority.capacity)
-        or authority.capacity <= 0
-        or not _integer(authority.seed)
+        authority.f0_aggregation != F0_AGGREGATION
+        or authority.f0_scope != F0_SCOPE
+        or authority.global_fit_method != GLOBAL_FIT_METHOD
+        or authority.global_fit_policy_identity != GLOBAL_FIT_POLICY_IDENTITY
+        or not _integer(authority.global_fit_max_points)
+        or authority.global_fit_max_points != GLOBAL_FIT_MAX_POINTS
+        or not _integer(authority.global_fit_n_iter)
+        or authority.global_fit_n_iter != GLOBAL_FIT_N_ITER
+        or not math.isfinite(authority.global_fit_z_thresh)
+        or authority.global_fit_z_thresh != GLOBAL_FIT_Z_THRESH
         or not math.isfinite(authority.f0_min_value)
         or authority.f0_min_value < 0.0
         or type(authority.finalized) is not bool
     ):
-        _raise("invalid_final_f0", "F0 reservoir capacity is invalid.")
-    if not math.isfinite(authority.percentile) or not 0.0 <= authority.percentile <= 100.0:
-        _raise("invalid_final_f0", "F0 percentile is invalid.")
+        _raise("invalid_final_f0", "F0 global-fit or aggregation policy is invalid.")
+    if authority.finite_value_policy != FINITE_VALUE_POLICY:
+        _raise("invalid_final_f0", "F0 finite-pair policy is invalid.")
     for value in authority.values:
         if (
             not _integer(value.finite_value_count)
             or value.finite_value_count <= 0
-            or value.retained_value_count != min(value.finite_value_count, authority.capacity)
+            or value.retained_value_count
+            != min(value.finite_value_count, authority.global_fit_max_points)
             or not math.isfinite(value.scalar_f0)
             or value.scalar_f0 <= authority.f0_min_value
+            or not math.isfinite(value.global_slope)
+            or not math.isfinite(value.global_intercept)
+            or value.global_fit_n_pairs != value.finite_value_count
+            or not _integer(value.global_fit_n_used)
+            or value.global_fit_n_used <= 0
+            or value.global_fit_n_used > authority.global_fit_max_points
             or value.strategy != binding_by_roi[value.roi_id].selected_strategy
         ):
-            _raise("invalid_final_f0", "F0 scalar evidence is invalid.", roi=value.roi_id)
+            _raise("invalid_final_f0", "F0 global-fit evidence is invalid.", roi=value.roi_id)
     if authority.dynamic_roi_ids and authority.completion_state != "complete_source_verified":
         _raise("invalid_final_f0", "Dynamic F0 authority lacks verified source completion.")
     if not authority.dynamic_roi_ids and authority.completion_state != "not_required_all_signal_only":
@@ -1263,13 +1299,13 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
     target_grid: GuidedContinuousRwdTargetGridDescription,
     block_plan: GuidedContinuousRwdBlockPlan,
     segment_plan: GuidedContinuousRwdCorrectionSegmentPlan,
-    projected_blocks: Iterable[GuidedContinuousRwdProjectedBlock],
+    projected_blocks_factory: Callable[[], Iterable[GuidedContinuousRwdProjectedBlock]],
     *,
     accepted_draft: GuidedNewAnalysisDraftPlan,
     startup_mapping_contract: GuidedExecutionStartupMappingContract,
     cancellation_requested: Callable[[], bool] | None = None,
 ) -> GuidedContinuousRwdDynamicF0Authority:
-    """Consume one complete C3b traversal and finalize dynamic raw-control F0."""
+    """Consume two complete C3b traversals and finalize dynamic raw-control F0."""
     _check_cancellation(cancellation_requested)
     try:
         _validate_authorities(review_binding, target_grid, block_plan)
@@ -1291,32 +1327,74 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
     )
     values: tuple[GuidedContinuousRwdDynamicF0Value, ...]
     completion_state: str
-    percentile = float(config.baseline_percentile)
     threshold = float(config.f0_min_value)
-    capacity = DeterministicReservoir(seed=config.seed).capacity
     if (
-        config.baseline_method != "uv_raw_percentile_session"
-        or
-        not math.isfinite(percentile)
-        or not 0.0 <= percentile <= 100.0
-        or not math.isfinite(threshold)
+        not math.isfinite(threshold)
         or threshold < 0.0
-        or not _integer(config.seed)
     ):
         _raise("invalid_correction_settings", "F0 estimator settings are invalid.")
     if not dynamic_roi_ids:
         values = ()
         completion_state = "not_required_all_signal_only"
     else:
-        reservoir = DeterministicReservoir(seed=config.seed, capacity=capacity)
         roi_indices = {roi_id: roi_order.index(roi_id) for roi_id in dynamic_roi_ids}
+        finite_counts = {roi_id: 0 for roi_id in dynamic_roi_ids}
+        try:
+            count_segments = iter_assemble_guided_continuous_rwd_correction_segments(
+                review_binding,
+                target_grid,
+                block_plan,
+                segment_plan,
+                projected_blocks_factory(),
+                accepted_draft=accepted_draft,
+                startup_mapping_contract=startup_mapping_contract,
+                cancellation_requested=cancellation_requested,
+            )
+            for segment in count_segments:
+                _check_cancellation(cancellation_requested)
+                for roi_id in dynamic_roi_ids:
+                    _check_cancellation(cancellation_requested)
+                    roi_index = roi_indices[roi_id]
+                    finite_counts[roi_id] += int(
+                        np.count_nonzero(
+                            np.isfinite(segment.control_values[:, roi_index])
+                            & np.isfinite(segment.signal_values[:, roi_index])
+                        )
+                    )
+                _check_cancellation(cancellation_requested)
+        except GuidedContinuousRwdCorrectionSegmentError:
+            raise
+        except ContinuousRwdProjectionReaderError as exc:
+            if exc.category == "projection_interrupted":
+                raise GuidedContinuousRwdCorrectionSegmentError(
+                    "f0_preparation_interrupted", "C3b projection was cancelled."
+                ) from exc
+            raise GuidedContinuousRwdCorrectionSegmentError(
+                "source_verification_failed", "C3b source verification failed."
+            ) from exc
+        _check_cancellation(cancellation_requested)
+
+        selected_positions = {
+            roi_id: _global_fit_sample_positions(finite_counts[roi_id])
+            for roi_id in dynamic_roi_ids
+        }
+        sample_uv = {
+            roi_id: np.empty(selected_positions[roi_id].size, dtype=np.float64)
+            for roi_id in dynamic_roi_ids
+        }
+        sample_sig = {
+            roi_id: np.empty(selected_positions[roi_id].size, dtype=np.float64)
+            for roi_id in dynamic_roi_ids
+        }
+        pair_offsets = {roi_id: 0 for roi_id in dynamic_roi_ids}
+        sample_fills = {roi_id: 0 for roi_id in dynamic_roi_ids}
         try:
             segments = iter_assemble_guided_continuous_rwd_correction_segments(
                 review_binding,
                 target_grid,
                 block_plan,
                 segment_plan,
-                projected_blocks,
+                projected_blocks_factory(),
                 accepted_draft=accepted_draft,
                 startup_mapping_contract=startup_mapping_contract,
                 cancellation_requested=cancellation_requested,
@@ -1325,7 +1403,40 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
                 _check_cancellation(cancellation_requested)
                 for roi_id in dynamic_roi_ids:
                     _check_cancellation(cancellation_requested)
-                    reservoir.add(roi_id, segment.control_values[:, roi_indices[roi_id]])
+                    roi_index = roi_indices[roi_id]
+                    uv = np.asarray(
+                        segment.control_values[:, roi_index], dtype=np.float64
+                    )
+                    sig = np.asarray(
+                        segment.signal_values[:, roi_index], dtype=np.float64
+                    )
+                    finite_indices = np.flatnonzero(np.isfinite(uv) & np.isfinite(sig))
+                    n_finite = int(finite_indices.size)
+                    if n_finite <= 0:
+                        continue
+                    global_positions = pair_offsets[roi_id] + np.arange(
+                        n_finite, dtype=np.int64
+                    )
+                    selected = selected_positions[roi_id]
+                    destinations = np.searchsorted(
+                        selected, global_positions, side="left"
+                    )
+                    in_range = destinations < selected.size
+                    matches = np.zeros(n_finite, dtype=bool)
+                    matches[in_range] = (
+                        selected[destinations[in_range]]
+                        == global_positions[in_range]
+                    )
+                    if np.any(matches):
+                        selected_destinations = destinations[matches]
+                        sample_uv[roi_id][selected_destinations] = uv[
+                            finite_indices[matches]
+                        ]
+                        sample_sig[roi_id][selected_destinations] = sig[
+                            finite_indices[matches]
+                        ]
+                        sample_fills[roi_id] += int(np.count_nonzero(matches))
+                    pair_offsets[roi_id] += n_finite
                 _check_cancellation(cancellation_requested)
         except GuidedContinuousRwdCorrectionSegmentError:
             raise
@@ -1341,8 +1452,9 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
         result_values = []
         binding_by_roi = {item.roi_id: item for item in bindings}
         for roi_id in dynamic_roi_ids:
-            finite_count = reservoir.count.get(roi_id, 0)
-            retained_count = min(finite_count, capacity)
+            finite_count = finite_counts[roi_id]
+            selected = selected_positions[roi_id]
+            retained_count = int(selected.size)
             strategy = binding_by_roi[roi_id].selected_strategy
             if finite_count <= 0:
                 _raise(
@@ -1352,22 +1464,58 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
                     strategy=strategy,
                     finite_count=finite_count,
                     retained_count=retained_count,
-                    percentile=percentile,
                     threshold=threshold,
                     reason="no_finite_raw_control_values",
                 )
-            scalar = float(reservoir.get_percentile(roi_id, percentile))
-            if not math.isfinite(scalar) or scalar <= threshold:
+            if (
+                pair_offsets[roi_id] != finite_count
+                or sample_fills[roi_id] != retained_count
+            ):
                 _raise(
                     "invalid_final_f0",
-                    "Dynamic ROI finalized F0 is nonfinite or below threshold.",
+                    "Dynamic ROI finite-pair sampling is incomplete.",
+                    roi=roi_id,
+                    finite_count=finite_count,
+                    retained_count=retained_count,
+                    reason="finite_pair_sampling_mismatch",
+                )
+            slope, intercept, fit_ok, n_used = compute_global_iso_fit_robust(
+                sample_uv[roi_id],
+                sample_sig[roi_id],
+                max_points=GLOBAL_FIT_MAX_POINTS,
+                n_iter=GLOBAL_FIT_N_ITER,
+                z_thresh=GLOBAL_FIT_Z_THRESH,
+            )
+            if (
+                not fit_ok
+                or not math.isfinite(float(slope))
+                or not math.isfinite(float(intercept))
+            ):
+                _raise(
+                    "invalid_final_f0",
+                    "Dynamic ROI tonic-equivalent global fit is unusable.",
                     roi=roi_id,
                     strategy=strategy,
                     finite_count=finite_count,
                     retained_count=retained_count,
-                    percentile=percentile,
                     threshold=threshold,
-                    reason="invalid_scalar_f0",
+                    reason="global_fit_failed",
+                )
+            fitted_sample = apply_global_fit(
+                sample_uv[roi_id], float(slope), float(intercept)
+            )
+            fitted_finite = np.isfinite(fitted_sample)
+            scalar = float(np.median(fitted_sample[fitted_finite])) if np.any(fitted_finite) else float("nan")
+            if not math.isfinite(scalar) or scalar <= threshold:
+                _raise(
+                    "invalid_final_f0",
+                    "Dynamic ROI global fitted-reference evidence is invalid.",
+                    roi=roi_id,
+                    strategy=strategy,
+                    finite_count=finite_count,
+                    retained_count=retained_count,
+                    threshold=threshold,
+                    reason="invalid_global_fitted_reference_median",
                 )
             result_values.append(
                 GuidedContinuousRwdDynamicF0Value(
@@ -1376,6 +1524,10 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
                     finite_value_count=finite_count,
                     retained_value_count=retained_count,
                     scalar_f0=scalar,
+                    global_slope=float(slope),
+                    global_intercept=float(intercept),
+                    global_fit_n_pairs=finite_count,
+                    global_fit_n_used=int(n_used),
                 )
             )
         values = tuple(result_values)
@@ -1396,10 +1548,13 @@ def prepare_guided_continuous_rwd_dynamic_f0_authority(
         canonical_roi_order=roi_order,
         dynamic_roi_ids=dynamic_roi_ids,
         correction_bindings=bindings,
-        percentile=percentile,
-        seed=config.seed,
-        capacity=capacity,
-        storage_dtype=STORAGE_DTYPE,
+        f0_aggregation=F0_AGGREGATION,
+        f0_scope=F0_SCOPE,
+        global_fit_method=GLOBAL_FIT_METHOD,
+        global_fit_policy_identity=GLOBAL_FIT_POLICY_IDENTITY,
+        global_fit_max_points=GLOBAL_FIT_MAX_POINTS,
+        global_fit_n_iter=GLOBAL_FIT_N_ITER,
+        global_fit_z_thresh=GLOBAL_FIT_Z_THRESH,
         finite_value_policy=FINITE_VALUE_POLICY,
         values=values,
         f0_min_value=threshold,

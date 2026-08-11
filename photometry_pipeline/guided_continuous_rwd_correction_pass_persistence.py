@@ -92,6 +92,20 @@ def _per_roi_consumed_metadata(
             "applied_strategy": result.applied_strategy,
             "fallback_path": ";".join(result.fallback_path),
             "qc_json": result.qc_json,
+            "f0_method": result.f0_method,
+            "f0_aggregation": result.f0_aggregation,
+            "f0_scope": result.f0_scope,
+            "f0_value": result.scalar_f0,
+            "f0_finite_fitted_count": result.f0_finite_fitted_count,
+            "global_fit_method": result.global_fit_method,
+            "global_fit_policy_identity": result.global_fit_policy_identity,
+            "global_fit_slope": result.global_fit_slope,
+            "global_fit_intercept": result.global_fit_intercept,
+            "global_fit_max_points": result.global_fit_max_points,
+            "global_fit_n_iter": result.global_fit_n_iter,
+            "global_fit_z_thresh": result.global_fit_z_thresh,
+            "global_fit_n_pairs": result.global_fit_n_pairs,
+            "global_fit_n_used": result.global_fit_n_used,
         }
         if result.strategy_family == "signal_only_f0":
             baseline_by_roi[result.roi_id] = np.asarray(

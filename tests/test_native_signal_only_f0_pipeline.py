@@ -590,10 +590,10 @@ def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path, m
 
 def test_real_pipeline_run_mixed_four_strategy_map_preserves_roi_identity(tmp_path):
     source = tmp_path / "input" / "2024_01_01-00_00_00" / "fluorescence.csv"
-    _write_rwd_four_rois(source)
+    _write_rwd_four_rois(source, n=1201)
     cfg = Config(
         target_fs_hz=10.0,
-        chunk_duration_sec=20.0,
+        chunk_duration_sec=120.0,
         rwd_time_col="TimeStamp",
         uv_suffix="-410",
         sig_suffix="-470",
@@ -690,8 +690,8 @@ def test_real_pipeline_feature_extraction_receives_canonical_selected_traces(
     assert set(captured_features[0]["roi"].astype(str)) == {"Region0"}
 
     mixed_source = tmp_path / "mixed_input" / "2024_01_01-00_00_00" / "fluorescence.csv"
-    _write_rwd_four_rois(mixed_source)
-    mixed_cfg = replace(cfg)
+    _write_rwd_four_rois(mixed_source, n=1201)
+    mixed_cfg = replace(cfg, chunk_duration_sec=120.0)
     mixed_map = {
         "Region0": PerRoiCorrectionSpec(
             roi_id="Region0",

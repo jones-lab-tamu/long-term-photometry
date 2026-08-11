@@ -64,7 +64,8 @@ from gui.synthetic_demo_generator import (  # noqa: E402
 # of that same rhythm, low enough to look clearly different but still well
 # within what Slow Signal analysis recovers. Both demos ship the same
 # amplitudes, so one pair of scales covers both modes.
-TONIC_SCALES = {"high": 1.0, "low": 0.25}
+# TONIC_SCALES = {"high": 1.0, "low": 0.25}
+TONIC_SCALES = {"high": 1.0, "low": 0.01}
 INTERMITTENT = "intermittent"
 CONTINUOUS = "continuous"
 SECONDS_PER_DAY = 86400.0

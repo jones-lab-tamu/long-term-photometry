@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from photometry_pipeline.core.baseline import DeterministicReservoir
 from photometry_pipeline.core.types import PerRoiCorrectionSpec
 from photometry_pipeline import guided_continuous_rwd_block_plan as block_subject
 from photometry_pipeline import guided_continuous_rwd_correction_segments as subject
@@ -268,7 +267,7 @@ def _partition_result(accepted_case, monkeypatch, block_size):
         grid,
         block_plan,
         segment_plan,
-        iter(blocks),
+        lambda: iter(blocks),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )
@@ -691,32 +690,194 @@ def test_pass1_real_c3b_uses_raw_control_dynamic_only_and_finalizes(accepted_cas
         grid,
         block_plan,
         plan,
-        iter_project_guided_continuous_rwd_blocks(binding, grid, block_plan),
+        lambda: iter_project_guided_continuous_rwd_blocks(binding, grid, block_plan),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )
     assert authority.dynamic_roi_ids == ("ROI1",)
     assert authority.values[0].finite_value_count == grid.target_sample_count
     assert authority.values[0].retained_value_count == grid.target_sample_count
-    expected = np.percentile(
-        np.asarray(100.0 + np.arange(6000) * 0.01, dtype=np.float32), 10.0
+    expected_uv = np.asarray(
+        100.0 + np.arange(grid.target_sample_count, dtype=np.float64) * 0.01
     )
-    assert authority.values[0].scalar_f0 == expected
-    assert authority.percentile == 10.0
-    assert authority.capacity == 200_000
-    assert authority.storage_dtype == "float32"
-    assert authority.seed == 0
+    expected_sig = np.asarray(
+        200.0 + np.arange(grid.target_sample_count, dtype=np.float64) * 0.02
+    )
+    expected_slope, expected_intercept, expected_ok, expected_n_used = (
+        subject.compute_global_iso_fit_robust(
+            expected_uv,
+            expected_sig,
+            max_points=200_000,
+            n_iter=3,
+            z_thresh=4.0,
+        )
+    )
+    assert expected_ok
+    assert authority.f0_aggregation == "median"
+    assert authority.f0_scope == "segment"
+    assert authority.global_fit_method == "compute_global_iso_fit_robust"
+    assert authority.global_fit_policy_identity == (
+        "tonic-equivalent-global-isosbestic-robust-v1"
+    )
+    assert authority.global_fit_max_points == 200_000
+    assert authority.global_fit_n_iter == 3
+    assert authority.global_fit_z_thresh == 4.0
+    assert authority.values[0].global_slope == expected_slope
+    assert authority.values[0].global_intercept == expected_intercept
+    assert authority.values[0].global_fit_n_used == expected_n_used
+    assert authority.values[0].scalar_f0 == np.median(
+        subject.apply_global_fit(expected_uv, expected_slope, expected_intercept)
+    )
     assert authority.finalized
     assert authority.completion_state == "complete_source_verified"
 
 
-def test_pass1_matches_direct_reservoir_canonical_segment_and_roi_order(accepted_case, monkeypatch):
+def test_pass1_counts_finite_pairs_before_global_fit_sampling(accepted_case, monkeypatch):
+    binding, grid, draft, contract = accepted_case
+    monkeypatch.setattr(block_subject, "MAXIMUM_OWNED_SAMPLES_PER_BLOCK", 1000)
+    block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
+    plan = _plan(accepted_case)
+    blocks = tuple(_projected_blocks(accepted_case, block_plan))
+    assembled = tuple(
+        subject.iter_assemble_guided_continuous_rwd_correction_segments(
+            binding,
+            grid,
+            block_plan,
+            plan,
+            iter(blocks),
+            accepted_draft=draft,
+            startup_mapping_contract=contract,
+        )
+    )
+    mutated = []
+    for segment in assembled:
+        control = segment.control_values.copy()
+        signal = segment.signal_values.copy()
+        if segment.segment_index == 0:
+            control[0, 0] = np.nan
+            signal[1, 0] = np.inf
+            control[2, 0] = np.nan
+        control.setflags(write=False)
+        signal.setflags(write=False)
+        mutated.append(
+            replace(segment, control_values=control, signal_values=signal)
+        )
+    monkeypatch.setattr(
+        subject,
+        "iter_assemble_guided_continuous_rwd_correction_segments",
+        lambda *args, **kwargs: iter(mutated),
+    )
+
+    authority = subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
+        binding,
+        grid,
+        block_plan,
+        plan,
+        lambda: iter(blocks),
+        accepted_draft=draft,
+        startup_mapping_contract=contract,
+    )
+
+    uv = np.concatenate([segment.control_values[:, 0] for segment in mutated])
+    sig = np.concatenate([segment.signal_values[:, 0] for segment in mutated])
+    finite_pairs = np.isfinite(uv) & np.isfinite(sig)
+    expected = subject.compute_global_iso_fit_robust(
+        uv[finite_pairs],
+        sig[finite_pairs],
+        max_points=200_000,
+        n_iter=3,
+        z_thresh=4.0,
+    )
+    assert expected[2]
+    value = authority.values[0]
+    finite_count = int(np.count_nonzero(finite_pairs))
+    assert finite_count == grid.target_sample_count - 3
+    assert finite_count < grid.target_sample_count
+    assert value.finite_value_count == finite_count
+    assert value.retained_value_count == finite_count
+    assert value.global_fit_n_pairs == finite_count
+    assert value.global_slope == expected[0]
+    assert value.global_intercept == expected[1]
+    assert value.global_fit_n_used == expected[3]
+
+
+def test_pass1_uses_two_fresh_projected_block_traversals(accepted_case, monkeypatch):
+    binding, grid, draft, contract = accepted_case
+    monkeypatch.setattr(block_subject, "MAXIMUM_OWNED_SAMPLES_PER_BLOCK", 1000)
+    block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
+    plan = _plan(accepted_case)
+    blocks = tuple(_projected_blocks(accepted_case, block_plan))
+    factory_calls = []
+
+    def fresh_blocks():
+        factory_calls.append(len(factory_calls) + 1)
+        return iter(blocks)
+
+    authority = subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
+        binding,
+        grid,
+        block_plan,
+        plan,
+        fresh_blocks,
+        accepted_draft=draft,
+        startup_mapping_contract=contract,
+    )
+
+    assert factory_calls == [1, 2]
+    assert authority.values[0].finite_value_count == grid.target_sample_count
+
+
+def test_global_fit_sampling_above_capacity_matches_tonic_helper():
+    finite_count = subject.GLOBAL_FIT_MAX_POINTS + 123
+    raw_count = finite_count + 2
+    index = np.arange(raw_count, dtype=np.float64)
+    uv = 100.0 + 0.001 * index
+    sig = 1.75 * uv + 12.0
+    uv[17] = np.nan
+    sig[123456] = np.inf
+
+    finite_pairs = np.isfinite(uv) & np.isfinite(sig)
+    finite_uv = uv[finite_pairs]
+    finite_sig = sig[finite_pairs]
+    selected = subject._global_fit_sample_positions(finite_uv.size)
+    sampled = subject.compute_global_iso_fit_robust(
+        finite_uv[selected],
+        finite_sig[selected],
+        max_points=200_000,
+        n_iter=3,
+        z_thresh=4.0,
+    )
+    direct = subject.compute_global_iso_fit_robust(
+        uv,
+        sig,
+        max_points=200_000,
+        n_iter=3,
+        z_thresh=4.0,
+    )
+
+    assert finite_uv.size == finite_count
+    assert selected.size == subject.GLOBAL_FIT_MAX_POINTS
+    assert sampled[2] and direct[2]
+    assert sampled[0] == direct[0]
+    assert sampled[1] == direct[1]
+    assert sampled[3] == direct[3]
+
+
+def test_pass1_matches_direct_global_fit_canonical_segment_and_roi_order(accepted_case, monkeypatch):
     plan, segments, authority = _partition_result(accepted_case, monkeypatch, 733)
-    direct = DeterministicReservoir(seed=0)
-    for segment in segments:
-        direct.add("ROI1", segment.control_values[:, 0])
-    assert authority.values[0].scalar_f0 == direct.get_percentile("ROI1", 10.0)
-    assert authority.values[0].finite_value_count == direct.count["ROI1"]
+    uv = np.concatenate([segment.control_values[:, 0] for segment in segments])
+    sig = np.concatenate([segment.signal_values[:, 0] for segment in segments])
+    slope, intercept, ok, n_used = subject.compute_global_iso_fit_robust(
+        uv, sig, max_points=200_000, n_iter=3, z_thresh=4.0
+    )
+    assert ok
+    assert authority.values[0].global_slope == slope
+    assert authority.values[0].global_intercept == intercept
+    assert authority.values[0].global_fit_n_used == n_used
+    assert authority.values[0].scalar_f0 == np.median(
+        subject.apply_global_fit(uv, slope, intercept)
+    )
+    assert authority.values[0].finite_value_count == uv.size
     assert authority.correction_segment_plan_identity == plan.plan_identity
 
 
@@ -733,30 +894,18 @@ def test_pass1_fixes_segment_then_b1_dynamic_roi_update_order(accepted_case, mon
     monkeypatch.setattr(block_subject, "MAXIMUM_OWNED_SAMPLES_PER_BLOCK", 733)
     block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
     blocks = tuple(_projected_blocks(dynamic_case, block_plan))
-    calls = []
-    original_add = subject.DeterministicReservoir.add
-
-    def tracked_add(self, channel, data):
-        calls.append((channel, len(data)))
-        original_add(self, channel, data)
-
-    monkeypatch.setattr(subject.DeterministicReservoir, "add", tracked_add)
     authority = subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
         binding,
         grid,
         block_plan,
         plan,
-        iter(blocks),
+        lambda: iter(blocks),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )
-    expected = []
-    for descriptor in plan.descriptors:
-        expected.extend(
-            [("ROI1", descriptor.sample_count), ("ROI2", descriptor.sample_count)]
-        )
-    assert calls == expected
     assert authority.dynamic_roi_ids == ("ROI1", "ROI2")
+    assert tuple(value.roi_id for value in authority.values) == ("ROI1", "ROI2")
+    assert all(value.global_fit_n_used >= 1000 for value in authority.values)
 
 
 def test_all_signal_only_returns_empty_authority_without_consuming_iterator(accepted_case, monkeypatch):
@@ -777,7 +926,7 @@ def test_all_signal_only_returns_empty_authority_without_consuming_iterator(acce
         grid,
         block_plan,
         plan,
-        Bomb(),
+        lambda: Bomb(),
         accepted_draft=draft,
         startup_mapping_contract=contract,
     )
@@ -786,41 +935,24 @@ def test_all_signal_only_returns_empty_authority_without_consuming_iterator(acce
     assert authority.completion_state == "not_required_all_signal_only"
 
 
-def test_pass1_empty_support_and_too_small_f0_are_structured_refusals(accepted_case, monkeypatch):
+def test_pass1_unusable_global_fit_is_a_structured_refusal(accepted_case, monkeypatch):
     binding, grid, draft, contract = accepted_case
     monkeypatch.setattr(block_subject, "MAXIMUM_OWNED_SAMPLES_PER_BLOCK", 1000)
     block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
     plan = _plan(accepted_case)
     blocks = tuple(_projected_blocks(accepted_case, block_plan))
-    original_add = subject.DeterministicReservoir.add
-
-    def skip_add(self, channel, data):
-        if channel != "ROI1":
-            original_add(self, channel, data)
-
-    monkeypatch.setattr(subject.DeterministicReservoir, "add", skip_add)
-    with pytest.raises(subject.GuidedContinuousRwdCorrectionSegmentError) as caught:
-        subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
-            binding, grid, block_plan, plan, iter(blocks),
-            accepted_draft=draft, startup_mapping_contract=contract
-        )
-    assert caught.value.category == "no_finite_control_support"
-    assert caught.value.context["roi"] == "ROI1"
-
-    monkeypatch.setattr(subject.DeterministicReservoir, "add", original_add)
-    zero_blocks = tuple(
-        replace(block, control_values=np.zeros_like(block.control_values))
-        for block in blocks
+    monkeypatch.setattr(
+        subject,
+        "compute_global_iso_fit_robust",
+        lambda *args, **kwargs: (0.0, 0.0, False, 0),
     )
-    for block in zero_blocks:
-        block.control_values.setflags(write=False)
     with pytest.raises(subject.GuidedContinuousRwdCorrectionSegmentError) as caught:
         subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
-            binding, grid, block_plan, plan, iter(zero_blocks),
+            binding, grid, block_plan, plan, lambda: iter(blocks),
             accepted_draft=draft, startup_mapping_contract=contract
         )
     assert caught.value.category == "invalid_final_f0"
-    assert caught.value.context["reason"] == "invalid_scalar_f0"
+    assert caught.value.context["reason"] == "global_fit_failed"
 
 
 def test_late_source_failure_and_cancellation_never_return_authority(accepted_case, monkeypatch):
@@ -838,7 +970,7 @@ def test_late_source_failure_and_cancellation_never_return_authority(accepted_ca
 
     with pytest.raises(subject.GuidedContinuousRwdCorrectionSegmentError) as caught:
         subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
-            binding, grid, block_plan, plan, late_failure(),
+            binding, grid, block_plan, plan, lambda: late_failure(),
             accepted_draft=draft, startup_mapping_contract=contract
         )
     assert caught.value.category == "source_verification_failed"
@@ -851,7 +983,7 @@ def test_late_source_failure_and_cancellation_never_return_authority(accepted_ca
 
     with pytest.raises(subject.GuidedContinuousRwdCorrectionSegmentError) as caught:
         subject.prepare_guided_continuous_rwd_dynamic_f0_authority(
-            binding, grid, block_plan, plan, iter(blocks),
+            binding, grid, block_plan, plan, lambda: iter(blocks),
             accepted_draft=draft, startup_mapping_contract=contract,
             cancellation_requested=cancel_after_progress,
         )

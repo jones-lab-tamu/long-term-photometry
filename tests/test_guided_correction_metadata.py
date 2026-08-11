@@ -5,8 +5,13 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.tonic_dff import (
+    apply_global_fit,
+    compute_global_iso_fit_robust,
+)
 from photometry_pipeline.core.types import PerRoiCorrectionSpec
 from photometry_pipeline.pipeline import Pipeline
 
@@ -16,17 +21,27 @@ ROI_IDS = ("ROI1", "ROI2")
 
 def _write_mapped_csv_sessions(source_root: Path) -> None:
     source_root.mkdir(parents=True, exist_ok=True)
-    time_sec = np.arange(401, dtype=float) / 10.0
+    time_sec = np.arange(1201, dtype=float) / 10.0
     for session_index in (1, 2):
         rows = [
             "ElapsedSeconds,ROI1_Signal,ROI1_Reference,ROI2_Signal,ROI2_Reference"
         ]
         for value in time_sec:
+            roi1_reference = (
+                2.0
+                + 0.1 * np.cos(value)
+                + 0.75 * (session_index - 1)
+            )
+            roi2_reference = (
+                2.2
+                + 0.1 * np.sin(value)
+                + 0.5 * (session_index - 1)
+            )
             rows.append(
-                f"{value:.6f},{5.0 + 0.2 * np.sin(value):.6f},"
-                f"{2.0 + 0.1 * np.cos(value):.6f},"
-                f"{6.0 + 0.25 * np.cos(value):.6f},"
-                f"{2.2 + 0.1 * np.sin(value):.6f}"
+                f"{value:.6f},{4.0 + 1.5 * roi1_reference + 0.2 * np.sin(value):.6f},"
+                f"{roi1_reference:.6f},"
+                f"{3.0 + 1.2 * roi2_reference + 0.25 * np.cos(value):.6f},"
+                f"{roi2_reference:.6f}"
             )
         (source_root / f"session_{session_index}.csv").write_text(
             "\n".join(rows) + "\n", encoding="utf-8"
@@ -36,7 +51,7 @@ def _write_mapped_csv_sessions(source_root: Path) -> None:
 def _config() -> Config:
     return Config(
         target_fs_hz=10.0,
-        chunk_duration_sec=40.0,
+        chunk_duration_sec=100.0,
         custom_tabular_time_col="ElapsedSeconds",
         custom_tabular_time_unit="seconds",
         custom_tabular_roi_mapping_json=json.dumps(
@@ -196,33 +211,76 @@ def test_mixed_csv_metadata_remains_explicitly_per_roi(tmp_path: Path):
     _assert_summary_matches_saved_applied_fields(analysis_out, metadata)
 
 
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "global_linear_regression",
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    ],
+)
 def test_uniform_reference_csv_metadata_retains_reference_semantics(
-    tmp_path: Path,
+    tmp_path: Path, strategy: str,
 ):
     analysis_out, metadata, report = _run_metadata_case(
         tmp_path,
         {
-            "ROI1": "global_linear_regression",
-            "ROI2": "global_linear_regression",
+            "ROI1": strategy,
+            "ROI2": strategy,
         },
     )
 
     summary = metadata["applied_correction_summary"]
     assert summary["classification"] == "all_reference_based"
-    assert metadata["baseline_method"] == "uv_raw_percentile_session"
-    assert metadata["f0_source"] == "uv_raw_percentile_session"
+    assert metadata["baseline_method"] == "guided_global_fit_reference_session_median"
+    assert metadata["f0_source"] == "global_fitted_reference_session_median"
     assert metadata["phasic_uv_fit_method"] == "dynamic"
     assert metadata["regression_mode"] == "dynamic"
+
+    provenance = metadata["guided_reference_f0_provenance"]["by_roi"]
+    assert set(provenance) == set(ROI_IDS)
+    for roi_id in ROI_IDS:
+        assert provenance[roi_id]["method"] == "compute_global_iso_fit_robust"
+        assert provenance[roi_id]["apply_method"] == "apply_global_fit"
+        assert provenance[roi_id]["f0_aggregation"] == "median"
+        assert provenance[roi_id]["f0_scope"] == "session"
+        assert len(provenance[roi_id]["f0_values"]) == 2
+        assert provenance[roi_id]["f0_values"][0]["f0"] != provenance[roi_id]["f0_values"][1]["f0"]
+
+    with h5py.File(analysis_out / "phasic_trace_cache.h5", "r") as cache:
+        for roi_id in ROI_IDS:
+            groups = [cache[f"roi/{roi_id}/chunk_{chunk_id}"] for chunk_id in (0, 1)]
+            uv_all = np.concatenate([group["uv_raw"][()] for group in groups])
+            sig_all = np.concatenate([group["sig_raw"][()] for group in groups])
+            slope, intercept, fit_ok, _n_used = compute_global_iso_fit_robust(
+                uv_all, sig_all, max_points=200_000, n_iter=3, z_thresh=4.0
+            )
+            assert fit_ok
+            for group in groups:
+                expected_f0 = float(
+                    np.median(apply_global_fit(group["uv_raw"][()], slope, intercept))
+                )
+                assert float(group.attrs["correction_f0_value"]) == expected_f0
+                assert float(group.attrs["correction_global_fit_slope"]) == slope
+                assert float(group.attrs["correction_global_fit_intercept"]) == intercept
+                np.testing.assert_allclose(
+                    group["dff"][()],
+                    100.0 * group["delta_f"][()] / expected_f0,
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
 
     contract = report["analytical_contract"]
     assert contract["signal_semantics"]["uv_fit"] == (
         "estimated artifact component derived from uv_filt fit to sig_filt"
     )
     assert contract["baseline_semantics"]["method"] == (
-        "uv_raw_percentile_session"
+        "guided_global_fit_reference_session_median"
     )
-    assert contract["baseline_semantics"]["f0_source"] == "uv_raw"
+    assert contract["baseline_semantics"]["f0_source"] == (
+        "global_fitted_reference_session_median"
+    )
     assert contract["baseline_semantics"]["dff_formula"] == (
-        "100 * (sig_raw - uv_fit) / F0"
+        "100 * delta_f / median finite apply_global_fit(uv_raw, slope, intercept) per session"
     )
     _assert_summary_matches_saved_applied_fields(analysis_out, metadata)

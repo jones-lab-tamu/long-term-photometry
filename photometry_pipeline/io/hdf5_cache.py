@@ -458,6 +458,20 @@ class Hdf5TraceCacheWriter:
                             ('correction_fallback_path', 'fallback_path'),
                             ('correction_qc_json', 'qc_json'),
                             ('correction_effective_parameters', 'effective_parameters'),
+                            ('correction_f0_method', 'f0_method'),
+                            ('correction_f0_aggregation', 'f0_aggregation'),
+                            ('correction_f0_scope', 'f0_scope'),
+                            ('correction_f0_value', 'f0_value'),
+                            ('correction_f0_finite_fitted_count', 'f0_finite_fitted_count'),
+                            ('correction_global_fit_method', 'global_fit_method'),
+                            ('correction_global_fit_policy_identity', 'global_fit_policy_identity'),
+                            ('correction_global_fit_slope', 'global_fit_slope'),
+                            ('correction_global_fit_intercept', 'global_fit_intercept'),
+                            ('correction_global_fit_max_points', 'global_fit_max_points'),
+                            ('correction_global_fit_n_iter', 'global_fit_n_iter'),
+                            ('correction_global_fit_z_thresh', 'global_fit_z_thresh'),
+                            ('correction_global_fit_n_pairs', 'global_fit_n_pairs'),
+                            ('correction_global_fit_n_used', 'global_fit_n_used'),
                         ):
                             value = consumed_meta.get(key)
                             if key == 'effective_parameters' and isinstance(value, dict):

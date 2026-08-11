@@ -83,7 +83,10 @@ def build_continuous_phasic_auc_provenance(
 
 
 def append_applied_correction_summary(
-    output_dir: str, applied_correction_summary: Mapping[str, Any]
+    output_dir: str,
+    applied_correction_summary: Mapping[str, Any],
+    *,
+    guided_reference_f0_active: bool = False,
 ) -> None:
     """Append applied correction semantics to the shared run report.
 
@@ -119,10 +122,29 @@ def append_applied_correction_summary(
         raise ValueError("run_report.json derived_settings must be an object")
     derived["applied_correction_summary"] = summary
 
-    # Uniform reference-based runs retain the historical analytical contract;
-    # it remains truthful when every applied ROI has the same reference-fit
-    # strategy.  Signal-Only and mixed runs need explicit per-ROI wording.
+    # Uniform legacy reference-based runs retain the historical analytical
+    # contract. Current Guided reference-based runs use the explicit
+    # tonic-equivalent global-fit denominator contract below.
     if classification == "all_reference_based":
+        if guided_reference_f0_active:
+            contract = report.get("analytical_contract")
+            if not isinstance(contract, dict):
+                raise ValueError("run_report.json analytical_contract must be an object")
+            contract["baseline_semantics"] = {
+                "method": "guided_global_fit_reference_session_median",
+                "f0_source": "global_fitted_reference_session_median",
+                "f0_units": "signal-scale",
+                "dff_formula": (
+                    "100 * delta_f / median finite "
+                    "apply_global_fit(uv_raw, slope, intercept) per session"
+                ),
+                "interpretation_note": (
+                    "Guided reference-based F0 uses one robust global fit of "
+                    "raw paired reference/signal samples, applies that fit to "
+                    "each session's raw reference, and takes the finite median; "
+                    "local correction and Delta-F are unchanged."
+                ),
+            }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         return
