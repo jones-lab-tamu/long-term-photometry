@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.events import EventEmitter
 from photometry_pipeline.core.reporting import generate_run_report
 from photometry_pipeline.guided_manifest_current_facts import (
     build_guided_manifest_current_facts,
@@ -30,6 +31,7 @@ from photometry_pipeline.io.custom_tabular_source_snapshot import (
     build_custom_tabular_source_candidate_snapshot,
 )
 from photometry_pipeline.pipeline import Pipeline
+from tools.run_full_pipeline_deliverables import _emit_roi_progress
 
 
 pytestmark = pytest.mark.usefixtures("no_real_modals")
@@ -69,6 +71,26 @@ def _config(*, milliseconds=False) -> Config:
         ),
         custom_tabular_roi_mapping_json=json.dumps(_mapping()),
     )
+
+
+def test_numeric_custom_tabular_roi_progress_event_is_json_safe(tmp_path: Path):
+    events_path = tmp_path / "events.ndjson"
+    emitter = EventEmitter(str(events_path), "run", str(tmp_path))
+    try:
+        _emit_roi_progress(emitter, np.int64(1))
+        _emit_roi_progress(emitter, "Fiber A")
+    finally:
+        emitter.close()
+
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["roi"] for event in events] == ["1", "Fiber A"]
+    assert [event["message"] for event in events] == [
+        "Processing ROI: 1",
+        "Processing ROI: Fiber A",
+    ]
 
 
 def test_exact_mapping_scales_milliseconds_and_uses_exact_names(tmp_path: Path):

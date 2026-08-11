@@ -173,6 +173,21 @@ class TestBuildFeatureMap:
         assert len(fm) == 96
         assert all(roi == 'Region0' for (_, roi) in fm.keys())
 
+    def test_filtered_numeric_roi_uses_canonical_string_identity(self, tmp_path):
+        features_path = tmp_path / "features.csv"
+        pd.DataFrame(
+            {
+                "chunk_id": [0, 1, 2],
+                "roi": [1, 1, 2],
+                "peak_count": [2, 4, 9],
+            }
+        ).to_csv(features_path, index=False)
+
+        fm = build_feature_map(str(features_path), roi="1")
+
+        assert len(fm) == 2
+        assert set(fm) == {(0, "1"), (1, "1")}
+
     def test_missing_file(self):
         fm = build_feature_map("/nonexistent/features.csv")
         assert fm == {}

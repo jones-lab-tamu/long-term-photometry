@@ -238,14 +238,14 @@ def build_feature_map(
             f"features.csv is missing the authoritative key column '{key_column}'"
         )
     if roi is not None:
-        df = df[df['roi'] == roi]
+        df = df[df['roi'].astype(str) == str(roi)]
 
     feat_map = {}
     for _, row in df.iterrows():
         key = row[key_column]
         if pd.isna(key):
             continue
-        feat_map[(int(key), row['roi'])] = row
+        feat_map[(int(key), str(row['roi']))] = row
     return feat_map
 
 

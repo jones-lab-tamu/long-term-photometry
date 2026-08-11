@@ -68,6 +68,56 @@ def test_plot_phasic_time_series_summary_uses_event_signal_units_and_semantic_li
     assert auc_axis.get_lines()[0].get_color() == SUMMARY_TRACE_COLOR
 
 
+@pytest.mark.parametrize(
+    ("selected_roi", "roi_values", "expected_peak_counts"),
+    [
+        ("1", [1, 1, 2], [2, 4]),
+        ("Fiber A", ["Fiber A", "Fiber A", "Other"], [2, 4]),
+    ],
+)
+def test_plot_phasic_time_series_summary_selects_canonical_roi_identity(
+    tmp_path, monkeypatch, selected_roi, roi_values, expected_peak_counts
+):
+    analysis_out = tmp_path / "analysis_out"
+    features_dir = analysis_out / "features"
+    features_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "chunk_id": [0, 1, 2],
+            "roi": roi_values,
+            "peak_count": [2, 4, 99],
+            "auc": [1.5, 2.5, 9.9],
+            "source_file": ["chunk_0.csv", "chunk_1.csv", "chunk_2.csv"],
+        }
+    ).to_csv(features_dir / "features.csv", index=False)
+
+    import tools.plot_phasic_time_series_summary as summary_script
+
+    rate_csv = tmp_path / "rate.csv"
+    auc_csv = tmp_path / "auc.csv"
+    monkeypatch.setattr(
+        summary_script.sys,
+        "argv",
+        [
+            "plot_phasic_time_series_summary.py",
+            "--analysis-out",
+            str(analysis_out),
+            "--roi",
+            selected_roi,
+            "--out-rate-csv",
+            str(rate_csv),
+            "--out-auc-csv",
+            str(auc_csv),
+        ],
+    )
+
+    summary_script.main()
+
+    selected_rows = pd.read_csv(rate_csv)
+    assert selected_rows["roi"].astype(str).tolist() == [str(selected_roi)] * 2
+    assert selected_rows["peak_count"].tolist() == expected_peak_counts
+
+
 def test_plot_phasic_time_series_summary_no_datetime_warning(tmp_path):
     """
     Ensures that when features.csv has non-datetime source_file strings (e.g., 'chunk_0.csv'),

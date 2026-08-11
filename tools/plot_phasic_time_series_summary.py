@@ -239,7 +239,7 @@ def main():
         auc_units = "dF/F" if event_signal == "dff" else "deltaF"
         
         # 5. Filter Data
-        roi_df = df[df['roi'] == selected_roi].copy()
+        roi_df = df[df['roi'].astype(str) == str(selected_roi)].copy()
         if roi_df.empty:
             raise RuntimeError(f"No data found for ROI: {selected_roi}")
 

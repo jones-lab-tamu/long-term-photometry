@@ -242,6 +242,17 @@ def run_cmd(cmd, roi_label=None):
     }
 
 
+def _emit_roi_progress(emitter, roi):
+    """Emit one ROI progress event with JSON-safe display metadata."""
+    roi_label = str(roi)
+    emitter.emit(
+        "plots",
+        "progress",
+        f"Processing ROI: {roi_label}",
+        roi=roi_label,
+    )
+
+
 def _log_roi_timing_detail(roi, bucket, elapsed_sec):
     print(f"TIMING DETAIL roi={roi} bucket={bucket} elapsed_sec={elapsed_sec:.3f}", flush=True)
 
@@ -3131,10 +3142,12 @@ def main():
             regions = []
             print("WARNING: Could not determine ROIs for packaging", flush=True)
 
-        manifest['regions'] = regions
+        regions = list(regions)
+        roi_labels = [str(roi) for roi in regions]
+        manifest['regions'] = roi_labels
         # Freeze the analyzed ROI set now, while it is still derived from what the
         # analysis reported, not from the deliverable directories it will fill.
-        expected_rois = list(regions)
+        expected_rois = list(roi_labels)
 
         # Classify the run ONCE, before any ROI plot process is launched. A
         # current-contract run must carry a complete per-ROI record of the
@@ -3154,7 +3167,7 @@ def main():
             feature_provenance_mode, feature_provenance_path = (
                 _resolve_feature_provenance_for_plots(
                     phasic_out,
-                    regions,
+                    roi_labels,
                     require_current=True,
                     emitter=emitter,
                 )
@@ -3172,31 +3185,32 @@ def main():
             )
 
         for roi in regions:
+            roi_label = str(roi)
             t_roi = time.perf_counter()
             started_utc_roi = _utc_now_iso()
-            print(f"TIMING START roi={roi} at {started_utc_roi}", flush=True)
+            print(f"TIMING START roi={roi_label} at {started_utc_roi}", flush=True)
             roi_bucket_totals = {}
             roi_child_script_elapsed = 0.0
 
             t_bucket = time.perf_counter()
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
-            _write_status_update(f"plot_{roi}")
+            _write_status_update(f"plot_{roi_label}")
 
-            print(f"Processing ROI: {roi}", flush=True)
-            emitter.emit("plots", "progress", f"Processing ROI: {roi}", roi=roi)
-            reg_dir = os.path.join(run_dir, roi)
+            print(f"Processing ROI: {roi_label}", flush=True)
+            _emit_roi_progress(emitter, roi)
+            reg_dir = os.path.join(run_dir, roi_label)
             s_dir = os.path.join(reg_dir, "summary")
             d_dir = os.path.join(reg_dir, "day_plots")
             t_dir = os.path.join(reg_dir, "tables")
-            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_setup", time.perf_counter() - t_bucket)
+            _accumulate_roi_bucket(roi_label, roi_bucket_totals, "roi_setup", time.perf_counter() - t_bucket)
 
             t_bucket = time.perf_counter()
             for d in [reg_dir, s_dir, d_dir, t_dir]:
                 os.makedirs(d, exist_ok=True)
-            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_directory_prepare", time.perf_counter() - t_bucket)
+            _accumulate_roi_bucket(roi_label, roi_bucket_totals, "roi_directory_prepare", time.perf_counter() - t_bucket)
             files_written = []
 
-            manifest['deliverables'][roi] = {}
+            manifest['deliverables'][roi_label] = {}
             if run_phasic_mode:
                 t_bucket = time.perf_counter()
                 cid_diag = None
@@ -3217,19 +3231,19 @@ def main():
                         chunk_ids_diag = list_cache_chunk_ids(cache_diag)
                     if not chunk_ids_diag:
                         raise RuntimeError(
-                            f"CRITICAL: No chunks found in phasic cache for ROI={roi}."
+                            f"CRITICAL: No chunks found in phasic cache for ROI={roi_label}."
                         )
                     cid_diag = int(chunk_ids_diag[0])
-                manifest['deliverables'][roi]['diagnostic_chunk_id'] = int(cid_diag)
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
+                manifest['deliverables'][roi_label]['diagnostic_chunk_id'] = int(cid_diag)
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
     # A. Phasic Correction Impact (3-panel + session CSV)
                 cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
                               '--analysis-out', phasic_out,
-                              '--roi', roi,
+                              '--roi', roi_label,
                               '--chunk-id', str(cid_diag),
                               '--out', os.path.join(s_dir, "phasic_correction_impact.png")]
-                cmd_result = run_cmd(cmd_impact, roi_label=roi)
+                cmd_result = run_cmd(cmd_impact, roi_label=roi_label)
                 manifest['commands'].append(cmd_result)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
                 files_written.append("summary/phasic_correction_impact.png")
@@ -3242,7 +3256,7 @@ def main():
                 try:
                     with open_phasic_cache(cache_path_p) as f_p:
                         fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
-                        t, sig, uv, fit, dff = load_cache_chunk_fields(f_p, roi, int(cid_diag), fields)
+                        t, sig, uv, fit, dff = load_cache_chunk_fields(f_p, roi_label, int(cid_diag), fields)
 
                         df_c = pd.DataFrame({
                             't_s': t,
@@ -3250,7 +3264,7 @@ def main():
                             'iso_raw': uv,
                             'iso_fit_dynamic': fit,
                             'dff_dynamic': dff,
-                            'region': roi,
+                            'region': roi_label,
                             'chunk_id': int(cid_diag)
                         })
 
@@ -3258,14 +3272,14 @@ def main():
                         df_c[keep].to_csv(os.path.join(t_dir, "phasic_correction_impact_session.csv"), index=False)
                         files_written.append("tables/phasic_correction_impact_session.csv")
                 except Exception as e:
-                    raise RuntimeError(f"CRITICAL: Failed to read phasic cache for session CSV (ROI={roi}, chunk={cid_diag}): {e}")
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_session_csv_packaging", time.perf_counter() - t_bucket)
+                    raise RuntimeError(f"CRITICAL: Failed to read phasic cache for session CSV (ROI={roi_label}, chunk={cid_diag}): {e}")
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "phasic_session_csv_packaging", time.perf_counter() - t_bucket)
 
             if run_tonic_mode and not tune_prep_light_mode:
                 # B. Tonic Overview
                 out_tonic = os.path.join(s_dir, "tonic_overview.png")
                 cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
-                                 '--analysis-out', tonic_out, '--roi', roi,
+                                 '--analysis-out', tonic_out, '--roi', roi_label,
                                  '--out', out_tonic,
                                  '--tonic-output-mode', effective_tonic_output_mode,
                                   '--tonic-timeline-mode', effective_tonic_timeline_mode]
@@ -3290,13 +3304,13 @@ def main():
                     cmd_tonic_roi.extend(['--format', args.format])
                 if resolved_sessions_per_hour is not None:
                     cmd_tonic_roi.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
-                cmd_result = run_cmd(cmd_tonic_roi, roi_label=roi)
+                cmd_result = run_cmd(cmd_tonic_roi, roi_label=roi_label)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
                 t_bucket = time.perf_counter()
                 if os.path.exists(out_tonic):
                     files_written.append("summary/tonic_overview.png")
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_image_packaging", time.perf_counter() - t_bucket)
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "tonic_image_packaging", time.perf_counter() - t_bucket)
 
                 # Tonic DF Timeseries (Migrated to HDF5 Cache)
                 t_bucket = time.perf_counter()
@@ -3561,21 +3575,21 @@ def main():
                 tonic_subbucket_sum = sum(tonic_subbucket_totals.values())
                 tonic_subbucket_remainder = tonic_table_total_elapsed - tonic_subbucket_sum
                 for subbucket_name, subbucket_elapsed in tonic_subbucket_totals.items():
-                    _log_roi_timing_detail(roi, f"tonic_table_packaging.{subbucket_name}", subbucket_elapsed)
-                _log_roi_timing_detail(roi, "tonic_table_packaging.subbucket_sum", tonic_subbucket_sum)
-                _log_roi_timing_detail(roi, "tonic_table_packaging.subbucket_remainder", tonic_subbucket_remainder)
-                _log_roi_timing_metric(roi, "tonic_table_packaging.chunks_processed", chunks_processed)
-                _log_roi_timing_metric(roi, "tonic_table_packaging.rows_written", rows_written)
-                _log_roi_timing_metric(roi, "tonic_table_packaging.frames_accumulated", frames_accumulated)
+                    _log_roi_timing_detail(roi_label, f"tonic_table_packaging.{subbucket_name}", subbucket_elapsed)
+                _log_roi_timing_detail(roi_label, "tonic_table_packaging.subbucket_sum", tonic_subbucket_sum)
+                _log_roi_timing_detail(roi_label, "tonic_table_packaging.subbucket_remainder", tonic_subbucket_remainder)
+                _log_roi_timing_metric(roi_label, "tonic_table_packaging.chunks_processed", chunks_processed)
+                _log_roi_timing_metric(roi_label, "tonic_table_packaging.rows_written", rows_written)
+                _log_roi_timing_metric(roi_label, "tonic_table_packaging.frames_accumulated", frames_accumulated)
                 _log_roi_timing_metric(
-                    roi,
+                    roi_label,
                     "tonic_table_packaging.tonic_mode_fallback_count",
                     tonic_mode_fallback_count,
                 )
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_table_packaging", tonic_table_total_elapsed)
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "tonic_table_packaging", tonic_table_total_elapsed)
             elif run_tonic_mode and tune_prep_light_mode:
-                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
-                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                manifest['deliverables'][roi_label].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi_label]['intentionally_skipped'].extend([
                     "summary/tonic_overview.png",
                     "tables/tonic_df_timeseries.csv",
                 ])
@@ -3589,7 +3603,7 @@ def main():
 
                 cmd_ts = [sys.executable, 'tools/plot_phasic_time_series_summary.py',
                           '--analysis-out', phasic_out,
-                          '--roi', roi,
+                          '--roi', roi_label,
                           '--sessions-per-hour', str(sessions_per_hour),
                           '--session-duration-s', str(session_duration_s),
                           '--out-rate-png', out_rate_png,
@@ -3602,7 +3616,7 @@ def main():
                     cmd_ts.extend(['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)])
                 if args.timeline_anchor_mode != "elapsed" and args.guided_recording_start_clock:
                     cmd_ts.extend(['--recording-start-clock', str(args.guided_recording_start_clock)])
-                cmd_result = run_cmd(cmd_ts, roi_label=roi)
+                cmd_result = run_cmd(cmd_ts, roi_label=roi_label)
                 manifest['commands'].append(cmd_result)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
@@ -3612,10 +3626,10 @@ def main():
                     if os.path.exists(dst):
                         rel_path = os.path.relpath(dst, reg_dir).replace('\\', '/')
                         files_written.append(rel_path)
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_ts_packaging", time.perf_counter() - t_bucket)
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "phasic_ts_packaging", time.perf_counter() - t_bucket)
             elif run_phasic_mode and tune_prep_light_mode:
-                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
-                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                manifest['deliverables'][roi_label].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi_label]['intentionally_skipped'].extend([
                     "summary/phasic_peak_rate_timeseries.png",
                     "summary/phasic_auc_timeseries.png",
                     "tables/phasic_peak_rate_timeseries.csv",
@@ -3624,7 +3638,7 @@ def main():
 
             t_bucket = time.perf_counter()
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
-            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_cancel_check", time.perf_counter() - t_bucket)
+            _accumulate_roi_bucket(roi_label, roi_bucket_totals, "roi_cancel_check", time.perf_counter() - t_bucket)
 
             s_dff = []
             s_sig = []
@@ -3634,7 +3648,7 @@ def main():
                 # D. Per-Day Plots (Sig/Iso, dFF, Stacked) via Unified Bundle Driver
                 cmd_bundle = [sys.executable, 'tools/plot_phasic_dayplot_bundle.py',
                               '--analysis-out', phasic_out,
-                              '--roi', roi,
+                              '--roi', roi_label,
                               '--output-dir', d_dir,
                               '--sessions-per-hour', str(sessions_per_hour),
                               '--session-duration-s', str(session_duration_s),
@@ -3663,7 +3677,7 @@ def main():
                 if not has_features:
                     cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])
 
-                cmd_result = run_cmd(cmd_bundle, roi_label=roi)
+                cmd_result = run_cmd(cmd_bundle, roi_label=roi_label)
                 manifest['commands'].append(cmd_result)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
@@ -3702,15 +3716,15 @@ def main():
                     m = re.match(r'phasic_stacked_day_(\d+)\.png', os.path.basename(f))
                     if m:
                         days_stacked.add(m.group(1))
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "dayplot_file_discovery", time.perf_counter() - t_bucket)
+                _accumulate_roi_bucket(roi_label, roi_bucket_totals, "dayplot_file_discovery", time.perf_counter() - t_bucket)
 
                 s_dff = sorted(list(days_dff))
                 s_sig = sorted(list(days_sig_iso))
                 s_dyn = sorted(list(days_dynamic_fit))
                 s_stk = sorted(list(days_stacked))
             elif run_phasic_mode and tune_prep_light_mode:
-                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
-                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                manifest['deliverables'][roi_label].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi_label]['intentionally_skipped'].extend([
                     "day_plots/phasic_sig_iso_day_*.png",
                     "day_plots/phasic_dynamic_fit_day_*.png",
                     "day_plots/phasic_dFF_day_*.png",
@@ -3718,38 +3732,38 @@ def main():
                 ])
 
             t_bucket = time.perf_counter()
-            manifest['deliverables'][roi]['days_dff'] = s_dff
-            manifest['deliverables'][roi]['days_sig_iso'] = s_sig
-            manifest['deliverables'][roi]['days_dynamic_fit'] = s_dyn
-            manifest['deliverables'][roi]['days_stacked'] = s_stk
+            manifest['deliverables'][roi_label]['days_dff'] = s_dff
+            manifest['deliverables'][roi_label]['days_sig_iso'] = s_sig
+            manifest['deliverables'][roi_label]['days_dynamic_fit'] = s_dyn
+            manifest['deliverables'][roi_label]['days_stacked'] = s_stk
 
             # Consistency check (restored)
             if run_phasic_mode and has_features and not (s_dff == s_sig == s_stk):
-                 raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DFF={s_dff}, SigIso={s_sig}, Stacked={s_stk}")
+                 raise RuntimeError(f"Inconsistent day sets for ROI {roi_label}: DFF={s_dff}, SigIso={s_sig}, Stacked={s_stk}")
             if run_phasic_mode and s_dyn and s_sig and s_dyn != s_sig:
-                 raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DynamicFit={s_dyn}, SigIso={s_sig}")
+                 raise RuntimeError(f"Inconsistent day sets for ROI {roi_label}: DynamicFit={s_dyn}, SigIso={s_sig}")
 
-            manifest['deliverables'][roi]['files'] = sorted(list(set(files_written)))
+            manifest['deliverables'][roi_label]['files'] = sorted(list(set(files_written)))
             if run_phasic_mode:
-                manifest['deliverables'][roi]['days_generated'] = s_dff if has_features else s_stk
+                manifest['deliverables'][roi_label]['days_generated'] = s_dff if has_features else s_stk
             else:
-                manifest['deliverables'][roi]['days_generated'] = []
-            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_manifest_bookkeeping", time.perf_counter() - t_bucket)
+                manifest['deliverables'][roi_label]['days_generated'] = []
+            _accumulate_roi_bucket(roi_label, roi_bucket_totals, "roi_manifest_bookkeeping", time.perf_counter() - t_bucket)
 
             # ROI timing finalize
             elapsed_roi = time.perf_counter() - t_roi
             finished_utc_roi = _utc_now_iso()
-            manifest['deliverables'][roi]['timing'] = {
+            manifest['deliverables'][roi_label]['timing'] = {
                 "started_utc": started_utc_roi,
                 "finished_utc": finished_utc_roi,
                 "elapsed_sec": elapsed_roi
             }
             explicit_in_process_elapsed = sum(roi_bucket_totals.values())
             residual_remainder = elapsed_roi - roi_child_script_elapsed - explicit_in_process_elapsed
-            _log_roi_timing_detail(roi, "child_script_timings_sum", roi_child_script_elapsed)
-            _log_roi_timing_detail(roi, "explicit_in_process_sum", explicit_in_process_elapsed)
-            _log_roi_timing_detail(roi, "residual_remainder", residual_remainder)
-            print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}", flush=True)
+            _log_roi_timing_detail(roi_label, "child_script_timings_sum", roi_child_script_elapsed)
+            _log_roi_timing_detail(roi_label, "explicit_in_process_sum", explicit_in_process_elapsed)
+            _log_roi_timing_detail(roi_label, "residual_remainder", residual_remainder)
+            print(f"TIMING DONE roi={roi_label} elapsed_sec={elapsed_roi:.3f}", flush=True)
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
         _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
@@ -3776,7 +3790,7 @@ def main():
 
             tonic_summary_path = os.path.join(run_dir, TONIC_SESSION_SUMMARY_FILENAME)
             tonic_summary_result = write_tonic_session_summary(
-                tonic_out, tonic_summary_path, rois=regions
+                tonic_out, tonic_summary_path, rois=roi_labels
             )
             # The Tonic Results view reads this plot, so it is produced here,
             # immediately after the summary it renders.
@@ -3784,7 +3798,7 @@ def main():
                 run_dir,
                 summary_path=tonic_summary_path,
                 tonic_out_dir=tonic_out,
-                rois=regions,
+                rois=roi_labels,
             )
             for plot_result in tonic_plot_results:
                 manifest['deliverables'].setdefault(plot_result['roi'], {})
