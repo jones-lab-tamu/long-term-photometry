@@ -239,7 +239,9 @@ remaining sessions are usable. The unusable session is recorded as missing or
 corrupted. Its original time position is preserved, so the corresponding
 interval remains blank in summary plots and day plots, and later sessions do
 not shift earlier in time. The completed analysis reports that it was
-completed with missing sessions. No advance approval is required.
+completed with missing sessions. Continuing with that session marked missing
+requires choosing **Continue with this session missing** in the warning dialog,
+then checking the setup again before rerunning.
 
 Guided can also recognize some readable RWD sessions that are shorter than the
 expected recording interval.

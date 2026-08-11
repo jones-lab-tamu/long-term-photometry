@@ -67,10 +67,12 @@ git --version
 
 The first command should report Python 3.10 or newer. The second should report
 a Git version. If Windows says that `python` is not recognized but `py --version`
-works, use `py -3` in place of `python` in the Windows commands below. If either
-command is missing, install Python from [python.org](https://www.python.org/)
-and, for the cloning route, Git from [git-scm.com](https://git-scm.com/), then
-open a new shell and check again.
+works, use `py -3 -m venv .venv` only for the virtual-environment creation step
+below. After you activate `.venv`, use the documented `python -m pip ...` and
+`python -m gui.app` commands exactly as written so they run inside the activated
+environment. If either command is missing, install Python from
+[python.org](https://www.python.org/) and, for the cloning route, Git from
+[git-scm.com](https://git-scm.com/), then open a new shell and check again.
 
 **macOS Terminal**
 
