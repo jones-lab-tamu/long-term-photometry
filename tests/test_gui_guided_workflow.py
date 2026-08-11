@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -149,6 +150,17 @@ def test_guided_recording_structure_fields_fit_visible_viewport(
 
     scroll = window._guided_workflow_stack.currentWidget()
     viewport = scroll.viewport()
+    panel = scroll.widget()
+    assert panel is not None
+    assert panel.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+
+    timeline_edit = window._guided_fixed_daily_anchor_clock_edit
+    assert timeline_edit.isVisibleTo(window)
+    assert timeline_edit.isEnabled()
+    assert timeline_edit.width() > 0
+    assert timeline_edit.height() > 0
+    assert timeline_edit.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+
     for label, edit in (
         (
             window._guided_sessions_per_hour_label,
@@ -160,11 +172,23 @@ def test_guided_recording_structure_fields_fit_visible_viewport(
         ),
     ):
         assert label.isVisibleTo(window)
+        assert label.width() > 0
         assert edit.isVisibleTo(window)
+        assert edit.isEnabled()
+        assert (
+            edit.sizePolicy().horizontalPolicy()
+            == timeline_edit.sizePolicy().horizontalPolicy()
+        )
+        assert edit.minimumWidth() >= 140
+        assert edit.width() >= 120
+        assert edit.height() > 0
         edit_rect = QRect(edit.mapTo(viewport, QPoint(0, 0)), edit.size())
         visible_rect = edit_rect.intersected(viewport.rect())
-        assert visible_rect.width() >= viewport.width() * 0.25
+        label_rect = QRect(label.mapTo(viewport, QPoint(0, 0)), label.size())
+        assert not label_rect.intersects(edit_rect)
+        assert edit_rect.left() >= viewport.rect().left()
         assert edit_rect.right() <= viewport.rect().right()
+        assert visible_rect.width() >= 120
 
 
 def test_guided_select_data_browse_buttons_keep_existing_directory_picker_route(

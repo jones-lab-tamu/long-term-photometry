@@ -4520,7 +4520,12 @@ class MainWindow(QMainWindow):
         self._guided_sessions_per_hour_edit.setToolTip(
             GUIDED_SESSIONS_PER_HOUR_TOOLTIP
         )
-        self._make_guided_widget_shrinkable(self._guided_sessions_per_hour_edit)
+        # Keep the required field column usable when the outer panel is
+        # allowed to shrink on native QFormLayout implementations.
+        self._guided_sessions_per_hour_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_sessions_per_hour_edit.setMinimumWidth(140)
         self._guided_sessions_per_hour_label = QLabel(
             "Sessions per hour:"
         )
@@ -4537,7 +4542,10 @@ class MainWindow(QMainWindow):
         self._guided_session_duration_edit.setToolTip(
             GUIDED_SESSION_DURATION_TOOLTIP
         )
-        self._make_guided_widget_shrinkable(self._guided_session_duration_edit)
+        self._guided_session_duration_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_session_duration_edit.setMinimumWidth(140)
         self._guided_session_duration_label = QLabel(
             "Session duration (s):"
         )
