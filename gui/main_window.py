@@ -3171,10 +3171,8 @@ class _GuidedRoiFeatureEventDialog(QDialog):
 _GUIDED_CORRECTION_PARAMETER_FIELD_LABELS = {
     "robust_event_reject_max_iters": "Maximum iterations:",
     "robust_event_reject_residual_z_thresh": "Residual z threshold:",
-    "robust_event_reject_local_var_window_sec": "Local variance window (sec):",
     "robust_event_reject_min_keep_fraction": "Minimum keep fraction:",
     "adaptive_event_gate_residual_z_thresh": "Residual z threshold:",
-    "adaptive_event_gate_local_var_window_sec": "Local variance window (sec):",
     "adaptive_event_gate_smooth_window_sec": "Smoothing window (sec):",
     "adaptive_event_gate_min_trust_fraction": "Minimum trust fraction:",
 }
@@ -3191,11 +3189,6 @@ _GUIDED_CORRECTION_PARAMETER_TOOLTIPS = {
         "it is excluded as a likely event or artifact. Lower values exclude "
         "more samples; higher values retain more."
     ),
-    "robust_event_reject_local_var_window_sec": (
-        "Time span used to estimate short-term variability around each sample. "
-        "Shorter windows respond to faster changes; longer windows produce a "
-        "smoother variability estimate."
-    ),
     "robust_event_reject_min_keep_fraction": (
         "Smallest fraction of samples that must remain available for fitting. "
         "Higher values limit how much data may be excluded; lower values "
@@ -3205,11 +3198,6 @@ _GUIDED_CORRECTION_PARAMETER_TOOLTIPS = {
         "Determines how far a sample must deviate from the current fit before "
         "the adaptive method stops trusting it. Lower values classify more "
         "samples as events or artifacts; higher values classify fewer."
-    ),
-    "adaptive_event_gate_local_var_window_sec": (
-        "Time span used to estimate local variability for event detection. "
-        "Shorter windows respond to faster changes; longer windows smooth "
-        "variability over more time."
     ),
     "adaptive_event_gate_smooth_window_sec": (
         "Time span used to smooth changes in the fitted reference relationship. "
@@ -3289,9 +3277,6 @@ class _GuidedRoiCorrectionParameterDialog(QDialog):
                     control.setRange(0.000001, 1.0)
                     control.setDecimals(4)
                     control.setSingleStep(0.05)
-                elif field_name.endswith("local_var_window_sec"):
-                    control.setDecimals(4)
-                    control.setSingleStep(0.5)
                 elif field_name.endswith("smooth_window_sec"):
                     control.setDecimals(4)
                     control.setSingleStep(1.0)
@@ -4777,7 +4762,7 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(
             self._guided_recording_continue_btn, alignment=Qt.AlignLeft
         )
-        return self._build_guided_step_scroll(
+        scroll = self._build_guided_step_scroll(
             "guidedStepRecordingStructure",
             "Recording structure",
             [
@@ -4788,6 +4773,10 @@ class MainWindow(QMainWindow):
             ],
             wrapper,
         )
+        panel = scroll.widget()
+        if panel is not None:
+            self._make_guided_widget_shrinkable(panel)
+        return scroll
 
     def _guided_csv_selected(self) -> bool:
         return (

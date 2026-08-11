@@ -171,12 +171,10 @@ GUIDED_PER_ROI_EDITABLE_CORRECTION_FIELDS: dict[str, tuple[str, ...]] = {
     "robust_global_event_reject": (
         "robust_event_reject_max_iters",
         "robust_event_reject_residual_z_thresh",
-        "robust_event_reject_local_var_window_sec",
         "robust_event_reject_min_keep_fraction",
     ),
     "adaptive_event_gated_regression": (
         "adaptive_event_gate_residual_z_thresh",
-        "adaptive_event_gate_local_var_window_sec",
         "adaptive_event_gate_smooth_window_sec",
         "adaptive_event_gate_min_trust_fraction",
     ),
@@ -215,7 +213,7 @@ def validate_guided_effective_correction_parameters(
     """Validate and normalize one complete Guided per-ROI parameter set.
 
     This is intentionally not a general Config validator: it covers only the
-    eight fields that Guided permits to vary per ROI.
+    six fields that Guided permits to vary per ROI.
     """
     fields = guided_per_roi_editable_correction_fields(strategy)
     items = _guided_parameter_items(values)

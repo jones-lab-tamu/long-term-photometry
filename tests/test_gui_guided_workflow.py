@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtCore import QObject, QSignalBlocker, QTimer, Qt
+from PySide6.QtCore import QObject, QPoint, QRect, QSignalBlocker, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -126,6 +126,45 @@ def test_guided_select_data_browse_rows_preserve_native_buttons_and_path_width(
         assert browse.objectName() == object_name
         assert browse.text() == "Browse..."
         assert browse.focusPolicy() & Qt.TabFocus
+
+
+@pytest.mark.parametrize(
+    "window_size",
+    [(800, 600), (900, 600), (1024, 640), (1440, 900)],
+)
+def test_guided_recording_structure_fields_fit_visible_viewport(
+    window, qapp, window_size
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("rwd")
+    window._guided_acquisition_mode_combo.setCurrentText(
+        "Intermittent/session-based recording"
+    )
+    window.show()
+    window.resize(*window_size)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Recording structure")
+    )
+    qapp.processEvents()
+
+    scroll = window._guided_workflow_stack.currentWidget()
+    viewport = scroll.viewport()
+    for label, edit in (
+        (
+            window._guided_sessions_per_hour_label,
+            window._guided_sessions_per_hour_edit,
+        ),
+        (
+            window._guided_session_duration_label,
+            window._guided_session_duration_edit,
+        ),
+    ):
+        assert label.isVisibleTo(window)
+        assert edit.isVisibleTo(window)
+        edit_rect = QRect(edit.mapTo(viewport, QPoint(0, 0)), edit.size())
+        visible_rect = edit_rect.intersected(viewport.rect())
+        assert visible_rect.width() >= viewport.width() * 0.25
+        assert edit_rect.right() <= viewport.rect().right()
 
 
 def test_guided_select_data_browse_buttons_keep_existing_directory_picker_route(
@@ -1801,23 +1840,33 @@ def test_guided_correction_parameter_dialog_exposes_approved_fields_and_resets_l
     dialog_b = main_window_module._GuidedRoiCorrectionParameterDialog(
         "CH2",
         "robust_global_event_reject",
-        seed_values={"robust_event_reject_local_var_window_sec": 20.0},
+        seed_values={
+            "robust_event_reject_residual_z_thresh": 4.0,
+            "robust_event_reject_local_var_window_sec": 20.0,
+        },
         parent=window,
+    )
+    adaptive_dialog = main_window_module._GuidedRoiCorrectionParameterDialog(
+        "CH1", "adaptive_event_gated_regression", parent=window
     )
     try:
         assert set(dialog_a._controls) == {
             "robust_event_reject_max_iters",
             "robust_event_reject_residual_z_thresh",
-            "robust_event_reject_local_var_window_sec",
             "robust_event_reject_min_keep_fraction",
         }
         assert "robust_event_reject_local_var_ratio_thresh" not in dialog_a._controls
-        assert dialog_a._controls[
-            "robust_event_reject_local_var_window_sec"
-        ].value() == 10.0
+        assert "robust_event_reject_local_var_window_sec" not in dialog_a._controls
+        assert "robust_event_reject_local_var_window_sec" not in dialog_b._controls
+        assert set(adaptive_dialog._controls) == {
+            "adaptive_event_gate_residual_z_thresh",
+            "adaptive_event_gate_smooth_window_sec",
+            "adaptive_event_gate_min_trust_fraction",
+        }
+        assert "adaptive_event_gate_local_var_window_sec" not in adaptive_dialog._controls
         assert dialog_b._controls[
-            "robust_event_reject_local_var_window_sec"
-        ].value() == 20.0
+            "robust_event_reject_residual_z_thresh"
+        ].value() == 4.0
         assert dialog_a._controls[
             "robust_event_reject_max_iters"
         ].minimum() == 1
@@ -1831,24 +1880,22 @@ def test_guided_correction_parameter_dialog_exposes_approved_fields_and_resets_l
             "robust_event_reject_residual_z_thresh"
         ].decimals() == 4
         assert dialog_a._controls[
-            "robust_event_reject_local_var_window_sec"
-        ].singleStep() == 0.5
-        assert dialog_a._controls[
             "robust_event_reject_min_keep_fraction"
         ].singleStep() == 0.05
 
-        dialog_a._controls["robust_event_reject_local_var_window_sec"].setValue(35.0)
+        dialog_a._controls["robust_event_reject_residual_z_thresh"].setValue(35.0)
         dialog_a._on_reset()
 
         assert dialog_a._controls[
-            "robust_event_reject_local_var_window_sec"
-        ].value() == 10.0
+            "robust_event_reject_residual_z_thresh"
+        ].value() == 3.5
         assert dialog_b._controls[
-            "robust_event_reject_local_var_window_sec"
-        ].value() == 20.0
+            "robust_event_reject_residual_z_thresh"
+        ].value() == 4.0
     finally:
         dialog_a.close()
         dialog_b.close()
+        adaptive_dialog.close()
 
 
 def test_guided_correction_parameter_tooltips_apply_to_controls_and_labels(
@@ -1981,7 +2028,7 @@ def test_guided_changed_correction_value_is_retained_as_customized(
         window, tmp_path, monkeypatch
     )
     customized = dict(defaults)
-    customized["robust_event_reject_local_var_window_sec"] = 20.0
+    customized["robust_event_reject_residual_z_thresh"] = 4.0
 
     _apply_fake_guided_correction_values(window, monkeypatch, "CH1", customized)
 
@@ -1998,7 +2045,7 @@ def test_guided_reset_removes_only_current_roi_correction_customization(
         window, tmp_path, monkeypatch
     )
     customized_a = dict(defaults)
-    customized_a["robust_event_reject_local_var_window_sec"] = 20.0
+    customized_a["robust_event_reject_residual_z_thresh"] = 4.0
     customized_b = dict(defaults)
     customized_b["robust_event_reject_max_iters"] = 7
 
@@ -2047,7 +2094,6 @@ def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
             "values": {
                 "robust_event_reject_max_iters": 3,
                 "robust_event_reject_residual_z_thresh": 3.5,
-                "robust_event_reject_local_var_window_sec": 11.0,
                 "robust_event_reject_min_keep_fraction": 0.5,
             },
         },
@@ -2056,7 +2102,6 @@ def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
             "values": {
                 "robust_event_reject_max_iters": 6,
                 "robust_event_reject_residual_z_thresh": 4.0,
-                "robust_event_reject_local_var_window_sec": 22.0,
                 "robust_event_reject_min_keep_fraction": 0.75,
             },
         },
@@ -2069,8 +2114,10 @@ def test_guided_preview_parameter_overrides_are_scoped_to_each_roi(window):
         "local_raw_segment", None, "ROI2", ["robust_global_event_reject"]
     )
 
-    assert overrides_a["robust_event_reject_local_var_window_sec"] == 11.0
-    assert overrides_b["robust_event_reject_local_var_window_sec"] == 22.0
+    assert overrides_a["robust_event_reject_max_iters"] == 3
+    assert overrides_b["robust_event_reject_max_iters"] == 6
+    assert "robust_event_reject_local_var_window_sec" not in overrides_a
+    assert "robust_event_reject_local_var_window_sec" not in overrides_b
     assert overrides_a != overrides_b
 
 
@@ -2121,7 +2168,7 @@ def test_guided_step1_parameters_feed_preview_and_step2_summary_per_roi(
     _load_preview_completed_run(window, run_dir, monkeypatch)
     robust = _guided_parameter_values(
         "robust_global_event_reject",
-        robust_event_reject_local_var_window_sec=20.0,
+        robust_event_reject_residual_z_thresh=20.0,
     )
     _patch_fake_guided_correction_dialog(
         monkeypatch,
@@ -2142,7 +2189,7 @@ def test_guided_step1_parameters_feed_preview_and_step2_summary_per_roi(
         "CH1",
         ["robust_global_event_reject"],
     )
-    assert roi1_overrides["robust_event_reject_local_var_window_sec"] == 20.0
+    assert roi1_overrides["robust_event_reject_residual_z_thresh"] == 20.0
 
     window._guided_preview_roi_combo.setCurrentIndex(
         window._guided_preview_roi_combo.findData("CH2")
@@ -2156,7 +2203,7 @@ def test_guided_step1_parameters_feed_preview_and_step2_summary_per_roi(
         "CH2",
         ["robust_global_event_reject"],
     )
-    assert roi2_overrides["robust_event_reject_local_var_window_sec"] == 10.0
+    assert roi2_overrides["robust_event_reject_residual_z_thresh"] == 3.5
 
     window._guided_confirm_strategy_combo.setCurrentIndex(
         window._guided_confirm_strategy_combo.findData(
@@ -2165,7 +2212,7 @@ def test_guided_step1_parameters_feed_preview_and_step2_summary_per_roi(
     )
     summary = window._guided_confirm_correction_parameters_label.text()
     assert summary.startswith("Parameters from Step 1: Customized")
-    assert "Local variance window (sec): 20" in summary
+    assert "Residual z threshold: 20" in summary
 
 
 def test_guided_step1_keeps_strategy_values_independent_and_reset_is_shared(
@@ -2175,7 +2222,7 @@ def test_guided_step1_keeps_strategy_values_independent_and_reset_is_shared(
     _load_preview_completed_run(window, run_dir, monkeypatch)
     robust = _guided_parameter_values(
         "robust_global_event_reject",
-        robust_event_reject_local_var_window_sec=20.0,
+        robust_event_reject_residual_z_thresh=20.0,
     )
     adaptive = _guided_parameter_values(
         "adaptive_event_gated_regression",
@@ -2200,7 +2247,7 @@ def test_guided_step1_keeps_strategy_values_independent_and_reset_is_shared(
     key = (str(run_dir.resolve()), "CH1")
     assert window._guided_correction_parameter_values_for_choice(
         key, "robust_global_event_reject"
-    )["robust_event_reject_local_var_window_sec"] == 20.0
+    )["robust_event_reject_residual_z_thresh"] == 20.0
     assert window._guided_correction_parameter_values_for_choice(
         key, "adaptive_event_gated_regression"
     )["adaptive_event_gate_smooth_window_sec"] == 80.0
@@ -2212,7 +2259,7 @@ def test_guided_step1_keeps_strategy_values_independent_and_reset_is_shared(
 
     assert window._guided_correction_parameter_values_for_choice(
         key, "robust_global_event_reject"
-    )["robust_event_reject_local_var_window_sec"] == 20.0
+    )["robust_event_reject_residual_z_thresh"] == 20.0
     assert window._guided_correction_parameter_values_for_choice(
         key, "adaptive_event_gated_regression"
     ) == adaptive_defaults
@@ -2255,7 +2302,7 @@ def test_guided_step1_parameter_change_stales_preview_and_confirmation(
     }
     custom = _guided_parameter_values(
         "robust_global_event_reject",
-        robust_event_reject_local_var_window_sec=20.0,
+        robust_event_reject_residual_z_thresh=20.0,
     )
     _patch_fake_guided_correction_dialog(
         monkeypatch,
@@ -2314,7 +2361,7 @@ def test_guided_step2_local_table_shows_step1_values_without_editor(
     )
     robust = _guided_parameter_values(
         "robust_global_event_reject",
-        robust_event_reject_local_var_window_sec=20.0,
+        robust_event_reject_residual_z_thresh=20.0,
     )
     window._guided_correction_parameters_by_choice[
         (main_window_module.LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, "CH1")
@@ -2335,7 +2382,7 @@ def test_guided_step2_local_table_shows_step1_values_without_editor(
     assert rows["CH1"]["parameter_summary_label"].text().startswith(
         "Parameters from Step 1: Customized"
     )
-    assert "Local variance window (sec): 20" in rows["CH1"][
+    assert "Residual z threshold: 20" in rows["CH1"][
         "parameter_summary_label"
     ].text()
     assert rows["CH2"]["parameter_summary_label"].text().startswith(
@@ -2354,7 +2401,7 @@ def test_guided_step2_local_table_shows_step1_values_without_editor(
         for choice in plan.per_roi_correction_strategy_choices
     }
     assert dict(plan_choices["CH1"].effective_parameters)[
-        "robust_event_reject_local_var_window_sec"
+        "robust_event_reject_residual_z_thresh"
     ] == 20.0
 
 
@@ -8250,13 +8297,11 @@ def test_guided_preview_details_report_generated_method_settings_and_stale_state
         "robust_global_event_reject",
         robust_event_reject_max_iters=17,
         robust_event_reject_residual_z_thresh=17.25,
-        robust_event_reject_local_var_window_sec=27.5,
         robust_event_reject_min_keep_fraction=0.61,
     )
     adaptive = _guided_parameter_values(
         "adaptive_event_gated_regression",
         adaptive_event_gate_residual_z_thresh=18.5,
-        adaptive_event_gate_local_var_window_sec=37.5,
         adaptive_event_gate_smooth_window_sec=47.5,
         adaptive_event_gate_min_trust_fraction=0.71,
     )
@@ -8294,14 +8339,14 @@ def test_guided_preview_details_report_generated_method_settings_and_stale_state
     assert "Method: Robust Global Event-Reject Fit" in details
     assert "Parameter source: Customized" in details
     assert "Residual z threshold: 17.25" in details
-    assert "Local variance window (sec): 27.5" in details
+    assert "Local variance window (sec):" not in details
     assert "Smoothing window (sec): 47.5" not in details
 
     window._guided_preview_next_btn.click()
     details = window._guided_preview_artifacts_label.text()
     assert "Method: Adaptive Event-Gated Fit" in details
     assert "Residual z threshold: 18.5" in details
-    assert "Local variance window (sec): 37.5" in details
+    assert "Local variance window (sec):" not in details
     assert "Smoothing window (sec): 47.5" in details
     assert "Maximum iterations: 17" not in details
 

@@ -551,7 +551,6 @@ def test_preview_backend_uses_and_records_complete_per_roi_effective_values(tmp_
     effective = {
         "robust_event_reject_max_iters": 5,
         "robust_event_reject_residual_z_thresh": 4.0,
-        "robust_event_reject_local_var_window_sec": 20.0,
         "robust_event_reject_min_keep_fraction": 0.6,
     }
 
@@ -626,7 +625,7 @@ def test_robust_preview_passes_custom_residual_threshold_to_runtime(
     assert runtime_config.robust_event_reject_residual_z_thresh == 17.25
 
 
-def test_adaptive_preview_passes_custom_local_variance_window_to_runtime(
+def test_adaptive_preview_passes_custom_smoothing_window_to_runtime(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "session-0" / "fluorescence.csv"
@@ -652,7 +651,7 @@ def test_adaptive_preview_passes_custom_local_variance_window_to_runtime(
         methods=["adaptive_event_gated_regression"],
         include_signal_only_f0_preview=False,
         config_overrides={
-            "adaptive_event_gate_local_var_window_sec": 37.5,
+            "adaptive_event_gate_smooth_window_sec": 37.5,
         },
         preview_id="adaptive_runtime_config",
     )
@@ -662,7 +661,7 @@ def test_adaptive_preview_passes_custom_local_variance_window_to_runtime(
     runtime_config, mode = captured[0]
     assert mode == "phasic"
     assert runtime_config.dynamic_fit_mode == "adaptive_event_gated_regression"
-    assert runtime_config.adaptive_event_gate_local_var_window_sec == 37.5
+    assert runtime_config.adaptive_event_gate_smooth_window_sec == 37.5
 
 
 def test_preview_result_reports_method_specific_effective_parameter_settings(
@@ -672,10 +671,8 @@ def test_preview_result_reports_method_specific_effective_parameter_settings(
     effective = {
         "robust_event_reject_max_iters": 17,
         "robust_event_reject_residual_z_thresh": 17.25,
-        "robust_event_reject_local_var_window_sec": 27.5,
         "robust_event_reject_min_keep_fraction": 0.61,
         "adaptive_event_gate_residual_z_thresh": 18.5,
-        "adaptive_event_gate_local_var_window_sec": 37.5,
         "adaptive_event_gate_smooth_window_sec": 47.5,
         "adaptive_event_gate_min_trust_fraction": 0.71,
     }
@@ -706,7 +703,6 @@ def test_preview_result_reports_method_specific_effective_parameter_settings(
             for name in (
                 "robust_event_reject_max_iters",
                 "robust_event_reject_residual_z_thresh",
-                "robust_event_reject_local_var_window_sec",
                 "robust_event_reject_min_keep_fraction",
             )
         },
@@ -718,7 +714,6 @@ def test_preview_result_reports_method_specific_effective_parameter_settings(
             name: effective[name]
             for name in (
                 "adaptive_event_gate_residual_z_thresh",
-                "adaptive_event_gate_local_var_window_sec",
                 "adaptive_event_gate_smooth_window_sec",
                 "adaptive_event_gate_min_trust_fraction",
             )

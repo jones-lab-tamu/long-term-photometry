@@ -4021,7 +4021,6 @@ def test_guided_per_roi_correction_parameters_resolve_defaults_and_stay_independ
     assert robust_defaults == {
         "robust_event_reject_max_iters": 3,
         "robust_event_reject_residual_z_thresh": 3.5,
-        "robust_event_reject_local_var_window_sec": 10.0,
         "robust_event_reject_min_keep_fraction": 0.5,
     }
     choices = [
@@ -4034,7 +4033,6 @@ def test_guided_per_roi_correction_parameters_resolve_defaults_and_stay_independ
             effective_parameters=(
                 ("robust_event_reject_max_iters", 3),
                 ("robust_event_reject_residual_z_thresh", 3.5),
-                ("robust_event_reject_local_var_window_sec", 10.0),
                 ("robust_event_reject_min_keep_fraction", 0.5),
             ),
         ),
@@ -4045,9 +4043,8 @@ def test_guided_per_roi_correction_parameters_resolve_defaults_and_stay_independ
             current_or_stale="current",
             explicit_user_mark=True,
             effective_parameters=(
-                ("robust_event_reject_max_iters", 3),
-                ("robust_event_reject_residual_z_thresh", 3.5),
-                ("robust_event_reject_local_var_window_sec", 20.0),
+                ("robust_event_reject_max_iters", 6),
+                ("robust_event_reject_residual_z_thresh", 4.0),
                 ("robust_event_reject_min_keep_fraction", 0.5),
             ),
         ),
@@ -4062,14 +4059,13 @@ def test_guided_per_roi_correction_parameters_resolve_defaults_and_stay_independ
         entry.roi_id: dict(entry.effective_parameters)
         for entry in strategy_map.entries
     }
-    assert effective_by_roi["ROI1"]["robust_event_reject_local_var_window_sec"] == 10.0
-    assert effective_by_roi["ROI2"]["robust_event_reject_local_var_window_sec"] == 20.0
+    assert effective_by_roi["ROI1"]["robust_event_reject_max_iters"] == 3
+    assert effective_by_roi["ROI2"]["robust_event_reject_max_iters"] == 6
 
 
 def test_guided_adaptive_parameters_reset_to_current_defaults_and_identity_changes():
     adaptive_fields = (
         ("adaptive_event_gate_residual_z_thresh", 4.0),
-        ("adaptive_event_gate_local_var_window_sec", 20.0),
         ("adaptive_event_gate_smooth_window_sec", 80.0),
         ("adaptive_event_gate_min_trust_fraction", 0.7),
     )
@@ -4086,7 +4082,6 @@ def test_guided_adaptive_parameters_reset_to_current_defaults_and_identity_chang
         roi_id="ROI2",
         effective_parameters=(
             ("adaptive_event_gate_residual_z_thresh", 4.5),
-            ("adaptive_event_gate_local_var_window_sec", 25.0),
             ("adaptive_event_gate_smooth_window_sec", 90.0),
             ("adaptive_event_gate_min_trust_fraction", 0.8),
         ),
@@ -4116,7 +4111,6 @@ def test_guided_adaptive_parameters_reset_to_current_defaults_and_identity_chang
         )
     ) == {
         "adaptive_event_gate_residual_z_thresh": 3.5,
-        "adaptive_event_gate_local_var_window_sec": 10.0,
         "adaptive_event_gate_smooth_window_sec": 60.0,
         "adaptive_event_gate_min_trust_fraction": 0.5,
     }
@@ -4135,7 +4129,6 @@ def test_guided_adaptive_parameters_reset_to_current_defaults_and_identity_chang
     [
         ("robust_event_reject_max_iters", 0),
         ("robust_event_reject_residual_z_thresh", float("nan")),
-        ("robust_event_reject_local_var_window_sec", 0.0),
         ("robust_event_reject_min_keep_fraction", 1.1),
     ],
 )
@@ -4156,7 +4149,6 @@ def test_guided_per_roi_correction_parameters_reject_invalid_values(field, value
     "field,value",
     [
         ("adaptive_event_gate_residual_z_thresh", 0.0),
-        ("adaptive_event_gate_local_var_window_sec", float("inf")),
         ("adaptive_event_gate_smooth_window_sec", -1.0),
         ("adaptive_event_gate_min_trust_fraction", 0.0),
     ],
@@ -4172,3 +4164,25 @@ def test_guided_adaptive_correction_parameters_reject_invalid_values(field, valu
         resolve_guided_effective_correction_parameters(
             "adaptive_event_gated_regression", values=values
         )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "removed_field"),
+    [
+        (
+            "robust_global_event_reject",
+            "robust_event_reject_local_var_window_sec",
+        ),
+        (
+            "adaptive_event_gated_regression",
+            "adaptive_event_gate_local_var_window_sec",
+        ),
+    ],
+)
+def test_removed_local_variance_fields_are_not_current_guided_overrides(
+    strategy, removed_field
+):
+    values = dict(resolve_guided_effective_correction_parameters(strategy))
+    values[removed_field] = 20.0
+    with pytest.raises(ValueError, match="unsupported|complete"):
+        resolve_guided_effective_correction_parameters(strategy, values=values)

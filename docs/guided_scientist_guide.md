@@ -9,7 +9,9 @@ Guided is the recommended workflow for a new analysis. Full Control remains
 available for expert users and backward-compatible workflows, but it is outside
 the ordinary path described here.
 
-After installation, programming is not required for ordinary Guided use.
+After installation, programming is not required for ordinary Guided use. The
+application opens directly to the **Guided Workflow** tab with no separate
+first-run setup screen. Start a new analysis from the **Start** step.
 
 ## 1. About this guide
 
@@ -104,20 +106,18 @@ unchanged while analysis runs.
 
 ## 4. Start a Guided analysis
 
-Use the README installation and launch instructions, then open Guided. The Start
-step gives two entry points:
+Use the README installation and launch instructions. The application opens with
+the **Guided Workflow** tab selected, and the **Start** step gives two entry
+points:
 
-- Set up a new analysis from raw or input data.
-- Open results from a completed run for review.
+- **Set up a new analysis**: choose this for a new analysis from raw or input
+  data. This is the normal starting point.
+- **Open Results...**: choose this to inspect a completed run that was already
+  saved. It does not start a new analysis.
 
-![Guided Start step](images/guided/guided-start.png)
-
-*Start shows the two Guided entry points.*
-
-Choose the new-analysis path to configure or run analysis. Choose the
-completed-results path to inspect a finished run. Opening completed results
-does not configure a new analysis, validate a new request, or launch another
-run.
+Choose **Set up a new analysis** to configure or run an analysis. Choose
+**Open Results...** to inspect a finished run. Opening completed results does
+not configure a new analysis, check a new setup, or launch another run.
 
 If you begin a new analysis, Guided moves to Select data. If you open completed
 results, choose the completed-results folder and wait for Review to load.
@@ -132,10 +132,16 @@ The visible controls are:
 
 - Format: Auto, RWD, NPM, or CSV files.
 - Recording structure: Detect automatically, Intermittent/session-based
-  recording, or Continuous/one long recording.
+  recording, or Continuous/one long recording. This choice describes how the
+  files were saved, not how long the experiment lasted.
 - Input folder and Browse...
 - Output folder and Browse...
 - Select ROIs...
+
+The **Continue to Recording Structure** button becomes available after you
+have selected an input folder, selected a usable output folder, completed any
+required CSV mapping and order confirmation, run **Select ROIs...**, and
+included at least one ROI.
 
 ### Choose the input folder
 
@@ -145,10 +151,9 @@ choose the folder containing supported repeated-session exports. For CSV, choose
 the folder containing the CSV recordings. The application inspects the selected
 folder to identify the recording source and available ROIs.
 
-Use Detect automatically when you want the application to inspect the selected
-folder. If you already know the organization, choose repeated sessions or one
-long continuous recording yourself. The choice describes how the data were
-saved, not how long the experiment lasted.
+Use **Detect automatically** when you want the application to inspect the
+selected folder. If you already know the organization, choose **Intermittent/session-based recording** or **Continuous/one long recording** yourself. The
+choice describes how the data were saved, not how long the experiment lasted.
 
 ### Choose the output folder
 
@@ -163,10 +168,6 @@ In Guided, you identify the time, signal, and reference columns for each ROI.
 
 When CSV files are selected or detected, Guided shows the Interpret CSV columns
 area. Map the fields that the application needs:
-
-![Guided Select data step showing CSV mapping controls](images/guided/guided-select-data.png)
-
-*Select data shows the source, structure, output, and CSV mapping controls.*
 
 - Time column: the column containing elapsed time.
 - Time units: seconds or milliseconds.
@@ -208,22 +209,17 @@ layout is compatible.
 Select ROIs lists the ROIs found in the recording. Choose the ROIs you want
 included in the analysis.
 
-![Guided ROI selection after discovery](images/guided/guided-roi-selection.png)
-
-*ROI selection shows the discovered channel and the recording-order confirmation.*
-
-Continue when the source, structure, ROI list, and required CSV order
-confirmation match the intended dataset.
+Run **Select ROIs...**, check the ROIs to include, and then continue when the
+source, structure, ROI list, output folder, and required CSV order confirmation
+match the intended dataset. If the button remains unavailable, read the short
+message below it; it names the missing item.
 
 ## 6. Confirm recording structure and timing
 
-Recording Structure keeps settings that depend on the organization chosen in
-Select data. Detected timing and Use detected timing are starting points; check
-them against the acquisition schedule.
-
-![Guided Recording structure step](images/guided/guided-recording-structure.png)
-
-*Recording structure exposes session timing and timeline placement choices.*
+The recording-structure choice is made on **Select data**. This step keeps the
+timing and timeline settings that depend on that choice. Detected timing and
+**Use detected timing** are starting points; check them against the acquisition
+schedule.
 
 ### For repeated sessions
 
@@ -297,20 +293,25 @@ record.
 
 Continue when required timing fields and timeline choice are valid. If you use
 the repeated-session structure, confirm that the session order and timing
-match the experimental record.
+match the experimental record. **Continue to Correction Approach** becomes
+available only after the required timing and timeline fields are valid. For
+continuous data, the app also checks that the selected recording can be divided
+into the requested analysis windows; if it cannot, choose a shorter window or
+correct the data choice named in the message.
 
 ## 7. Review the correction approach
 
 ### What correction means
 
-Correction reduces shared signal/reference structure before phasic
-interpretation. This step presents the available correction approaches, a local
-preview, and per-ROI strategy confirmation; it does not start final analysis.
+Correction reduces shared signal/reference structure before event
+interpretation. This step presents the available correction methods, a local
+preview, and per-ROI strategy confirmation; it does not start the final
+analysis.
 
 The available approaches are:
 
-- Robust Global Event-Reject Fit carries the Default label and is the
-  recommended starting point. It fits the reference relationship while
+- Robust Global Event-Reject Fit is the recommended starting point. It fits the
+  reference relationship while
   excluding event-like periods; compare its local preview with the other
   approaches before confirming a strategy.
 - Adaptive Event-Gated Fit is included for recordings where the
@@ -329,10 +330,17 @@ The available approaches are:
 
 ### Read the preview
 
-The preview compares selected approaches on one recording segment. Choose the
-ROI, Preview segment, approaches, and Generate correction preview. The preview
-is diagnostic evidence for the selected segment; it does not modify source data
-or start final analysis.
+The **Preview correction methods** section compares selected methods on one
+recording segment. Choose an **ROI**, choose a **Preview segment**, select the
+methods to compare, and choose **Generate correction preview**. **Customize**
+is available for the Robust and Adaptive methods when you need to change their
+preview settings for the selected ROI. For continuous recordings, the segment
+choices are analysis windows.
+
+The preview is diagnostic evidence for the selected segment; it does not
+modify source data or start the final analysis. If you change the ROI, segment,
+or selected methods after generating a preview, generate the preview again
+before using it.
 
 ### Compare representative windows
 
@@ -353,21 +361,22 @@ appropriate.
 
 ### Choose an approach for each ROI
 
-After comparing the preview evidence, confirm one correction strategy for each
-included ROI. The approach selected for preview is not automatically final for
-every ROI. Guided Run recomputes the confirmed correction across the complete
-selected recording set, not only the preview segment. Different ROIs may use
-different correction strategies. If the signal/reference mapping appears wrong
-or the corrected trace remains scientifically implausible, fix the mapping or
-reconsider the correction choice before continuing.
+After comparing the preview evidence, use the **2. Choose correction
+strategy** section to confirm one correction strategy for each included ROI.
+Choose the ROI, review its preview segment, choose a **Strategy for this ROI**,
+and select **Confirm method**. If the acknowledgement appears, check **I
+reviewed the diagnostic evidence...** before confirming. Repeat until the
+**Strategies by included ROI** list shows a current choice for every included
+ROI.
 
-![Guided correction preview evidence](images/guided/guided-correction-preview.png)
-
-*Review the reference-based correction evidence before choosing a method.*
-
-![Guided correction strategy confirmation](images/guided/guided-correction-confirmation.png)
-
-*Confirm the selected correction strategy separately for each included ROI.*
+The method selected for preview is not automatically final for every ROI.
+Guided Run recomputes the confirmed correction across the complete selected
+recording set, not only the preview segment. Different ROIs may use different
+correction strategies. If the signal/reference mapping appears wrong or the
+corrected trace remains scientifically implausible, fix the mapping or
+reconsider the correction choice before continuing. **Continue to Feature
+Detection** remains unavailable until the current preview evidence and
+strategy choice have been confirmed for every included ROI.
 
 ## 8. Review Feature Detection
 
@@ -379,18 +388,19 @@ judge plausibility.
 
 ### Adjust the exposed Guided settings
 
-The Default Feature Detection settings form exposes the following controls.
-The same fields can be customized for one ROI:
+The **Default feature detection settings** section exposes the following
+controls. The same fields can be customized for one ROI:
 
-- **Event signal**: Chooses the dFF or delta-F trace used for peak detection
-  and event-derived metrics. Use the representation that matches the signal
-  you are reviewing; changing it can change both event locations and scale.
+- **Event signal**: Chooses the dF/F or delta-F trace used for peak detection
+  and event-derived metrics. The current menu uses the short choices `dff`
+  (dF/F) and `delta_f` (delta-F). Changing this choice can change both event
+  locations and scale.
 - **Signal excursion polarity**: Chooses positive, negative, or both
   directions for excursions. Use the expected response direction when it is
   known; changing it changes which signed responses are considered.
-- **Peak threshold method**: Chooses a mean-and-standard-deviation, percentile,
-  or absolute cutoff. Use the method that fits the trace's noise and scale;
-  it changes how the detection threshold is derived.
+- **Peak threshold method**: Chooses a mean-and-standard-deviation, median-and-
+  MAD, percentile, or absolute cutoff. Use the method that fits the trace's
+  noise and scale; it changes how the detection threshold is derived.
 - **Peak threshold k**: Sets the multiplier for methods that use k. It is
   relevant to mean-and-standard-deviation thresholding; a larger value requires a
   larger excursion relative to variability, while a smaller value admits more.
@@ -423,23 +433,33 @@ value. For technical definitions, see [Event detection](event_detection.md).
 
 ### Default versus Custom
 
-The per-ROI table shows Default or Custom and the settings used during Run.
-Begin with Default, then give an ROI Custom settings when its noise, polarity,
-or response shape needs different treatment. Custom changes that ROI alone.
-Other ROIs remain on Default.
+The **Feature detection per ROI** table shows **Default** or **Custom** and the
+settings used during Run. Begin with Default, then choose **Customize** for an
+ROI when its noise, polarity, or response shape needs different treatment.
+Custom changes that ROI alone. Other ROIs remain on Default. After a Custom
+choice has been made, its button changes to **Edit**; **Reset to default**
+removes that ROI's Custom settings.
 
-Expand Edit Default settings, make a bounded change, and choose Use these as
-Default settings when the shared profile should change. Use Reset Default
-settings to return to the starting profile. For a single ROI, use its
-customization control in the table. Use Reset to default when the ROI should
-again follow the shared profile.
+Expand **Edit Default settings**, make a bounded change, and choose **Use
+these as Default settings** when the shared settings should change. Use **Reset
+Default settings** to return to the starting profile. If you edit Default
+settings but do not apply them, the saved Default settings—not the unsaved
+text—will be used during Run.
+
+The **Preview feature detection** panel lets you choose an **ROI**, choose a
+**Segment**, and select **Generate Preview**. It previews that ROI with the
+settings it will use during Run: its Custom settings if it has them, otherwise
+the Default settings. **Show preview details** reveals the numeric preview
+summary. The preview helps you judge the settings; it is not the final analysis.
 
 ### Read the preview and review every ROI
 
 The question is whether event boundaries, polarity, spacing, and summaries are
 defensible for this ROI. Review quiet periods, expected responses, and obvious
 artifacts. If the preview does not resemble the signal, adjust settings or
-reconsider correction before continuing.
+reconsider correction before continuing. **Continue to Review Plan** becomes
+available when at least one ROI is included, every included ROI has valid
+settings, and any changed Default or Custom settings have been applied.
 
 ## 9. Review the analysis plan
 
@@ -452,20 +472,19 @@ the earlier steps and shows:
 - The correction plan, including the selected strategy by ROI.
 - Feature Detection, including Default and Custom assignments.
 - The output destination.
-- The next step and the Go to Run action when the plan is ready.
+- The next step and the **Go to Run** action when the plan is ready.
 
 Confirm that the source, recording structure, timing, selected ROIs, correction
 choices, feature-detection settings, and output folder are correct. If the plan
 identifies an item that needs attention, return to the indicated step and correct
 it before running the analysis.
 
-Review plan can report that the setup is complete while your scientific review
-is still incomplete. Software readiness and scientific readiness are separate.
-Choose Go to Run after the visible plan and your review agree.
-
-![Guided Review plan step](images/guided/guided-review-plan.png)
-
-*Review plan gathers the selected source, timing, correction, and output choices.*
+The plan can report that the setup is complete while your scientific review is
+still incomplete. Software readiness and scientific readiness are separate.
+The correction and feature-detection previews are evidence for checking your
+choices; they are not the final analysis. Choose **Go to Run** only after the
+visible plan and your scientific review agree. If the button is unavailable,
+read **What needs attention** and correct the named step.
 
 ## 10. Run the analysis
 
@@ -480,18 +499,14 @@ feedback: return to the step named in the message, correct the specific
 choice, and check the setup again. If Run is disabled, correct the named setup
 item before checking again.
 
-For intermittent analysis, the GUI warns that the analysis cannot be stopped
-from the GUI once it starts. Do not close the window while it is running. Plan
-enough uninterrupted time for the run.
+For repeated-session analysis, the GUI warns that the analysis cannot be
+stopped from the GUI once it starts. Do not close the window while it is
+running. Plan enough uninterrupted time for the run.
 
-![Guided intermittent run in progress](images/guided/guided-run-active.png)
-
-*An intermittent run reports its current phase while the window remains open.*
-
-For continuous analysis, the Stop button appears while preparation or analysis
-is active. Stop requests a stop at the next safe point, so it can take a
-moment. It is a cooperative stop, not an immediate termination. Wait for the
-status to settle before closing the application.
+For continuous analysis, the **Stop** button appears while preparation or
+analysis is active. Stop requests a stop at the next safe point, so it can take
+a moment. It is a cooperative stop, not an immediate termination. Wait for the
+status in **Analysis progress** to settle before closing the application.
 
 After a successful run, choose **Open results folder** to view the saved files or
 **Load completed run for review** to open them in Guided. If the run fails, the
@@ -500,48 +515,43 @@ not load as a completed run.
 
 ## 11. Review completed results
 
-Review summarizes completed-run outputs when results are loaded. Use the ROI
-selector to inspect each included ROI. The normal result views can include:
+Review summarizes completed-run outputs when results are loaded. Use the
+**Region** selector to inspect each included ROI; **Region** is the current
+Results label for the ROI being displayed. The current Results viewer also
+provides **Run Report**, **Summary**, **Day Plots**, and **Tables** buttons for
+opening the saved report and the corresponding saved result areas.
 
-![Guided Results workspace with Phasic Summary selected](images/guided/guided-results-summary.png)
+- Verification provides a visual review of the completed correction result.
+  It shows representative signal, reference or correction baseline, and dF/F
+  traces for the selected ROI, together with the correction method used. When
+  the run is loaded, Guided checks that the saved results folder contains the
+  expected files and a record of how the run was produced.
+- **Slow Signal** shows slow-signal views when that analysis ran.
+- **Signal / Reference** shows the signal and reference channels for the
+  plotted days.
+- **Correction Reference** shows the reference used for correction when that
+  view is available.
+- **dF/F** shows the reference-corrected event signal for the plotted days.
+- **Stacked dF/F** compares plotted days.
+- **Event Summary** shows event-activity summaries across plotted days.
 
-*The selected ROI's Summary view shows event activity across the recording.*
-
-![Guided Results workspace with Verification selected](images/guided/guided-results-verification.png)
-
-*Results provides the ROI selector and the Verification view for the completed run.*
-
-- Verification provides a visual review of the completed correction result. It
-  shows representative signal, reference or correction baseline, and dF/F
-  traces for the selected ROI, together with the correction approach used. When
-  the run is loaded, Guided also checks that the completed package contains the
-  expected saved outputs and provenance.
-- Tonic, for tonic signal views where tonic analysis ran.
-- Phasic Sig/Iso, for signal and reference context.
-- Dynamic Fit, for the fitted reference behavior.
-- Correction Reference, for the reference used for correction when that view is
-  available.
-- Phasic dFF, for the reference-corrected phasic trace.
-- Phasic Stacked, for comparing plotted days.
-- Phasic Summary, for event-activity summaries across plotted days.
-
-Use Run Report to open the saved analysis report. For the selected ROI, Summary,
-Day Plots, and Tables open corresponding result areas when they exist. The
-available views depend on which analyses were run and which outputs were
-produced.
+The available views depend on which analyses ran and which files were produced.
+Older screenshots or saved reports may use the names **Phasic dFF** and
+**Phasic Summary**; those are not current Results controls. In the current GUI,
+use **dF/F** and **Event Summary**.
 
 These checks confirm that the saved result is internally consistent; they do not
 establish biological validity or determine whether the selected correction is
 scientifically appropriate.
 
-Continuous results use a simpler workspace with one ROI selector. Depending on
-which analyses were run and which outputs were produced, the viewer can provide
-Verification, correction-reference or baseline views, dF/F views, stacked views,
-and summaries, as well as Tonic or Phasic views. Not every view appears for
-every run. The continuous overview summarizes the recording duration, analysis
-windows, correction state, and which analysis branches completed. Long traces
-may be downsampled for display, while window summaries provide the more detailed
-view. Inspect both the overview and the per-window summaries when judging long
+Continuous results use a simpler workspace with one **Region** selector. The
+viewer shows a **Slow Signal** tab when slow-signal analysis ran and an **Events**
+tab when event analysis ran. Not every view appears for every run, and not every
+tab appears for every run. The continuous overview summarizes the recording
+duration, analysis windows, correction state, and whether slow-signal and event
+analysis completed. Long traces may be
+downsampled for display, while window summaries provide the more detailed view.
+Inspect both the overview and the per-window summaries when judging long
 recordings.
 
 Relate outputs to the experiment. Check timeline placement, correction,

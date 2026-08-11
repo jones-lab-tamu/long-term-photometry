@@ -122,6 +122,15 @@ def load_guided_correction_payload(path: str | Path, expected_roi_ids: Iterable[
     if not isinstance(raw_entries, list):
         raise GuidedCorrectionPayloadError("Guided correction map is malformed.")
     specs: dict[str, PerRoiCorrectionSpec] = {}
+    legacy_specs: dict[str, PerRoiCorrectionSpec] = {}
+    # Older Guided payloads serialized these names even though they were not
+    # part of the current Guided editable contract.  Keep this compatibility
+    # path local to reopening an existing payload; current overrides and new
+    # payloads continue to use the current field registry.
+    legacy_effective_parameter_names = {
+        "robust_event_reject_local_var_window_sec",
+        "adaptive_event_gate_local_var_window_sec",
+    }
     required = {
         "roi_id",
         "strategy_family",
@@ -153,9 +162,16 @@ def load_guided_correction_payload(path: str | Path, expected_roi_ids: Iterable[
                 raise GuidedCorrectionPayloadError(
                     "Guided correction parameter names must be strings."
                 )
+            raw_effective_parameters = (
+                tuple(raw_parameters.items())
+                if isinstance(raw_parameters, Mapping)
+                else ()
+            )
             effective_parameters = tuple(
-                raw_parameters.items()
-            ) if isinstance(raw_parameters, Mapping) else ()
+                (name, value)
+                for name, value in raw_effective_parameters
+                if name not in legacy_effective_parameter_names
+            )
             strategy = str(raw.get("selected_strategy") or "")
             if has_effective_parameters:
                 try:
@@ -177,19 +193,40 @@ def load_guided_correction_payload(path: str | Path, expected_roi_ids: Iterable[
             if spec.roi_id in specs:
                 raise GuidedCorrectionPayloadError("Guided correction map contains a duplicate ROI.")
             specs[spec.roi_id] = spec
+            if legacy_effective_parameter_names.intersection(
+                name for name, _value in raw_effective_parameters
+            ):
+                legacy_specs[spec.roi_id] = PerRoiCorrectionSpec(
+                    roi_id=raw["roi_id"],
+                    strategy_family=raw["strategy_family"],
+                    selected_strategy=raw["selected_strategy"],
+                    dynamic_fit_mode=raw["dynamic_fit_mode"],
+                    parameter_identity=raw["parameter_identity"],
+                    evidence_identity=raw["evidence_identity"],
+                    effective_parameters=raw_effective_parameters,
+                )
     except (TypeError, ValueError) as exc:
         raise GuidedCorrectionPayloadError(str(exc)) from exc
     if set(specs) != set(included):
         raise GuidedCorrectionPayloadError("Guided correction coverage does not exactly match included ROIs.")
     identity = correction_payload_identity(tuple(included), specs)
     if document.get("canonical_correction_payload_identity") != identity:
+        legacy_identity_specs = dict(specs)
+        legacy_identity_specs.update(legacy_specs)
+        legacy_parameter_identity_matches = bool(legacy_specs) and document.get(
+            "canonical_correction_payload_identity"
+        ) == correction_payload_identity(
+            tuple(included), legacy_identity_specs
+        )
         legacy_entries = all(
             isinstance(raw, dict) and "effective_parameters" not in raw
             for raw in raw_entries
         )
-        if not legacy_entries or document.get(
-            "canonical_correction_payload_identity"
-        ) != _legacy_correction_payload_identity(tuple(included), specs):
+        if not legacy_parameter_identity_matches and (
+            not legacy_entries
+            or document.get("canonical_correction_payload_identity")
+            != _legacy_correction_payload_identity(tuple(included), specs)
+        ):
             raise GuidedCorrectionPayloadError(
                 "Guided correction payload identity mismatch."
             )

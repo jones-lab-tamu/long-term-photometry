@@ -536,7 +536,6 @@ def test_continuous_dynamic_roi_applies_its_effective_parameters_to_filter_and_f
         effective_parameters=(
             ("robust_event_reject_max_iters", 6),
             ("robust_event_reject_residual_z_thresh", 4.0),
-            ("robust_event_reject_local_var_window_sec", 25.0),
             ("robust_event_reject_min_keep_fraction", 0.7),
         ),
     )
@@ -575,8 +574,8 @@ def test_continuous_dynamic_roi_applies_its_effective_parameters_to_filter_and_f
     )
 
     assert [cfg.robust_event_reject_local_var_window_sec for cfg in captured["filter_configs"]] == [
-        25.0,
-        25.0,
+        10.0,
+        10.0,
     ]
     assert captured["fit_config"].robust_event_reject_max_iters == 6
     assert captured["fit_config"].robust_event_reject_residual_z_thresh == 4.0

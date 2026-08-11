@@ -4,8 +4,10 @@ import pytest
 from pathlib import Path
 import hashlib
 
+from photometry_pipeline.core.types import PerRoiCorrectionSpec
 from photometry_pipeline.guided_correction_payload import (
     GuidedCorrectionPayloadError,
+    correction_payload_identity,
     load_guided_correction_payload,
     serialize_guided_correction_payload,
 )
@@ -156,39 +158,76 @@ def test_cli_loader_refuses_native_file_mutated_after_authorization(tmp_path):
         load_guided_per_roi_correction(manifest)
 
 
-def test_payload_preserves_complete_effective_values_and_accepts_legacy_identity(tmp_path):
-    parameters = (
-        GuidedProductionTypedValue(
-            "robust_event_reject_max_iters", "int", 3, "applied_dynamic_fit_per_roi"
+@pytest.mark.parametrize(
+    ("strategy", "legacy_field", "parameter_values"),
+    [
+        (
+            "robust_global_event_reject",
+            "robust_event_reject_local_var_window_sec",
+            (
+                ("robust_event_reject_max_iters", "int", 3),
+                ("robust_event_reject_residual_z_thresh", "float", 3.5),
+                ("robust_event_reject_min_keep_fraction", "float", 0.5),
+            ),
         ),
-        GuidedProductionTypedValue(
-            "robust_event_reject_residual_z_thresh", "float", 3.5,
-            "applied_dynamic_fit_per_roi",
+        (
+            "adaptive_event_gated_regression",
+            "adaptive_event_gate_local_var_window_sec",
+            (
+                ("adaptive_event_gate_residual_z_thresh", "float", 3.5),
+                ("adaptive_event_gate_smooth_window_sec", "float", 60.0),
+                ("adaptive_event_gate_min_trust_fraction", "float", 0.5),
+            ),
         ),
+    ],
+)
+def test_payload_reopens_legacy_local_variance_fields_without_retaining_them(
+    tmp_path, strategy, legacy_field, parameter_values
+):
+    parameters = tuple(
         GuidedProductionTypedValue(
-            "robust_event_reject_local_var_window_sec", "float", 20.0,
-            "applied_dynamic_fit_per_roi",
-        ),
-        GuidedProductionTypedValue(
-            "robust_event_reject_min_keep_fraction", "float", 0.5,
-            "applied_dynamic_fit_per_roi",
-        ),
+            name, kind, value, "applied_dynamic_fit_per_roi"
+        )
+        for name, kind, value in parameter_values
     )
-    entry = _entry("ROI1", "robust_global_event_reject")
+    entry = _entry("ROI1", strategy)
     entry = type(entry)(**{**entry.__dict__, "effective_parameters": parameters})
     path = tmp_path / "current.json"
     path.write_bytes(serialize_guided_correction_payload(("ROI1",), (entry,)))
-    current = json.loads(path.read_text())
-    assert current["per_roi_correction"][0]["effective_parameters"][
-        "robust_event_reject_local_var_window_sec"
-    ] == 20.0
-    assert dict(load_guided_correction_payload(path, ("ROI1",))["ROI1"].effective_parameters)[
-        "robust_event_reject_local_var_window_sec"
-    ] == 20.0
+    current_spec = load_guided_correction_payload(path, ("ROI1",))["ROI1"]
+    assert dict(current_spec.effective_parameters) == {
+        name: value for name, _kind, value in parameter_values
+    }
+    assert legacy_field not in dict(current_spec.effective_parameters)
 
-    legacy = dict(current)
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["per_roi_correction"][0]["effective_parameters"][legacy_field] = 20.0
+    legacy_parameters = tuple(current_spec.effective_parameters) + (
+        (legacy_field, 20.0),
+    )
+    legacy_spec = PerRoiCorrectionSpec(
+        roi_id=current_spec.roi_id,
+        strategy_family=current_spec.strategy_family,
+        selected_strategy=current_spec.selected_strategy,
+        dynamic_fit_mode=current_spec.dynamic_fit_mode,
+        parameter_identity=current_spec.parameter_identity,
+        evidence_identity=current_spec.evidence_identity,
+        effective_parameters=legacy_parameters,
+    )
+    legacy["canonical_correction_payload_identity"] = correction_payload_identity(
+        ("ROI1",), {"ROI1": legacy_spec}
+    )
+    legacy_path = tmp_path / "legacy_with_local_variance.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    resolved_legacy_parameters = dict(
+        load_guided_correction_payload(legacy_path, ("ROI1",))["ROI1"].effective_parameters
+    )
+    assert resolved_legacy_parameters == dict(current_spec.effective_parameters)
+    assert legacy_field not in resolved_legacy_parameters
+
+    legacy_without_parameters = json.loads(path.read_text(encoding="utf-8"))
     legacy_entries = []
-    for raw in current["per_roi_correction"]:
+    for raw in legacy_without_parameters["per_roi_correction"]:
         legacy_entries.append(
             {
                 key: raw[key]
@@ -202,13 +241,17 @@ def test_payload_preserves_complete_effective_values_and_accepts_legacy_identity
                 )
             }
         )
-    legacy["per_roi_correction"] = legacy_entries
-    legacy_basis = dict(legacy)
+    legacy_without_parameters["per_roi_correction"] = legacy_entries
+    legacy_basis = dict(legacy_without_parameters)
     legacy_basis.pop("canonical_correction_payload_identity", None)
-    legacy["canonical_correction_payload_identity"] = hashlib.sha256(
+    legacy_without_parameters["canonical_correction_payload_identity"] = hashlib.sha256(
         json.dumps(legacy_basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
-    legacy_path = tmp_path / "legacy.json"
-    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
-    resolved_legacy = load_guided_correction_payload(legacy_path, ("ROI1",))
+    legacy_without_parameters_path = tmp_path / "legacy_without_parameters.json"
+    legacy_without_parameters_path.write_text(
+        json.dumps(legacy_without_parameters), encoding="utf-8"
+    )
+    resolved_legacy = load_guided_correction_payload(
+        legacy_without_parameters_path, ("ROI1",)
+    )
     assert resolved_legacy["ROI1"].effective_parameters == ()
