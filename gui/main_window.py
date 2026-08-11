@@ -21780,8 +21780,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._guided_feature_preview_status_label)
 
         self._guided_feature_preview_source_note = QLabel(
-            "Preview trace: local correction-preview dF/F (fractional "
-            "units). This preview is for parameter tuning only. Final run "
+            "Preview trace: local correction-preview dF/F (percent-style "
+            "values). This preview is for parameter tuning only. Final run "
             "outputs may differ."
         )
         self._guided_feature_preview_source_note.setObjectName(
@@ -22184,7 +22184,12 @@ class MainWindow(QMainWindow):
                     "time_sec": time_sec,
                     "trace": preview_dff,
                     "fs_hz": fs_hz,
-                    "trace_identity": {"roi_id": roi_id, "source": "in_memory_preview"},
+                    "trace_identity": {
+                        "roi_id": roi_id,
+                        "source": "in_memory_preview",
+                        "trace_source": "local_correction_preview_dff",
+                        "dff_scale": sig_only_evidence.get("dff_scale"),
+                    },
                     "correction_identity": {"strategy": "signal_only_f0"},
                     "current": True,
                 }
@@ -22392,7 +22397,7 @@ class MainWindow(QMainWindow):
                     "trace_source": "local_correction_preview_dff",
                     "preview_only": True,
                     "production_analysis": False,
-                    "dff_scale": "fractional_ratio",
+                    "dff_scale": "percent",
                     "segment_label": trace_result.get("segment_label"),
                 },
                 correction_identity={
@@ -22411,7 +22416,7 @@ class MainWindow(QMainWindow):
                     "trace_source": "local_correction_preview_dff",
                     "preview_only": True,
                     "production_analysis": False,
-                    "dff_scale": "fractional_ratio",
+                    "dff_scale": "percent",
                     "segment_label": trace_result.get("segment_label"),
                 },
                 correction_identity={"strategy": "signal_only_f0"},

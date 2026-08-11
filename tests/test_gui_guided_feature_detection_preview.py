@@ -173,6 +173,12 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
         "strategy_family": "signal_only_f0",
         "selected_strategy": "signal_only_f0",
         "dynamic_fit_mode": None,
+        "trace_source": "local_correction_preview_dff",
+        "dff_scale": "percent",
+        "dff_formula": (
+            "100 * (signal - signal_only_f0_baseline) / "
+            "signal_only_f0_baseline"
+        ),
         "preview_only": preview_only,
         "production_analysis": production_analysis,
         "time_sec": time_sec,
@@ -287,7 +293,7 @@ def _setup_dynamic_evidence(
             "selected_strategy": mode,
             "dynamic_fit_mode": mode,
             "trace_source": "local_correction_preview_dff",
-            "dff_scale": "fractional_ratio",
+            "dff_scale": "percent",
             "preview_only": True,
             "production_analysis": False,
             "current_or_stale": "current",
@@ -1145,7 +1151,7 @@ def test_generate_preview_dynamic_fit_dff_success(window):
     assert not result_table.isHidden()
     assert not source_note.isHidden()
     assert "local correction-preview dF/F" in source_note.text()
-    assert "Final run outputs may differ" in source_note.text()
+    assert "percent-style values" in source_note.text()
     assert not window._guided_feature_detection_continue_btn.isEnabled()
 
 

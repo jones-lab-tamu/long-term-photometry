@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -200,6 +201,7 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
             ]
         )
         if method == "signal_only_f0":
+            assert evidence["dff_scale"] == "percent"
             assert "Fitted reference" not in axes[1].get_title()
             assert [line.get_label() for line in axes[1].lines] == [
                 "Raw signal",
@@ -255,6 +257,7 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
         np.testing.assert_allclose(
             axes[1].lines[1].get_ydata(), sampled(trace["fit_ref"]), equal_nan=True
         )
+        assert evidence["dff_scale"] == "percent"
         np.testing.assert_allclose(
             axes[2].lines[0].get_ydata(),
             sampled(evidence["preview_dff"]),
@@ -263,7 +266,7 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
         assert axes[2].lines[0].get_color() == DFF_COLOR
 
 
-def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():
+def test_local_dynamic_fit_preview_dff_uses_percent_style_units():
     chunk = Chunk(
         chunk_id=0,
         source_file="memory",
@@ -277,24 +280,48 @@ def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():
         channel_names=["CH1"],
     )
 
-    evidence = (
-        correction_preview_module._compute_local_dynamic_fit_dff_evidence(
+    for method in GUIDED_REFERENCE_PREVIEW_METHODS:
+        evidence = correction_preview_module._compute_local_dynamic_fit_dff_evidence(
             chunk,
             Config(
                 baseline_method="uv_raw_percentile_session",
                 baseline_percentile=10.0,
             ),
-            method="global_linear_regression",
+            method=method,
             roi="CH1",
         )
+
+        np.testing.assert_allclose(evidence["preview_dff"], [0.0, 5.0, -5.0])
+        assert evidence["local_preview_f0"] == 10.0
+        assert evidence["dff_scale"] == "percent"
+        assert evidence["dff_formula"] == "100 * delta_f / local_preview_f0"
+
+
+def test_guided_signal_only_f0_preview_uses_percent_style_dff(monkeypatch):
+    monkeypatch.setattr(
+        correction_preview_module,
+        "compute_signal_only_f0_dff",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            signal=np.array([10.0, 10.5, 9.5]),
+            signal_only_f0=np.array([10.0, 10.0, 10.0]),
+            dff=np.array([0.0, 0.05, -0.05]),
+            parameters={},
+            warnings=(),
+        ),
     )
 
-    np.testing.assert_allclose(
-        evidence["preview_dff"], [0.0, 0.05, -0.05]
+    evidence = compute_guided_local_signal_only_f0_preview(
+        np.array([10.0, 10.5, 9.5]),
+        np.array([0.0, 1.0, 2.0]),
+        roi_id="CH1",
     )
-    assert evidence["local_preview_f0"] == 10.0
-    assert evidence["dff_scale"] == "fractional_ratio"
-    assert evidence["dff_formula"] == "delta_f / local_preview_f0"
+
+    np.testing.assert_allclose(evidence["preview_dff"], [0.0, 5.0, -5.0])
+    assert evidence["dff_scale"] == "percent"
+    assert evidence["dff_formula"] == (
+        "100 * (signal - signal_only_f0_baseline) / "
+        "signal_only_f0_baseline"
+    )
 
 
 def test_local_signal_only_f0_preview_computes_in_memory_and_preserves_negative():
@@ -1054,7 +1081,7 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert dynamic_evidence["trace_source"] == (
         "local_correction_preview_dff"
     )
-    assert dynamic_evidence["dff_scale"] == "fractional_ratio"
+    assert dynamic_evidence["dff_scale"] == "percent"
     assert dynamic_evidence["preview_only"] is True
     assert dynamic_evidence["production_analysis"] is False
     assert len(dynamic_evidence["time_sec"]) == len(
@@ -1134,7 +1161,7 @@ def test_on_demand_local_preview_service_is_no_write_and_strategy_exact(
     assert result["dynamic_fit_mode"] == "global_linear_regression"
     assert result["discovered_session_index"] == 2
     assert result["adapter_chunk_index"] == 0
-    assert result["dff_scale"] == "fractional_ratio"
+    assert result["dff_scale"] == "percent"
     assert result["preview_only"] is True
     assert result["production_analysis"] is False
     assert len(result["time_sec"]) == len(result["preview_dff"])

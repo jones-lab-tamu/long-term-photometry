@@ -274,7 +274,7 @@ def resolve_guided_feature_preview_trace(
                 and trace_identity.get("roi_id") == roi_id
                 and trace_identity.get("trace_source")
                 == "local_correction_preview_dff"
-                and trace_identity.get("dff_scale") == "fractional_ratio"
+                and trace_identity.get("dff_scale") == "percent"
                 and trace_identity.get("preview_only") is True
                 and trace_identity.get("production_analysis") is False
                 and isinstance(correction_identity, dict)
@@ -344,6 +344,15 @@ def resolve_guided_feature_preview_trace(
                 raise GuidedFeaturePreviewUnsupportedError(
                     f"Signal-Only F0 dF/F trace for ROI '{roi_id}' is stale or not current."
                 )
+            trace_identity = trace_data.get("trace_identity", {})
+            if not (
+                isinstance(trace_identity, dict)
+                and trace_identity.get("dff_scale") == "percent"
+            ):
+                raise GuidedFeaturePreviewUnsupportedError(
+                    "Signal-Only F0 dF/F trace identity does not describe "
+                    "the percent-style local preview."
+                )
 
             return GuidedFeaturePreviewTrace(
                 roi_id=roi_id,
@@ -353,7 +362,7 @@ def resolve_guided_feature_preview_trace(
                 event_signal="dff",
                 trace_kind="dff",
                 correction_strategy=strategy,
-                trace_identity=trace_data["trace_identity"],
+                trace_identity=trace_identity,
                 correction_identity=trace_data["correction_identity"],
                 source_kind=trace_data.get("source_kind", "preview_derived"),
             )

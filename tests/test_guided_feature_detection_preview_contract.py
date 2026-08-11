@@ -81,6 +81,33 @@ def test_detector_preview_positive_peaks(tmp_path):
     assert "function" in result.detector_identity
 
 
+def test_local_percent_dff_absolute_threshold_matches_production_behavior():
+    fs = 10.0
+    time_sec = np.arange(3, dtype=float) / fs
+    settings = _valid_settings(thresh_abs=0.5)
+
+    # Preview uses the same percent-style trace and unchanged absolute
+    # threshold as production: [0.0, 60.0, 0.0] with a 0.5 cutoff.
+    result = build_feature_detection_preview_from_trace(
+        roi_id="CH1",
+        time_sec=time_sec,
+        trace=np.array([0.0, 60.0, 0.0]),
+        fs_hz=fs,
+        event_signal="dff",
+        feature_settings=settings,
+        feature_profile_id="prof_1",
+        trace_identity={
+            "trace_source": "local_correction_preview_dff",
+            "dff_scale": "percent",
+        },
+        correction_identity={"corr": "test_corr"},
+    )
+
+    assert result.threshold_upper == 0.5
+    assert result.threshold_lower == -0.5
+    np.testing.assert_array_equal(result.positive_peak_indices, [1])
+
+
 def test_detector_preview_negative_peaks():
     fs = 10.0
     time_sec = np.arange(100) / fs
@@ -367,7 +394,7 @@ def _dynamic_dff_context(*, roi="CH1", mode="global_linear_regression", current=
                 "trace_identity": {
                     "roi_id": roi,
                     "trace_source": "local_correction_preview_dff",
-                    "dff_scale": "fractional_ratio",
+                    "dff_scale": "percent",
                     "preview_only": True,
                     "production_analysis": False,
                 },
@@ -432,15 +459,15 @@ def test_trace_provider_boundary_dynamic_dff_rejects_missing_stale_or_mismatch()
     ):
         resolve_guided_feature_preview_trace(request, mismatched)
 
-    percent_scaled = _dynamic_dff_context()
-    percent_scaled["dynamic_dff"][
+    fractional_scaled = _dynamic_dff_context()
+    fractional_scaled["dynamic_dff"][
         ("CH1", "global_linear_regression")
-    ]["trace_identity"]["dff_scale"] = "percent"
+    ]["trace_identity"]["dff_scale"] = "fractional_ratio"
     with pytest.raises(
         GuidedFeaturePreviewUnsupportedError,
         match="identity does not match",
     ):
-        resolve_guided_feature_preview_trace(request, percent_scaled)
+        resolve_guided_feature_preview_trace(request, fractional_scaled)
 
 
 def test_trace_provider_boundary_signal_only_dff():
@@ -461,7 +488,7 @@ def test_trace_provider_boundary_signal_only_dff():
                 "time_sec": t,
                 "trace": y,
                 "fs_hz": 10.0,
-                "trace_identity": {"trace_id": "T2"},
+                "trace_identity": {"trace_id": "T2", "dff_scale": "percent"},
                 "correction_identity": {"corr_id": "C2"},
                 "current": True,
             }
@@ -473,7 +500,10 @@ def test_trace_provider_boundary_signal_only_dff():
     assert trace_resolved.roi_id == "CH2"
     assert trace_resolved.event_signal == "dff"
     assert trace_resolved.correction_strategy == "signal_only_f0"
-    assert trace_resolved.trace_identity == {"trace_id": "T2"}
+    assert trace_resolved.trace_identity == {
+        "trace_id": "T2",
+        "dff_scale": "percent",
+    }
     assert trace_resolved.correction_identity == {"corr_id": "C2"}
 
 

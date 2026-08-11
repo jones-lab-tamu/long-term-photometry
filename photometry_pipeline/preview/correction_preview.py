@@ -628,6 +628,12 @@ def compute_guided_local_signal_only_f0_preview(
         "strategy_family": "signal_only_f0",
         "selected_strategy": "signal_only_f0",
         "dynamic_fit_mode": None,
+        "trace_source": "local_correction_preview_dff",
+        "dff_scale": "percent",
+        "dff_formula": (
+            "100 * (signal - signal_only_f0_baseline) / "
+            "signal_only_f0_baseline"
+        ),
         "preview_only": True,
         "production_analysis": False,
         "explicit_user_mark": False,
@@ -661,7 +667,7 @@ def compute_guided_local_signal_only_f0_preview(
             "metrics": {},
         }
 
-    dff = np.asarray(result.dff, dtype=float).reshape(-1)
+    dff = 100.0 * np.asarray(result.dff, dtype=float).reshape(-1)
     return {
         **base,
         "status": "success",
@@ -699,7 +705,7 @@ def compute_guided_local_preview_dff_trace_in_memory(
     config_overrides: dict[str, Any] | None = None,
     continuous_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Compute one local fractional dF/F trace without creating artifacts."""
+    """Compute one local percent-style dF/F trace without creating artifacts."""
     family = str(strategy_family or "").strip()
     selected = str(strategy or "").strip()
     mode = str(dynamic_fit_mode or selected or "").strip()
@@ -718,7 +724,7 @@ def compute_guided_local_preview_dff_trace_in_memory(
         "preview_dff": np.asarray([], dtype=float),
         "fs_hz": None,
         "trace_source": "local_correction_preview_dff",
-        "dff_scale": "fractional_ratio",
+        "dff_scale": "percent",
         "preview_only": True,
         "production_analysis": False,
         "current_or_stale": "current",
@@ -866,7 +872,7 @@ def compute_guided_local_preview_dff_trace_in_memory(
             "preview_dff": preview_dff.copy(),
             "fs_hz": float(record["fs_hz"]),
             "trace_source": "local_correction_preview_dff",
-            "dff_scale": "fractional_ratio",
+            "dff_scale": "percent",
             "issues": [],
             "continuous_analysis_window": (
                 dict(selected_window) if selected_window is not None else None
@@ -1653,15 +1659,15 @@ def _compute_local_dynamic_fit_dff_evidence(
     method: str,
     roi: str,
 ) -> dict[str, Any]:
-    """Build bounded, fractional local-preview dF/F for decision support."""
+    """Build bounded, percent-style local-preview dF/F for decision support."""
     base = {
         "roi_id": str(roi),
         "strategy_family": "dynamic_fit",
         "selected_strategy": str(method),
         "dynamic_fit_mode": str(method),
         "trace_source": "local_correction_preview_dff",
-        "dff_scale": "fractional_ratio",
-        "dff_formula": "delta_f / local_preview_f0",
+        "dff_scale": "percent",
+        "dff_formula": "100 * delta_f / local_preview_f0",
         "preview_only": True,
         "production_analysis": False,
         "current_or_stale": "current",
@@ -1707,7 +1713,7 @@ def _compute_local_dynamic_fit_dff_evidence(
             "issues": ["Local-preview F0 is invalid or below f0_min_value."],
         }
     delta_f = np.asarray(chunk.delta_f[:, 0], dtype=float).reshape(-1)
-    preview_dff = delta_f / f0
+    preview_dff = 100.0 * delta_f / f0
     fit_input_signal = np.asarray(
         chunk.sig_raw[:, 0], dtype=float
     ).reshape(-1)
