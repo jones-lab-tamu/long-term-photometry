@@ -135,6 +135,41 @@ def _compute_file_entry(root: Path, rel_path: str) -> dict[str, Any] | None:
         return None
 
 
+def _compute_source_distribution_digest(root: Path) -> str | None:
+    """Compute the existing content-bound digest for an extracted source tree.
+
+    This uses the same canonical path/file-entry algorithm as the dirty Git
+    identity path.  It intentionally hashes only the files present in the
+    source directory, excluding the transient paths already excluded by
+    ``is_excluded_path``; ZIP metadata, timestamps, and the machine path do
+    not participate in the identity.
+    """
+    try:
+        if not root.is_dir():
+            return None
+        relative_paths = []
+        for filepath in root.rglob("*"):
+            rel_path = filepath.relative_to(root).as_posix()
+            if is_excluded_path(rel_path):
+                continue
+            if filepath.is_symlink() or filepath.is_file():
+                relative_paths.append(rel_path)
+
+        entries = []
+        for path_str in sorted(relative_paths):
+            entry = _compute_file_entry(root, path_str)
+            if entry is None:
+                return None
+            entries.append(entry)
+
+        payload_bytes = encode_canonical_value(entries)
+        return hashlib.sha256(
+            b"photometry-source-tree-digest:v1" + b"\x00" + payload_bytes
+        ).hexdigest()
+    except Exception:
+        return None
+
+
 def _check_git_available() -> bool:
     try:
         subprocess.run(
@@ -326,34 +361,40 @@ def resolve_application_build_identity(
             )
 
         # 6. Non-Git fallback
-        if packaged_artifact_digest is not None:
-            if not _is_sha256(packaged_artifact_digest):
-                return _unresolved(
-                    "packaged_artifact_identity_unavailable",
-                    "Provided packaged_artifact_digest is not a valid SHA-256 digest."
-                )
-            
-            # Use distribution version as revision
-            identity = build_application_build_identity(
-                distribution_name=distribution_name,
-                distribution_version=version,
-                source_revision_kind="packaged_artifact",
-                source_revision=version,
-                source_tree_state="unavailable",
-                build_artifact_digest=packaged_artifact_digest,
-            )
-            return ApplicationBuildIdentityProviderResult(
-                status="resolved",
-                build_identity=identity,
-                blocking_issues=(),
-                provider_version=APPLICATION_BUILD_IDENTITY_PROVIDER_VERSION,
+        # An extracted source folder or ZIP has no Git revision, but its
+        # content can still use the existing packaged-artifact identity slot.
+        # An explicitly supplied digest remains authoritative; otherwise bind
+        # the identity to the files actually present in the source tree.
+        if packaged_artifact_digest is None:
+            packaged_artifact_digest = _compute_source_distribution_digest(
+                resolved_root
             )
 
-        # Packaged fallback not available or not requested
-        refusal_cat = "packaged_artifact_identity_unavailable" if not git_avail else "repository_root_not_found"
-        return _unresolved(
-            refusal_cat,
-            "Not a Git repository and no valid packaged_artifact_digest provided."
+        if packaged_artifact_digest is None:
+            return _unresolved(
+                "packaged_artifact_identity_unavailable",
+                "No Git revision or source-distribution artifact digest could be resolved."
+            )
+        if not _is_sha256(packaged_artifact_digest):
+            return _unresolved(
+                "packaged_artifact_identity_unavailable",
+                "Provided packaged_artifact_digest is not a valid SHA-256 digest."
+            )
+
+        # Use distribution version as revision.
+        identity = build_application_build_identity(
+            distribution_name=distribution_name,
+            distribution_version=version,
+            source_revision_kind="packaged_artifact",
+            source_revision=version,
+            source_tree_state="unavailable",
+            build_artifact_digest=packaged_artifact_digest,
+        )
+        return ApplicationBuildIdentityProviderResult(
+            status="resolved",
+            build_identity=identity,
+            blocking_issues=(),
+            provider_version=APPLICATION_BUILD_IDENTITY_PROVIDER_VERSION,
         )
 
     except Exception:

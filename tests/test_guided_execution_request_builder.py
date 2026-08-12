@@ -195,6 +195,35 @@ def test_missing_build_identity_refuses(
     assert result.status == "build_identity_unavailable"
 
 
+def test_non_git_source_root_builds_startup_authority(
+    startup_request, validation_state, tmp_path
+):
+    source_root = tmp_path / "source_distribution"
+    wrapper_path = source_root / "tools" / "run_full_pipeline_deliverables.py"
+    wrapper_path.parent.mkdir(parents=True)
+    wrapper_path.write_text("# test wrapper\n", encoding="utf-8")
+
+    context, outcome = validation_state
+    result = builder.build_guided_startup_request_from_validation(
+        validation_context=context,
+        validation_outcome=outcome,
+        current_gui_revision=context.revision,
+        project_root=source_root,
+        current_time_utc=datetime(2026, 7, 2, 12, 30, tzinfo=timezone.utc),
+        token_factory=lambda: "fixed-one-shot-token",
+        run_id_factory=lambda _value: "guided_run_non_git_source",
+    )
+
+    assert result.status == "built", result.blocking_issues
+    assert result.ok is True
+    assert isinstance(result.startup_authority, GuidedStartupAuthority)
+    assert result.startup_transaction_request is not None
+    identity = result.startup_transaction_request.application_build_identity
+    assert identity.source_revision_kind == "packaged_artifact"
+    assert identity.source_tree_state == "unavailable"
+    assert identity.build_artifact_digest is not None
+
+
 def test_authorization_refusal_is_classified(
     startup_request, validation_state, monkeypatch
 ):

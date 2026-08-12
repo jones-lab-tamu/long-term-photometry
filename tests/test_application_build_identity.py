@@ -219,18 +219,36 @@ def test_deterministic_digest(git_repo: Path):
     assert res_1.build_identity.source_tree_digest == res_2.build_identity.source_tree_digest
 
 
-# 7. Non-Git path without packaged digest refuses
-def test_non_git_path_without_packaged_digest_refuses(tmp_path: Path):
+# 7. Non-Git source folders use a content-bound packaged identity
+def test_non_git_source_folder_without_packaged_digest_resolves(
+    tmp_path: Path,
+):
     non_git_dir = tmp_path / "nongit"
     non_git_dir.mkdir()
+    source_file = non_git_dir / "source.py"
+    source_file.write_text("value = 1\n", encoding="utf-8")
+
     result = resolve_application_build_identity(
         project_root=non_git_dir,
         distribution_version="1.0.0",
         packaged_artifact_digest=None,
     )
-    assert result.status == "unresolved"
-    assert result.build_identity is None
-    assert result.blocking_issues[0].category in ("repository_root_not_found", "git_unavailable")
+    assert result.status == "resolved"
+    assert result.build_identity is not None
+    assert result.build_identity.source_revision_kind == "packaged_artifact"
+    assert result.build_identity.source_revision == "1.0.0"
+    assert result.build_identity.source_tree_state == "unavailable"
+    assert result.build_identity.build_artifact_digest is not None
+
+    digest_1 = result.build_identity.build_artifact_digest
+    source_file.write_text("value = 2\n", encoding="utf-8")
+    result_2 = resolve_application_build_identity(
+        project_root=non_git_dir,
+        distribution_version="1.0.0",
+    )
+    assert result_2.status == "resolved"
+    assert result_2.build_identity is not None
+    assert result_2.build_identity.build_artifact_digest != digest_1
 
 
 # 8. Packaged artifact fallback resolves
@@ -480,15 +498,16 @@ def test_explicit_distribution_version_bypasses_metadata_lookup_entirely(
 
 
 # 16. A source launch with no installed package metadata AND no git
-# identity available (and no packaged-artifact fallback) still refuses,
-# exactly as before -- the sentinel only ever substitutes for the missing
-# *version string*; it never fabricates a source/git identity that
-# genuinely cannot be resolved.
-def test_source_launch_without_package_metadata_and_without_git_still_refuses(
+# identity uses the content-bound source-distribution fallback.
+def test_source_launch_without_package_metadata_and_without_git_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     non_git_dir = tmp_path / "nongit"
     non_git_dir.mkdir()
+    (non_git_dir / "source.py").write_text(
+        "value = 'source distribution'\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         importlib.metadata,
         "version",
@@ -497,12 +516,14 @@ def test_source_launch_without_package_metadata_and_without_git_still_refuses(
 
     result = resolve_application_build_identity(
         project_root=non_git_dir,
-        packaged_artifact_digest=None,
     )
 
-    assert result.status == "unresolved"
-    assert result.build_identity is None
-    assert result.blocking_issues[0].category in (
-        "repository_root_not_found",
-        "git_unavailable",
+    assert result.status == "resolved"
+    assert result.build_identity is not None
+    assert result.build_identity.distribution_version == (
+        SOURCE_LAUNCH_VERSION_SENTINEL
     )
+    assert result.build_identity.source_revision_kind == "packaged_artifact"
+    assert result.build_identity.source_revision == SOURCE_LAUNCH_VERSION_SENTINEL
+    assert result.build_identity.source_tree_state == "unavailable"
+    assert result.build_identity.build_artifact_digest is not None
