@@ -1058,6 +1058,35 @@ def test_confirmed_csv_interpretation_survives_guided_navigation_and_preview(
     )
 
 
+def test_recording_timing_edits_do_not_rebuild_csv_candidate(
+    window, tmp_path, monkeypatch
+):
+    _configure_confirmed_csv_dataset(window, tmp_path)
+    candidate_calls = 0
+
+    def unexpected_candidate_call(*_args, **_kwargs):
+        nonlocal candidate_calls
+        candidate_calls += 1
+        pytest.fail(
+            "Recording Structure readiness must not rebuild the CSV dataset "
+            "contract candidate."
+        )
+
+    monkeypatch.setattr(
+        window,
+        "_guided_new_analysis_dataset_contract_candidate",
+        unexpected_candidate_call,
+    )
+    for value in ("", "1", "12", "12:", "12:0", "12:00", "12:00:0", "12:00:00"):
+        window._guided_recording_start_clock_edit.setText(value)
+
+    assert candidate_calls == 0
+    assert window._guided_csv_interpretation_confirmation_readiness() == (
+        True,
+        "",
+    )
+
+
 def test_unconfirmed_csv_interpretation_blocks_feature_readiness_and_preview(
     window, tmp_path
 ):

@@ -5472,13 +5472,7 @@ class MainWindow(QMainWindow):
         ):
             return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
 
-        try:
-            current_candidate = self._guided_new_analysis_dataset_contract_candidate()
-        except (GuidedSamplingRateError, OSError, ValueError):
-            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
-
         confirmed_identity = getattr(snapshot, "source_identity", None)
-        current_identity = getattr(current_candidate, "source_identity", None)
         identity_fields = (
             "input_source_path",
             "resolved_input_source_path",
@@ -5486,57 +5480,121 @@ class MainWindow(QMainWindow):
             "resolved_input_format",
             "acquisition_mode",
         )
-        if confirmed_identity is None or current_identity is None:
+        current_input_path = self._guided_input_dir_edit.text().strip()
+        current_input_format = str(
+            self._guided_format_combo.currentText() or ""
+        ).strip().lower()
+        current_resolved_format = str(
+            discovery.get("resolved_format", current_input_format) or ""
+        ).strip().lower()
+        current_acquisition_mode = self._guided_effective_acquisition_mode()
+        current_identity_values = {
+            "input_source_path": current_input_path,
+            "resolved_input_source_path": current_input_path,
+            "input_format": current_input_format,
+            "resolved_input_format": current_resolved_format,
+            "acquisition_mode": current_acquisition_mode,
+        }
+        if confirmed_identity is None:
             return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
         if any(
-            getattr(confirmed_identity, field) != getattr(current_identity, field)
+            getattr(confirmed_identity, field) != current_identity_values[field]
             for field in identity_fields
         ):
             return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
 
-        current_values = dict(
-            getattr(current_candidate, "contract_values", {}) or {}
-        )
-        for field in required:
-            confirmed_value = values.get(field)
-            current_value = current_values.get(field)
-            if field == "target_fs_hz":
+        current_time_column = str(
+            self._guided_csv_time_column_combo.currentData() or ""
+        ).strip()
+        current_time_unit = str(
+            self._guided_csv_time_units_combo.currentData() or ""
+        ).strip()
+        current_mappings: list[dict[str, str]] = []
+        for row in getattr(self, "_guided_csv_mapping_rows", ()):
+            current_mappings.append(
+                {
+                    "roi_id": row["name"].text().strip(),
+                    "signal_column": str(
+                        row["signal"].currentData() or ""
+                    ).strip(),
+                    "reference_column": str(
+                        row["reference"].currentData() or ""
+                    ).strip(),
+                }
+            )
+        if (
+            not current_time_column
+            or current_time_unit not in {"seconds", "milliseconds"}
+            or not current_mappings
+            or any(
+                not mapping["roi_id"]
+                or not mapping["signal_column"]
+                or not mapping["reference_column"]
+                for mapping in current_mappings
+            )
+        ):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        try:
+            confirmed_mapping = json.loads(
+                values["custom_tabular_roi_mapping_json"]
+            )
+        except (TypeError, json.JSONDecodeError):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+        if confirmed_mapping != current_mappings:
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        current_values = {
+            "custom_tabular_time_col": current_time_column,
+            "custom_tabular_time_unit": current_time_unit,
+            "custom_tabular_time_scale_to_seconds": (
+                1.0 if current_time_unit == "seconds" else 0.001
+            ),
+            "custom_tabular_roi_mapping_json": json.dumps(
+                current_mappings,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "custom_tabular_ordered_source_files_json": json.dumps(
+                list(getattr(self, "_guided_csv_files", ())),
+                separators=(",", ":"),
+            ),
+            "custom_tabular_order_confirmed": bool(
+                self._guided_csv_order_confirm_cb.isChecked()
+            ),
+            "custom_tabular_chronology_authority": (
+                "confirmed_filename_order"
+                if self._guided_csv_order_confirm_cb.isChecked()
+                else ""
+            ),
+            "custom_tabular_header_rule": "ordinary_first_row",
+            "custom_tabular_delimiter": "comma",
+        }
+        for field in current_values:
+            if field not in values:
+                continue
+            if field == "custom_tabular_roi_mapping_json":
                 try:
-                    values_match = math.isclose(
-                        float(confirmed_value),
-                        float(current_value),
-                        rel_tol=0.0,
-                        abs_tol=1e-9,
-                    )
-                except (TypeError, ValueError):
-                    values_match = False
-            elif field == "custom_tabular_roi_mapping_json":
-                try:
-                    values_match = json.loads(confirmed_value) == json.loads(
-                        current_value
+                    values_match = json.loads(values[field]) == json.loads(
+                        current_values[field]
                     )
                 except (TypeError, json.JSONDecodeError):
-                    values_match = confirmed_value == current_value
+                    values_match = False
             else:
-                values_match = confirmed_value == current_value
+                values_match = values[field] == current_values[field]
             if not values_match:
                 return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
 
-        # These additional fields are present on the production snapshot and
-        # bind the confirmation to the displayed session order and CSV shape.
-        # Keep compatibility with older in-memory snapshots that only carried
-        # the four preview-required fields above.
-        for field in (
-            "custom_tabular_ordered_source_files_json",
-            "custom_tabular_order_confirmed",
-            "custom_tabular_chronology_authority",
-            "custom_tabular_header_rule",
-            "custom_tabular_delimiter",
-        ):
-            if field not in values:
-                continue
-            if values.get(field) != current_values.get(field):
-                return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+        # Sampling is derived from the confirmed CSV files, not from an
+        # editable Recording Structure field. Keep using the existing stored
+        # sampling authority here; rebuilding the candidate to re-read every
+        # CSV would make this per-keystroke readiness check expensive.
+        try:
+            confirmed_target_fs_hz = float(values["target_fs_hz"])
+        except (TypeError, ValueError):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+        if not math.isfinite(confirmed_target_fs_hz) or confirmed_target_fs_hz <= 0:
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
         return True, ""
 
     def _guided_select_data_readiness(self) -> tuple[bool, str]:
