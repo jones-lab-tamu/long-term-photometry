@@ -4852,7 +4852,7 @@ def test_default_block_wording_reads_as_default_settings(window):
     text = note.text()
     assert "Default" in text
     assert "Expand this section" in text
-    assert "leave the values unchanged" in text
+    assert "adjust these values if the shared settings do not suit your recording" in text
     assert "Use these as Default settings" in text
     _assert_no_internal_words(text)
 
@@ -5175,9 +5175,9 @@ def test_loaded_default_status_explains_no_confirmation_is_required(window):
 
     note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
     note_text = note.text()
-    assert "leave the values unchanged" in note_text
+    assert "adjust these values if the shared settings do not suit your recording" in note_text
     assert "Use these as Default settings" in note_text
-    assert "only if" in note_text
+    assert "Review the preview for each ROI" in note_text
 
 
 def test_readiness_accepts_loaded_defaults_and_valid_custom_overrides(

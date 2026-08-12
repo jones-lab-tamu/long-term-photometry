@@ -213,6 +213,9 @@ def test_auto_detected_continuous_reaches_a_correction_preview(
     """The reported failure: untouched defaults, real continuous folder."""
     folder = _continuous_folder(tmp_path / "rec")
     _select_data(window, qapp, folder)
+    # The default Fixed daily anchor timeline requires an explicit recording
+    # start clock before Recording Structure is ready.
+    window._guided_recording_start_clock_edit.setText("12:00:00")
 
     assert window._guided_selected_acquisition_mode() == GUIDED_STRUCTURE_CHOICE_AUTO
     assert window._guided_effective_acquisition_mode() == "continuous"
