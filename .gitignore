@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.pyd
@@ -32,6 +33,7 @@ project_digest.txt
 
 # Agentic
 .gemini/
+.claude/
 *.diff
 
 # Artifacts
@@ -40,6 +42,7 @@ artifacts/
 
 # Scratch
 scratch/
+test_vo_run/
 
 # Scratch artifacts
 temp_integ_out/
