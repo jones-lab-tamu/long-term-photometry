@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QPoint, QRect, QSignalBlocker, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -127,6 +128,66 @@ def test_guided_select_data_browse_rows_preserve_native_buttons_and_path_width(
         assert browse.objectName() == object_name
         assert browse.text() == "Browse..."
         assert browse.focusPolicy() & Qt.TabFocus
+
+
+@pytest.mark.parametrize(
+    "window_size",
+    [(800, 600), (1024, 640), (1440, 900)],
+)
+def test_guided_select_data_selectors_keep_native_geometry(
+    window, qapp, window_size
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window.show()
+    window.resize(*window_size)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    )
+    qapp.processEvents()
+
+    scroll = window._guided_workflow_stack.currentWidget()
+    assert isinstance(scroll, QScrollArea)
+    assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert not scroll.horizontalScrollBar().isVisible()
+    viewport = scroll.viewport()
+    form = window._guided_format_combo.parentWidget().layout()
+    assert isinstance(form, QFormLayout)
+
+    for combo in (
+        window._guided_format_combo,
+        window._guided_acquisition_mode_combo,
+    ):
+        label = form.labelForField(combo)
+        assert label is not None
+        assert combo.objectName() in {
+            "guidedFormatCombo",
+            "guidedAcquisitionModeCombo",
+        }
+        assert combo.parentWidget().objectName() == "guidedSelectDataControls"
+        assert label.parentWidget() is combo.parentWidget()
+        assert not label.geometry().intersects(combo.geometry())
+        assert combo.isVisibleTo(window)
+        assert combo.isEnabled()
+        assert combo.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+        assert combo.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+        assert combo.minimumWidth() >= 140
+        assert combo.minimumContentsLength() >= 8
+        assert (
+            combo.sizeAdjustPolicy()
+            == QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        assert combo.sizeHint().width() > 0
+        assert combo.sizeHint().height() > 0
+        assert combo.width() >= combo.minimumWidth()
+        assert combo.height() >= combo.minimumSizeHint().height()
+
+        mapped = QRect(combo.mapTo(viewport, QPoint(0, 0)), combo.size())
+        visible = mapped.intersected(viewport.rect())
+        assert mapped.left() >= viewport.rect().left()
+        assert mapped.top() >= viewport.rect().top()
+        assert mapped.bottom() <= viewport.rect().bottom()
+        assert visible.width() >= 140
+        assert visible.height() >= combo.minimumSizeHint().height()
 
 
 @pytest.mark.parametrize(

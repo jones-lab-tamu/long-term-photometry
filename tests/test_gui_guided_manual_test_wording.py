@@ -403,6 +403,10 @@ def _reach_feature_detection(window, folder, output):
     window._guided_fixed_daily_anchor_clock_edit.setText("07:00")
     window._guided_recording_start_clock_edit.setText("12:00:00")
     _spin(150)
+    # The applied CSV dataset snapshot includes the recording timing fields;
+    # confirm it after entering those fields before exercising later pages.
+    window._on_guided_apply_dataset_contract()
+    _spin(80)
     window._on_guided_continue_to_correction_approach()
     _spin(250)
     for checkbox in window._guided_preview_method_checkboxes.values():

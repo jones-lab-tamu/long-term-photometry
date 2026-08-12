@@ -2,7 +2,6 @@
 
 import json
 import os
-from dataclasses import replace
 from types import SimpleNamespace
 import pytest
 import numpy as np
@@ -10,7 +9,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QGroupBox, QComboBox, QPushButton, QLabel, QTableWidget, QWidget, QToolButton
 
-from gui.main_window import MainWindow, LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+from gui.main_window import (
+    GUIDED_WORKFLOW_STEPS,
+    MainWindow,
+    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+)
 from photometry_pipeline.guided_feature_detection_preview import GuidedFeaturePreviewUnsupportedError
 from photometry_pipeline.viz.semantic_colors import DFF_COLOR, NEUTRAL_TRACE_COLOR
 
@@ -324,6 +327,68 @@ def _setup_dynamic_evidence(
     }
     window._guided_feature_event_signal_combo.setCurrentText("dff")
     window._refresh_guided_feature_detection_preview_panel()
+
+
+def _configure_confirmed_csv_dataset(window, tmp_path):
+    source_root = tmp_path / "csv_sessions"
+    source_root.mkdir()
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    content = (
+        "ElapsedSeconds,CH1_Signal,CH1_Reference\n"
+        "0,2,1\n"
+        "0.5,2.1,1.1\n"
+        "1,2.2,1.2\n"
+    )
+    session_paths = []
+    for index in range(2):
+        path = source_root / f"session_{index + 1:04d}.csv"
+        path.write_text(content, encoding="utf-8")
+        session_paths.append(path)
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    window._guided_input_dir_edit.setText(str(source_root))
+    window._guided_output_dir_edit.setText(str(output_root))
+    window._guided_csv_time_column_combo.setCurrentIndex(
+        window._guided_csv_time_column_combo.findData("ElapsedSeconds")
+    )
+    mapping = window._guided_csv_mapping_rows[0]
+    mapping["name"].setText("CH1")
+    mapping["signal"].setCurrentIndex(mapping["signal"].findData("CH1_Signal"))
+    mapping["reference"].setCurrentIndex(
+        mapping["reference"].findData("CH1_Reference")
+    )
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("1")
+    window._guided_fixed_daily_anchor_clock_edit.setText("07:00")
+    window._guided_recording_start_clock_edit.setText("12:00:00")
+    window._guided_roi_discovery_diag_start = 0.0
+    window._on_guided_roi_discovery_succeeded(
+        {
+            "resolved_format": "custom_tabular",
+            "acquisition_mode": "intermittent",
+            "rois": [{"roi_id": "CH1"}],
+            "sessions": [
+                {
+                    "index": index,
+                    "session_id": path.stem,
+                    "path": str(path),
+                    "included_in_preview": True,
+                }
+                for index, path in enumerate(session_paths)
+            ],
+            "n_total_discovered": len(session_paths),
+            "n_preview": len(session_paths),
+        }
+    )
+    window._sync_guided_feature_event_editor_to_current_run()
+    window._guided_feature_event_apply_btn.click()
+    return source_root, session_paths
 
 
 def test_evidence_lookup_resolution(window):
@@ -806,14 +871,39 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
         "1,2.2,1.2\n",
         encoding="utf-8",
     )
-    _setup_signal_only_evidence(
-        window,
-        time_sec=np.arange(10, dtype=float),
-        preview_dff=np.zeros(10),
+    mappings = [
+        {
+            "roi_id": "CH1",
+            "signal_column": "Green",
+            "reference_column": "Reference",
+        }
+    ]
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
     )
-    window._guided_local_preview_evidence_by_roi.clear()
-    window._discovery_cache = {
+    window._guided_input_dir_edit.setText(str(tmp_path))
+    window._guided_csv_time_column_combo.setCurrentIndex(
+        window._guided_csv_time_column_combo.findData("ElapsedSeconds")
+    )
+    window._guided_csv_time_units_combo.setCurrentIndex(
+        window._guided_csv_time_units_combo.findData("seconds")
+    )
+    mapping = window._guided_csv_mapping_rows[0]
+    mapping["name"].setText("CH1")
+    mapping["signal"].setCurrentIndex(mapping["signal"].findData("Green"))
+    mapping["reference"].setCurrentIndex(
+        mapping["reference"].findData("Reference")
+    )
+    window._guided_csv_order_confirm_cb.setChecked(True)
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("1")
+    window._active_config_source_path = lambda: "C:/config.yaml"
+    discovery = {
         "resolved_format": "custom_tabular",
+        "acquisition_mode": "intermittent",
+        "rois": [{"roi_id": "CH1"}],
         "sessions": [
             {
                 "index": 0,
@@ -822,29 +912,18 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
                 "included_in_preview": True,
             }
         ],
+        "n_total_discovered": 1,
+        "n_preview": 1,
     }
-    mappings = [
-        {
-            "roi_id": "CH1",
-            "signal_column": "Green",
-            "reference_column": "Reference",
-        }
-    ]
-    window._guided_new_analysis_dataset_contract_snapshot = replace(
-        window._default_guided_new_analysis_dataset_contract_snapshot(),
-        status="applied",
-        input_format="custom_tabular",
-        resolved_input_format="custom_tabular",
-        acquisition_mode="intermittent",
-            contract_values={
-                "custom_tabular_time_col": "ElapsedSeconds",
-                "custom_tabular_time_unit": "seconds",
-                "custom_tabular_roi_mapping_json": json.dumps(mappings),
-                "target_fs_hz": 2.0,
-            },
-        explicitly_applied=True,
+    window._discovery_cache = discovery
+    window._guided_roi_discovery_diag_start = 0.0
+    window._on_guided_roi_discovery_succeeded(discovery)
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
     )
-    window._active_config_source_path = lambda: "C:/config.yaml"
+    window._guided_local_preview_evidence_by_roi.clear()
     calls = []
     t = np.arange(100, dtype=float) * 0.1
     y = np.sin(t)
@@ -887,10 +966,145 @@ def test_csv_on_demand_preview_uses_frozen_confirmed_interpretation(
     assert kwargs["config_overrides"] == {
         "custom_tabular_time_col": "ElapsedSeconds",
         "custom_tabular_time_unit": "seconds",
-        "custom_tabular_roi_mapping_json": json.dumps(mappings),
+        "custom_tabular_roi_mapping_json": json.dumps(
+            mappings, sort_keys=True, separators=(",", ":")
+        ),
         "target_fs_hz": 2.0,
     }
     assert "time_sec" not in kwargs["config_overrides"].values()
+
+
+def test_confirmed_csv_interpretation_survives_guided_navigation_and_preview(
+    window, tmp_path, monkeypatch
+):
+    source_root, session_paths = _configure_confirmed_csv_dataset(
+        window, tmp_path
+    )
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot is not None
+    assert snapshot.current_applied is True
+
+    # Confirm the CSV interpretation once, then change only Recording
+    # Structure timing. The timing-inclusive snapshot may become stale, but
+    # the CSV interpretation itself must remain confirmed.
+    window._guided_session_duration_edit.setText("2")
+    window._refresh_guided_draft_run_plan_preview()
+    snapshot_after_timing = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot_after_timing is not None
+    assert snapshot_after_timing.explicitly_applied is True
+    assert snapshot_after_timing.current_applied is False
+    assert window._guided_csv_interpretation_confirmation_readiness() == (
+        True,
+        "",
+    )
+
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
+    )
+    window._discovery_cache = {
+        "resolved_format": "custom_tabular",
+        "acquisition_mode": "intermittent",
+        "sessions": [
+            {
+                "index": index,
+                "session_id": path.stem,
+                "path": str(path),
+                "included_in_preview": True,
+            }
+            for index, path in enumerate(session_paths)
+        ],
+    }
+    window._guided_input_dir_edit.setText(str(source_root))
+
+    for step_name in ("Select data", "Recording structure", "Correction approach", "Feature detection"):
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index(step_name)
+        )
+        window._refresh_guided_navigation_state()
+
+    assert (
+        window._guided_new_analysis_dataset_contract_snapshot
+        is snapshot_after_timing
+    )
+    assert window._guided_select_data_readiness()[0] is True
+    assert window._guided_feature_detection_readiness() == (
+        True,
+        "Feature detection settings are ready for every included ROI.",
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+
+    import gui.main_window as main_window_module
+
+    t = np.arange(100, dtype=float) * 0.1
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        lambda _source_file, **kwargs: {
+            "valid": True,
+            "time_sec": t,
+            "preview_dff": np.sin(t),
+            "fs_hz": 10.0,
+            "segment_label": kwargs["segment_label"],
+            "issues": [],
+        },
+    )
+    window._refresh_guided_feature_detection_preview_panel()
+    window._on_guided_generate_feature_detection_preview()
+
+    assert "Preview generated successfully" in (
+        window._guided_feature_preview_status_label.text()
+    )
+
+
+def test_unconfirmed_csv_interpretation_blocks_feature_readiness_and_preview(
+    window, tmp_path
+):
+    _source_root, session_paths = _configure_confirmed_csv_dataset(
+        window, tmp_path
+    )
+    window._on_guided_clear_dataset_contract()
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
+    )
+    window._discovery_cache = {
+        "resolved_format": "custom_tabular",
+        "acquisition_mode": "intermittent",
+        "sessions": [
+            {
+                "index": index,
+                "session_id": path.stem,
+                "path": str(path),
+                "included_in_preview": True,
+            }
+            for index, path in enumerate(session_paths)
+        ],
+    }
+    window._refresh_guided_navigation_state()
+    window._refresh_guided_feature_detection_preview_panel()
+
+    assert window._guided_select_data_readiness() == (
+        True,
+        "Data selection is ready.",
+    )
+    assert window._guided_recording_structure_readiness() == (
+        False,
+        "Return to Select data and confirm the CSV column interpretation before continuing.",
+    )
+    assert window._guided_feature_detection_readiness() == (
+        False,
+        "Return to Select data and confirm the CSV column interpretation before continuing.",
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+
+    window._guided_local_preview_evidence_by_roi.clear()
+    window._on_guided_generate_feature_detection_preview()
+    assert "Confirm the CSV column interpretation before generating the " in (
+        window._guided_feature_preview_status_label.text()
+    )
 
 
 @pytest.mark.parametrize("dataset_change", ["mapping", "source"])

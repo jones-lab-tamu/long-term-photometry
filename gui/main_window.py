@@ -676,6 +676,10 @@ GUIDED_CSV_DISCOVERY_GENERIC_FAILURE_MESSAGE = (
     "The selected CSV files could not be read with the current column "
     "mapping. Check the time and ROI column choices, then select ROIs again."
 )
+GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE = (
+    "Return to Select data and confirm the CSV column interpretation before "
+    "continuing."
+)
 GUIDED_OUTPUT_DESTINATION_MISSING_MESSAGE = (
     "Choose an output folder to continue."
 )
@@ -4200,7 +4204,12 @@ class MainWindow(QMainWindow):
         self._guided_format_combo.setToolTip(self._format_combo.toolTip())
         self._guided_format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_format_combo.setMinimumContentsLength(8)
-        self._make_guided_widget_shrinkable(self._guided_format_combo)
+        # Keep the scientist-facing selector usable when the outer form is
+        # allowed to shrink on native QFormLayout implementations.
+        self._guided_format_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_format_combo.setMinimumWidth(140)
         form.addRow("Format:", self._guided_format_combo)
 
         self._guided_format_help_label = QLabel(
@@ -4237,7 +4246,12 @@ class MainWindow(QMainWindow):
         )
         self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
-        self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
+        # Keep the scientist-facing selector usable when the outer form is
+        # allowed to shrink on native QFormLayout implementations.
+        self._guided_acquisition_mode_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_acquisition_mode_combo.setMinimumWidth(140)
         form.addRow("Recording structure:", self._guided_acquisition_mode_combo)
 
         self._guided_intermittent_explanation_label = QLabel(
@@ -5417,6 +5431,114 @@ class MainWindow(QMainWindow):
             "another folder you can write to."
         )
 
+    def _guided_csv_interpretation_confirmation_readiness(
+        self,
+    ) -> tuple[bool, str]:
+        """Require the existing confirmed CSV interpretation for session CSV."""
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        resolved_format = str(
+            discovery.get(
+                "resolved_format",
+                self._guided_format_combo.currentText(),
+            )
+        ).strip().lower()
+        if resolved_format != "custom_tabular":
+            return True, ""
+        if self._guided_effective_acquisition_mode() == "continuous":
+            return True, ""
+        snapshot = getattr(
+            self, "_guided_new_analysis_dataset_contract_snapshot", None
+        )
+        snapshot_format = str(
+            getattr(snapshot, "input_format", "") or ""
+        ).strip().lower()
+        snapshot_resolved_format = str(
+            getattr(snapshot, "resolved_input_format", "") or ""
+        ).strip().lower()
+        values = dict(getattr(snapshot, "contract_values", {}) or {})
+        required = (
+            "custom_tabular_time_col",
+            "custom_tabular_time_unit",
+            "custom_tabular_roi_mapping_json",
+            "target_fs_hz",
+        )
+        if (
+            snapshot is None
+            or not getattr(snapshot, "explicitly_applied", False)
+            or getattr(snapshot, "validation_issues", ())
+            or snapshot_format != "custom_tabular"
+            or snapshot_resolved_format != "custom_tabular"
+            or any(not values.get(name) for name in required)
+        ):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        try:
+            current_candidate = self._guided_new_analysis_dataset_contract_candidate()
+        except (GuidedSamplingRateError, OSError, ValueError):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        confirmed_identity = getattr(snapshot, "source_identity", None)
+        current_identity = getattr(current_candidate, "source_identity", None)
+        identity_fields = (
+            "input_source_path",
+            "resolved_input_source_path",
+            "input_format",
+            "resolved_input_format",
+            "acquisition_mode",
+        )
+        if confirmed_identity is None or current_identity is None:
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+        if any(
+            getattr(confirmed_identity, field) != getattr(current_identity, field)
+            for field in identity_fields
+        ):
+            return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        current_values = dict(
+            getattr(current_candidate, "contract_values", {}) or {}
+        )
+        for field in required:
+            confirmed_value = values.get(field)
+            current_value = current_values.get(field)
+            if field == "target_fs_hz":
+                try:
+                    values_match = math.isclose(
+                        float(confirmed_value),
+                        float(current_value),
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                except (TypeError, ValueError):
+                    values_match = False
+            elif field == "custom_tabular_roi_mapping_json":
+                try:
+                    values_match = json.loads(confirmed_value) == json.loads(
+                        current_value
+                    )
+                except (TypeError, json.JSONDecodeError):
+                    values_match = confirmed_value == current_value
+            else:
+                values_match = confirmed_value == current_value
+            if not values_match:
+                return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+
+        # These additional fields are present on the production snapshot and
+        # bind the confirmation to the displayed session order and CSV shape.
+        # Keep compatibility with older in-memory snapshots that only carried
+        # the four preview-required fields above.
+        for field in (
+            "custom_tabular_ordered_source_files_json",
+            "custom_tabular_order_confirmed",
+            "custom_tabular_chronology_authority",
+            "custom_tabular_header_rule",
+            "custom_tabular_delimiter",
+        ):
+            if field not in values:
+                continue
+            if values.get(field) != current_values.get(field):
+                return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
+        return True, ""
+
     def _guided_select_data_readiness(self) -> tuple[bool, str]:
         default_reason = "Select data and include at least one ROI to continue."
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
@@ -5546,6 +5668,11 @@ class MainWindow(QMainWindow):
                 "Session timing is impossible: sessions per hour × session "
                 "duration cannot exceed 3600 seconds.",
             )
+        csv_ready, csv_reason = (
+            self._guided_csv_interpretation_confirmation_readiness()
+        )
+        if not csv_ready:
+            return False, csv_reason
         return True, "Recording structure is ready."
 
     def _reach_guided_step(self, step_name: str) -> None:
@@ -5648,6 +5775,11 @@ class MainWindow(QMainWindow):
             included = self._guided_included_roi_ids_for_feature_detection()
             if not included:
                 return False, "Include at least one ROI before continuing."
+            csv_ready, csv_reason = (
+                self._guided_csv_interpretation_confirmation_readiness()
+            )
+            if not csv_ready:
+                return False, csv_reason
             for roi_id in included:
                 effective = (
                     self._guided_effective_feature_event_config_fields_for_roi(
@@ -22366,16 +22498,17 @@ class MainWindow(QMainWindow):
                 "sig_suffix": str(contract["sig_suffix"]),
             }
         if input_format == "custom_tabular":
-            snapshot = getattr(
-                self, "_guided_new_analysis_dataset_contract_snapshot", None
+            csv_ready, _csv_reason = (
+                self._guided_csv_interpretation_confirmation_readiness()
             )
-            if snapshot is None or not getattr(
-                snapshot, "current_applied", False
-            ):
+            if not csv_ready:
                 raise ValueError(
                     "Confirm the CSV column interpretation before generating "
                     "the Feature Detection preview."
                 )
+            snapshot = getattr(
+                self, "_guided_new_analysis_dataset_contract_snapshot", None
+            )
             values = dict(getattr(snapshot, "contract_values", {}) or {})
             required = (
                 "custom_tabular_time_col",
