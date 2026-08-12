@@ -526,6 +526,51 @@ def test_guided_workflow_stepper_has_expected_steps(window):
     ]
 
 
+@pytest.mark.parametrize("window_size", [(800, 600), (1024, 640), (1440, 900)])
+def test_guided_workflow_stepper_rows_keep_geometry_and_readable_item_colors(
+    window, qapp, window_size
+):
+    window.show()
+    window.resize(*window_size)
+    qapp.processEvents()
+
+    stepper = window._guided_workflow_stepper
+    stylesheet = window._guided_workflow_tab.styleSheet()
+    assert "QListWidget#guidedWorkflowStepper::item {" in stylesheet
+    assert "color: #1f2937;" in stylesheet
+    assert "QListWidget#guidedWorkflowStepper::item:disabled" in stylesheet
+    assert "color: #64748b;" in stylesheet
+    assert "background: #e8f1ff;" in stylesheet
+    assert "color: #173b68;" in stylesheet
+
+    for index in range(stepper.count()):
+        item = stepper.item(index)
+        rect = stepper.visualItemRect(item)
+        assert item.text().strip()
+        assert rect.width() > 0
+        assert rect.height() > 0
+        assert rect.intersected(stepper.viewport().rect()).height() > 0
+
+    expected_panel_names = [
+        "guidedStepStart",
+        "guidedStepSelectData",
+        "guidedStepRecordingStructure",
+        "guidedStepCorrectionApproach",
+        "guidedStepFeatureDetection",
+        "guidedStepDraftPlan",
+        "guidedStepRun",
+        "guidedStepReview",
+    ]
+    for index, expected_name in enumerate(expected_panel_names):
+        stepper.setCurrentRow(index)
+        qapp.processEvents()
+        assert stepper.currentRow() == index
+        assert (
+            window._guided_workflow_stack.currentWidget().objectName()
+            == expected_name
+        )
+
+
 def test_guided_csv_helper_text_covers_continuous_and_repeated_files(window):
     assert window._guided_csv_status_label.text() == (
         "Select a folder containing one continuous CSV recording or multiple "
@@ -4870,6 +4915,85 @@ def test_guided_correction_preview_panel_populates_from_loaded_completed_run(win
     assert "Decision-Support Audit" not in method_text
     assert "No Correction" not in method_text
     assert window._guided_preview_technical_details_group.isHidden() is True
+
+
+def test_guided_correction_preview_selectors_switch_roi_and_segment(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    assert window._selected_guided_preview_roi() == "CH1"
+    assert window._selected_guided_preview_chunk() == 0
+
+    window._guided_preview_roi_combo.setCurrentIndex(1)
+    window._guided_preview_chunk_combo.setCurrentIndex(1)
+    assert window._selected_guided_preview_roi() == "CH2"
+    assert window._selected_guided_preview_chunk() == 1
+
+    window._guided_preview_generate_btn.click()
+    assert window._guided_preview_last_result["roi"] == "CH2"
+    assert window._guided_preview_last_result["chunk_index"] == 1
+
+    window._guided_preview_roi_combo.setCurrentIndex(0)
+    window._guided_preview_chunk_combo.setCurrentIndex(0)
+    assert window._selected_guided_preview_roi() == "CH1"
+    assert window._selected_guided_preview_chunk() == 0
+
+    window._guided_preview_generate_btn.click()
+    assert window._guided_preview_last_result["roi"] == "CH1"
+    assert window._guided_preview_last_result["chunk_index"] == 0
+
+
+@pytest.mark.parametrize("window_size", [(1024, 640), (1280, 720), (1440, 900)])
+def test_guided_correction_preview_selectors_keep_native_geometry(
+    window, qapp, tmp_path, monkeypatch, window_size
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window.show()
+    window.resize(*window_size)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    qapp.processEvents()
+
+    scroll = window._guided_workflow_stack.currentWidget()
+    assert isinstance(scroll, QScrollArea)
+    assert window._guided_timeline_mode_combo.sizePolicy().horizontalPolicy() != (
+        QSizePolicy.Ignored
+    )
+
+    for label_text, combo in (
+        ("ROI", window._guided_preview_roi_combo),
+        ("Preview segment", window._guided_preview_chunk_combo),
+    ):
+        labels = [
+            label
+            for label in window._guided_workflow_tab.findChildren(QLabel)
+            if label.text() == label_text and label.isVisibleTo(window)
+        ]
+        assert labels
+        assert labels[0].height() > 0
+        assert combo.parentWidget().objectName() == "guidedCorrectionPreviewPanel"
+        assert labels[0].parentWidget() is combo.parentWidget()
+        assert not labels[0].geometry().intersects(combo.geometry())
+        assert combo.isVisibleTo(window)
+        assert combo.isEnabled()
+        assert combo.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+        assert combo.sizePolicy().verticalPolicy() == QSizePolicy.Fixed
+        assert combo.minimumWidth() >= 140
+        assert combo.sizeHint().height() > 0
+        assert combo.width() >= combo.minimumWidth()
+        assert combo.height() >= combo.minimumSizeHint().height()
+
+        scroll.ensureWidgetVisible(combo)
+        qapp.processEvents()
+        mapped = QRect(combo.mapTo(scroll.viewport(), QPoint(0, 0)), combo.size())
+        assert mapped.height() > 0
+        assert scroll.viewport().rect().contains(mapped)
 
 
 def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):

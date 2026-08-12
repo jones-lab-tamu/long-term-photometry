@@ -3735,9 +3735,13 @@ class MainWindow(QMainWindow):
                 outline: 0;
             }
             QListWidget#guidedWorkflowStepper::item {
+                color: #1f2937;
                 margin: 2px 0;
                 padding: 8px 10px;
                 border-radius: 4px;
+            }
+            QListWidget#guidedWorkflowStepper::item:disabled {
+                color: #64748b;
             }
             QListWidget#guidedWorkflowStepper::item:selected {
                 background: #e8f1ff;
@@ -8307,7 +8311,10 @@ class MainWindow(QMainWindow):
         self._guided_preview_roi_combo.setObjectName("guidedCorrectionPreviewRoiCombo")
         self._guided_preview_roi_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_preview_roi_combo.setMinimumContentsLength(6)
-        self._make_guided_widget_shrinkable(self._guided_preview_roi_combo)
+        self._guided_preview_roi_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_preview_roi_combo.setMinimumWidth(140)
         self._guided_preview_roi_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
         preview_roi_label = QLabel("ROI")
         form.addRow(preview_roi_label, self._guided_preview_roi_combo)
@@ -8315,7 +8322,10 @@ class MainWindow(QMainWindow):
         self._guided_preview_chunk_combo.setObjectName("guidedCorrectionPreviewChunkCombo")
         self._guided_preview_chunk_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_preview_chunk_combo.setMinimumContentsLength(6)
-        self._make_guided_widget_shrinkable(self._guided_preview_chunk_combo)
+        self._guided_preview_chunk_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._guided_preview_chunk_combo.setMinimumWidth(140)
         self._guided_preview_chunk_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
         preview_segment_label = QLabel("Preview segment")
         form.addRow(
