@@ -50,6 +50,11 @@ then select the generated folder in Select data. Its choices are Intermittent
 CSV demo for repeated sessions and Continuous CSV demo for one continuous
 recording.
 
+For the built-in Intermittent CSV demo, Guided pre-fills **Sessions per hour**
+with 2 and **Session duration (s)** with 600. Review and confirm those values;
+they remain editable. Ordinary CSV data do not receive this prefill, so enter
+repeated-session timing manually.
+
 A passed setup check means that the selected analysis is software-ready in
 Guided. It does not make the data scientifically valid and does not replace
 inspection of the recording or the results.
@@ -158,8 +163,10 @@ choice describes how the data were saved, not how long the experiment lasted.
 ### Choose the output folder
 
 Choose the output folder before the run. Review plan repeats the destination
-for verification. If it is wrong, return to Select data and change it. Input
-files are not overwritten.
+for verification. Guided creates a new run folder inside the selected output
+folder. After a successful run, **Open results folder** opens that run folder.
+If the destination is wrong, return to Select data and change it. Input files
+are not overwritten.
 
 ### CSV column mapping
 
@@ -233,15 +240,16 @@ recording protocol.
 
 ### If a repeated session is unusable
 
-For repeated-session RWD, Neurophotometrics, and CSV recordings, Guided can
-continue when one already identified recording session cannot be used and the
-remaining sessions are usable. The unusable session is recorded as missing or
-corrupted. Its original time position is preserved, so the corresponding
-interval remains blank in summary plots and day plots, and later sessions do
-not shift earlier in time. The completed analysis reports that it was
-completed with missing sessions. Continuing with that session marked missing
-requires choosing **Continue with this session missing** in the warning dialog,
-then checking the setup again before rerunning.
+For repeated-session RWD recordings, Guided can offer recovery after one
+specific session fails during processing while the remaining sessions are
+usable. The warning identifies the failed session. To continue, explicitly choose
+**Continue with this session missing**. This approves only that session
+for the current recording. The unusable session is recorded as missing; its
+original time position is preserved, so the interval remains blank and later
+sessions do not shift earlier. The completed analysis reports the missing
+session. Then run **Check my setup** again before rerunning. Choosing **Return
+to setup** records no approval. This continuation path is not available for
+Neurophotometrics or CSV recordings.
 
 Guided can also recognize some readable RWD sessions that are shorter than the
 expected recording interval.
@@ -394,8 +402,7 @@ The **Default feature detection settings** section exposes the following
 controls. The same fields can be customized for one ROI:
 
 - **Event signal**: Chooses the dF/F or delta-F trace used for peak detection
-  and event-derived metrics. The current menu uses the short choices `dff`
-  (dF/F) and `delta_f` (delta-F). Changing this choice can change both event
+  and event-derived metrics. Changing this choice can change both event
   locations and scale.
 - **Signal excursion polarity**: Chooses positive, negative, or both
   directions for excursions. Use the expected response direction when it is
@@ -404,8 +411,9 @@ controls. The same fields can be customized for one ROI:
   MAD, percentile, or absolute cutoff. Use the method that fits the trace's
   noise and scale; it changes how the detection threshold is derived.
 - **Peak threshold k**: Sets the multiplier for methods that use k. It is
-  relevant to mean-and-standard-deviation thresholding; a larger value requires a
-  larger excursion relative to variability, while a smaller value admits more.
+  relevant to mean-and-standard-deviation and median + MAD thresholding; a
+  larger value requires a larger excursion relative to variability, while a
+  smaller value admits more.
 - **Peak threshold percentile**: Sets the data-derived quantile cutoff for
   percentile thresholding. It is relevant only to that method and changes the
   cutoff as the trace distribution changes.
@@ -546,15 +554,14 @@ These checks confirm that the saved result is internally consistent; they do not
 establish biological validity or determine whether the selected correction is
 scientifically appropriate.
 
-Continuous results use a simpler workspace with one **Region** selector. The
-viewer shows a **Slow Signal** tab when slow-signal analysis ran and an **Events**
-tab when event analysis ran. Not every view appears for every run, and not every
-tab appears for every run. The continuous overview summarizes the recording
-duration, analysis windows, correction state, and whether slow-signal and event
-analysis completed. Long traces may be
-downsampled for display, while window summaries provide the more detailed view.
-Inspect both the overview and the per-window summaries when judging long
-recordings.
+Continuous Guided results use the same Results viewer described above: choose a
+**Region** and inspect the views that were produced, such as **Verification**,
+**Slow Signal**, **Signal / Reference**, **Correction Reference**, **dF/F**,
+**Stacked dF/F**, and **Event Summary**. Not every view appears for every run.
+The continuous overview and window summaries describe the recording duration,
+analysis windows, correction state, and whether slow-signal and event analysis
+completed. Long traces may be downsampled for display; inspect the overview and
+per-window summaries when judging long recordings.
 
 Relate outputs to the experiment. Check timeline placement, correction,
 event summaries, and missing sessions against the protocol.

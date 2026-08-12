@@ -221,12 +221,21 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
         r"csv\s+does\s+not\s+provide\s+an\s+absolute\s+recording-start\s+timestamp",
         lower,
     )
-    assert "for repeated-session rwd, neurophotometrics, and csv recordings" in lower
+    assert "for repeated-session rwd recordings" in lower
     assert "unusable session is recorded as missing" in lower
     assert "original time position is preserved" in lower
     assert "interval remains blank" in lower
     assert re.search(r"later\s+sessions\s+do\s+not\s+shift\s+earlier", lower)
-    assert "no advance approval is required" in lower
+    assert re.search(
+        r"explicitly\s+choose\s+\*\*continue with this session missing\*\*",
+        lower,
+    )
+    assert "current recording" in lower
+    assert "check my setup" in lower
+    assert re.search(
+        r"not available for\s+neurophotometrics or csv recordings",
+        lower,
+    )
     assert "stops instead of guessing" in lower
     assert re.search(r"which\s+session\s+failed", lower)
     assert "correct session order" in lower
