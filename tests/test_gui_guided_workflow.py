@@ -2986,6 +2986,100 @@ def _timed_discovery(input_dir, session_ids, resolved_format="RWD"):
     }
 
 
+def test_guided_builtin_csv_demo_prefills_only_its_known_timing(
+    window, tmp_path
+):
+    from gui.synthetic_demo_generator import generate_guided_csv_demo
+
+    generated = generate_guided_csv_demo(
+        tmp_path / "generated",
+        _session_count=2,
+        _rows_per_session=4,
+    )
+    assert generated.success, generated.message
+    demo_sessions = sorted(generated.input_dir.glob("session_*.csv"))
+    demo_discovery = {
+        "schema_version": 1,
+        "input_dir": str(generated.input_dir),
+        "resolved_format": "custom_tabular",
+        "sessions": [
+            {
+                "index": index,
+                "session_id": path.stem,
+                "path": str(path),
+                "included_in_preview": True,
+            }
+            for index, path in enumerate(demo_sessions)
+        ],
+        "n_total_discovered": len(demo_sessions),
+        "n_preview": len(demo_sessions),
+        "rois": [{"roi_id": "ROI1"}, {"roi_id": "ROI2"}],
+    }
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_acquisition_mode_combo.setCurrentIndex(
+        window._guided_acquisition_mode_combo.findData("intermittent")
+    )
+    window._guided_input_dir_edit.setText(str(generated.input_dir))
+    window._guided_sessions_per_hour_edit.clear()
+    window._guided_session_duration_edit.clear()
+    window._discovery_cache = demo_discovery
+    window._populate_discovery_ui(demo_discovery)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Recording structure")
+    )
+
+    assert window._guided_sessions_per_hour_edit.text() == "2"
+    assert window._guided_session_duration_edit.text() == "600"
+    assert window._guided_recording_timing_inference.evidence["source"] == (
+        "built_in_guided_csv_demo"
+    )
+    assert window._guided_sessions_per_hour_edit.isReadOnly() is False
+    assert window._guided_session_duration_edit.isReadOnly() is False
+    assert window._guided_sessions_per_hour_edit.isEnabled()
+    assert window._guided_session_duration_edit.isEnabled()
+    window._guided_sessions_per_hour_edit.setText("3")
+    window._guided_session_duration_edit.setText("601")
+    assert window._guided_sessions_per_hour_edit.text() == "3"
+    assert window._guided_session_duration_edit.text() == "601"
+
+    ordinary_root = tmp_path / "ordinary_csv"
+    ordinary_root.mkdir()
+    ordinary_sessions = []
+    for index in range(2):
+        path = ordinary_root / f"session_{index + 1:04d}.csv"
+        path.write_text(
+            "ElapsedSeconds,CH1_signal,CH1_reference\n"
+            "0,2,1\n"
+            "0.5,2.1,1.1\n",
+            encoding="utf-8",
+        )
+        ordinary_sessions.append(path)
+    ordinary_discovery = {
+        **demo_discovery,
+        "input_dir": str(ordinary_root),
+        "sessions": [
+            {
+                "index": index,
+                "session_id": path.stem,
+                "path": str(path),
+                "included_in_preview": True,
+            }
+            for index, path in enumerate(ordinary_sessions)
+        ],
+    }
+    window._guided_input_dir_edit.setText(str(ordinary_root))
+    window._guided_sessions_per_hour_edit.clear()
+    window._guided_session_duration_edit.clear()
+    window._discovery_cache = ordinary_discovery
+    window._populate_discovery_ui(ordinary_discovery)
+
+    assert window._guided_sessions_per_hour_edit.text() == ""
+    assert window._guided_session_duration_edit.text() == ""
+    assert window._guided_recording_timing_inference.status == "unsupported"
+
+
 def test_guided_rwd_discovery_autofills_recording_timing(
     window, tmp_path, monkeypatch
 ):

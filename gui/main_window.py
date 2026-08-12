@@ -50,6 +50,7 @@ from gui.interactive_image import InteractiveImageLabel, InteractiveImageControl
 from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.batch_run_dialog import BatchRunDialog
 from gui.synthetic_demo_dialog import GenerateSyntheticDemoDatasetDialog
+from gui.synthetic_demo_generator import guided_demo_timing_for_folder
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
@@ -7477,6 +7478,27 @@ class MainWindow(QMainWindow):
             discovery.get("input_dir")
             or self._guided_input_dir_edit.text()
         )
+        if resolved_format == "custom_tabular":
+            demo_timing = guided_demo_timing_for_folder(Path(source_path))
+            if demo_timing is not None:
+                sessions_per_hour, session_duration_sec = demo_timing
+                return GuidedRecordingStructureInference(
+                    supported=True,
+                    status="inferred",
+                    sessions_per_hour=sessions_per_hour,
+                    session_duration_sec=session_duration_sec,
+                    evidence={
+                        "source": "built_in_guided_csv_demo",
+                        "timing_source": "generator_constants",
+                        "resolved_format": resolved_format,
+                        "source_path": source_path,
+                    },
+                    message=(
+                        "Built-in Guided demo timing: "
+                        f"{sessions_per_hour} sessions/hour and "
+                        f"{session_duration_sec:g} s/session. Please confirm."
+                    ),
+                )
         contracts: list[dict[str, object]] = []
         sessions = [
             session
@@ -7619,6 +7641,8 @@ class MainWindow(QMainWindow):
             )
             return
         self._apply_guided_detected_timing()
+        if inference.evidence.get("source") == "built_in_guided_csv_demo":
+            self._sync_guided_recording_visibility()
         self._guided_roi_discovery_diag(
             "recording_timing_refresh_end",
             duration_sec=time.monotonic() - refresh_started,

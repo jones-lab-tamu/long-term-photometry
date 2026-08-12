@@ -51,6 +51,34 @@ GUIDED_DEMO_HEADERS = (
     "ROI2_Reference",
 )
 
+
+def guided_demo_timing_for_folder(
+    folder: Path,
+) -> tuple[int, float] | None:
+    """Return fixed timing only for a generated Guided CSV demo folder.
+
+    The existing tonic-truth file is the generator's identity marker. Ordinary
+    CSV folders do not carry this application-generated marker, so they remain
+    on the normal manual-timing path.
+    """
+    folder = Path(folder)
+    if folder.name != GUIDED_DEMO_FOLDER_NAME:
+        return None
+    try:
+        payload = json.loads(
+            (folder / GUIDED_DEMO_TONIC_TRUTH_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema") != "guided_csv_demo_tonic_truth.v1":
+        return None
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        return None
+    return GUIDED_DEMO_SESSIONS_PER_HOUR, GUIDED_DEMO_SESSION_DURATION_SEC
+
 # Fixed internal shape of the demonstration signals. These are not user options
 # and are not exposed anywhere in the application.
 _EVENT_RATE_PER_MIN = (3.2, 2.6)  # ROI1, ROI2 baseline transient rate
