@@ -1409,7 +1409,9 @@ def test_guided_feature_event_profile_apply_valid_run_level_profile(window, tmp_
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_feature_event_polarity_combo.setCurrentText("both")
     window._guided_feature_event_peak_method_combo.setCurrentText("percentile")
     window._guided_feature_event_peak_pct_edit.setText("90.0")
@@ -1478,7 +1480,9 @@ def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_p
     window._open_completed_results_dir(str(run_a))
     window._set_guided_workflow_mode("open_results")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_feature_event_apply_btn.click()
 
     plan_a, errors_a = window._build_guided_draft_run_plan()
@@ -1496,7 +1500,7 @@ def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_p
     plan_b, errors_b = window._build_guided_draft_run_plan()
     assert errors_b == []
     assert plan_b.feature_event_profiles == []
-    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
+    assert window._guided_feature_event_signal_combo.currentData() == defaults.event_signal
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
 
@@ -1508,7 +1512,7 @@ def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_p
     assert restored_errors == []
     assert len(restored_plan.feature_event_profiles) == 1
     assert restored_plan.feature_event_profiles[0].config_fields == run_a_config
-    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert window._guided_feature_event_signal_combo.currentData() == "delta_f"
     assert "Feature/event profile default-events" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: pass" in window._guided_draft_run_plan_checklist_label.text()
 
@@ -1522,13 +1526,15 @@ def test_guided_feature_event_unsaved_same_run_edits_survive_refresh_without_pla
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._refresh_guided_confirm_strategy_panel()
 
     plan, errors = window._build_guided_draft_run_plan()
     assert errors == []
     assert plan.feature_event_profiles == []
-    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert window._guided_feature_event_signal_combo.currentData() == "delta_f"
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
 
 
@@ -1544,9 +1550,11 @@ def test_guided_feature_event_unsaved_edits_do_not_leak_across_completed_runs(
     window._open_completed_results_dir(str(run_a))
     window._set_guided_workflow_mode("open_results")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._refresh_guided_confirm_strategy_panel()
-    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert window._guided_feature_event_signal_combo.currentData() == "delta_f"
 
     window._open_completed_results_dir(str(run_b))
     window._set_guided_workflow_mode("open_results")
@@ -1554,7 +1562,7 @@ def test_guided_feature_event_unsaved_edits_do_not_leak_across_completed_runs(
     plan_b, errors_b = window._build_guided_draft_run_plan()
     assert errors_b == []
     assert plan_b.feature_event_profiles == []
-    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
+    assert window._guided_feature_event_signal_combo.currentData() == defaults.event_signal
 
     window._open_completed_results_dir(str(run_a))
     window._set_guided_workflow_mode("open_results")
@@ -1562,7 +1570,7 @@ def test_guided_feature_event_unsaved_edits_do_not_leak_across_completed_runs(
     plan_a, errors_a = window._build_guided_draft_run_plan()
     assert errors_a == []
     assert plan_a.feature_event_profiles == []
-    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
+    assert window._guided_feature_event_signal_combo.currentData() == defaults.event_signal
 
 
 def test_guided_feature_event_profile_controls_do_not_live_bind_before_apply(window, tmp_path, monkeypatch):
@@ -1570,12 +1578,16 @@ def test_guided_feature_event_profile_controls_do_not_live_bind_before_apply(win
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._guided_feature_event_apply_btn.click()
     plan, _ = window._build_guided_draft_run_plan()
     assert plan.feature_event_profiles[0].config_fields["event_signal"] == "dff"
 
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     plan, _ = window._build_guided_draft_run_plan()
     assert plan.feature_event_profiles[0].config_fields["event_signal"] == "dff"
 
@@ -1687,7 +1699,9 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     window._open_completed_results_dir(str(run_b))
     window._set_guided_workflow_mode("open_results")
     window._refresh_guided_confirm_strategy_panel()
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_feature_event_apply_btn.click()
     assert window._build_guided_draft_run_plan()[0].feature_event_profiles[0].config_fields["event_signal"] == "delta_f"
     window._guided_feature_event_clear_btn.click()
@@ -1695,7 +1709,7 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     plan, errors = window._build_guided_draft_run_plan()
     assert errors == []
     assert plan.feature_event_profiles == []
-    assert window._guided_feature_event_signal_combo.currentText() == Config().event_signal
+    assert window._guided_feature_event_signal_combo.currentData() == Config().event_signal
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
     window._open_completed_results_dir(str(run_dir))
@@ -1705,7 +1719,7 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     assert errors_a == []
     assert len(plan_a.feature_event_profiles) == 1
     assert plan_a.feature_event_profiles[0].config_fields == run_a_config
-    assert window._guided_feature_event_signal_combo.currentText() == run_a_config["event_signal"]
+    assert window._guided_feature_event_signal_combo.currentData() == run_a_config["event_signal"]
     after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     after_b = sorted(p.relative_to(run_b).as_posix() for p in run_b.rglob("*"))
     assert after == before
@@ -5944,7 +5958,9 @@ def test_gui_readiness_summary_updates_on_profile(window, tmp_path, monkeypatch)
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._guided_feature_event_polarity_combo.setCurrentText("positive")
     window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
     window._guided_feature_event_peak_k_edit.setText("3.0")
@@ -5989,7 +6005,9 @@ def test_gui_readiness_summary_full_and_non_output_guarantee(window, tmp_path, m
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # 2. Apply Profile
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._guided_feature_event_polarity_combo.setCurrentText("positive")
     window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
     window._guided_feature_event_peak_k_edit.setText("3.0")
@@ -6048,7 +6066,9 @@ def test_gui_readiness_summary_unsaved_widget_edits_ignored(window, tmp_path, mo
 
     # Type/edit but do not click Apply
     window._guided_output_path_edit.setText(str(tmp_path / "unsaved_out"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
 
     # Refresh panel
     window._refresh_guided_confirm_strategy_panel()
@@ -6171,7 +6191,9 @@ def test_gui_export_fully_configured_plan(window, tmp_path, monkeypatch):
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # 2. Apply Profile
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._guided_feature_event_polarity_combo.setCurrentText("positive")
     window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
     window._guided_feature_event_peak_k_edit.setText("3.0")
@@ -9157,7 +9179,9 @@ def test_gui_real_split_workflow_flow(window, tmp_path, monkeypatch):
     assert "Blocked: execution intentionally unavailable" in summary
 
     # 4. Apply a feature/event profile
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._guided_feature_event_polarity_combo.setCurrentText("positive")
     window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
     window._guided_feature_event_peak_k_edit.setText("3.0")
@@ -9612,7 +9636,9 @@ def test_gui_imported_plan_adoption_status_does_not_mutate_live_draft_state(wind
     window._guided_confirm_mark_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
     window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
     path = tmp_path / "eligible_plan.json"
@@ -9631,7 +9657,7 @@ def test_gui_imported_plan_adoption_status_does_not_mutate_live_draft_state(wind
     before_checklist = window._guided_draft_run_plan_checklist_label.text()
     before_export_path = window._guided_export_path_edit.text()
     before_output_path = window._guided_output_path_edit.text()
-    before_feature_signal = window._guided_feature_event_signal_combo.currentText()
+    before_feature_signal = window._guided_feature_event_signal_combo.currentData()
     before_source = window._current_guided_completed_run_dir()
 
     _review_plan(window, path)
@@ -9643,7 +9669,7 @@ def test_gui_imported_plan_adoption_status_does_not_mutate_live_draft_state(wind
     assert window._guided_draft_run_plan_checklist_label.text() == before_checklist
     assert window._guided_export_path_edit.text() == before_export_path
     assert window._guided_output_path_edit.text() == before_output_path
-    assert window._guided_feature_event_signal_combo.currentText() == before_feature_signal
+    assert window._guided_feature_event_signal_combo.currentData() == before_feature_signal
     assert window._current_guided_completed_run_dir() == before_source
 
 
@@ -9808,7 +9834,9 @@ def test_gui_imported_plan_review_failed_open_does_not_mutate_live_draft_state(w
     window._guided_confirm_mark_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
     window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
     valid_path = tmp_path / "candidate_a.json"
@@ -9822,7 +9850,7 @@ def test_gui_imported_plan_review_failed_open_does_not_mutate_live_draft_state(w
     before_checklist = window._guided_draft_run_plan_checklist_label.text()
     before_export_path = window._guided_export_path_edit.text()
     before_output_path = window._guided_output_path_edit.text()
-    before_feature_signal = window._guided_feature_event_signal_combo.currentText()
+    before_feature_signal = window._guided_feature_event_signal_combo.currentData()
     before_source = window._current_guided_completed_run_dir()
 
     _review_plan(window, valid_path)
@@ -9835,7 +9863,7 @@ def test_gui_imported_plan_review_failed_open_does_not_mutate_live_draft_state(w
     assert window._guided_draft_run_plan_checklist_label.text() == before_checklist
     assert window._guided_export_path_edit.text() == before_export_path
     assert window._guided_output_path_edit.text() == before_output_path
-    assert window._guided_feature_event_signal_combo.currentText() == before_feature_signal
+    assert window._guided_feature_event_signal_combo.currentData() == before_feature_signal
     assert window._current_guided_completed_run_dir() == before_source
 
 
@@ -9890,7 +9918,9 @@ def test_gui_imported_plan_review_source_matched_no_mutation(window, tmp_path, m
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
     window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
     path = tmp_path / "matched_plan.json"
     _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH1"], profile=True))
@@ -9912,7 +9942,7 @@ def test_gui_imported_plan_review_source_matched_no_mutation(window, tmp_path, m
         window._guided_draft_run_plan_preview_label.text(),
         window._guided_draft_run_plan_checklist_label.text(),
     ) == before_labels
-    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert window._guided_feature_event_signal_combo.currentData() == "delta_f"
     assert window._guided_output_path_edit.text() == str(tmp_path / "unsaved_output")
     assert window._guided_export_path_edit.text() == str(tmp_path / "export_target.json")
 

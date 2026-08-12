@@ -32,6 +32,7 @@ ACQUISITION_MODE_DISPLAY_LABELS = {
 # Feature Detection settings named as a scientist would read them.
 FEATURE_EVENT_SIGNAL_DISPLAY_LABELS = {
     "dff": "dF/F",
+    "delta_f": "delta-F",
 }
 FEATURE_THRESHOLD_METHOD_DISPLAY_LABELS = {
     "mean_std": "mean + standard-deviation",

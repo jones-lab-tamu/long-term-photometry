@@ -3083,8 +3083,15 @@ class _GuidedRoiFeatureEventDialog(QDialog):
         form.setSpacing(6)
 
         self._signal_combo = QComboBox()
-        self._signal_combo.addItems(get_allowed_event_signals_from_config())
-        self._signal_combo.setCurrentText(str(self._defaults["event_signal"]))
+        for value in get_allowed_event_signals_from_config():
+            self._signal_combo.addItem(
+                feature_event_signal_display_label(value), value
+            )
+        signal_index = self._signal_combo.findData(
+            str(self._defaults["event_signal"])
+        )
+        if signal_index >= 0:
+            self._signal_combo.setCurrentIndex(signal_index)
         form.addRow("Event signal:", self._signal_combo)
 
         self._polarity_combo = QComboBox()
@@ -3146,7 +3153,7 @@ class _GuidedRoiFeatureEventDialog(QDialog):
 
     def _current_values(self) -> tuple[dict | None, str | None]:
         return parse_and_validate_event_feature_knobs(
-            self._signal_combo.currentText(),
+            str(self._signal_combo.currentData() or ""),
             self._peak_method_combo.currentText(),
             self._peak_k_edit.text(),
             self._peak_pct_edit.text(),
@@ -5954,7 +5961,7 @@ class MainWindow(QMainWindow):
         return (
             f"Status: {display}\n"
             "Event signal: "
-            f"{feature_event_signal_display_label(self._guided_feature_event_signal_combo.currentText())}\n"
+            f"{feature_event_signal_display_label(self._guided_feature_event_signal_combo.currentData())}\n"
             f"Polarity: {self._guided_feature_event_polarity_combo.currentText()}\n"
             "Threshold: "
             f"{feature_threshold_method_display_label(threshold_method)} "
@@ -21361,7 +21368,9 @@ class MainWindow(QMainWindow):
 
     def _set_guided_feature_event_combo_value(self, combo: QComboBox, value: object) -> None:
         text = str(value)
-        idx = combo.findText(text)
+        idx = combo.findData(value) if value is not None else -1
+        if idx < 0:
+            idx = combo.findText(text)
         if idx >= 0:
             with QSignalBlocker(combo):
                 combo.setCurrentIndex(idx)
@@ -21575,7 +21584,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_guided_feature_event_signal_combo"):
             return None, "Feature/event profile editor is not available."
         return parse_and_validate_event_feature_knobs(
-            self._guided_feature_event_signal_combo.currentText(),
+            str(self._guided_feature_event_signal_combo.currentData() or ""),
             self._guided_feature_event_peak_method_combo.currentText(),
             self._guided_feature_event_peak_k_edit.text(),
             self._guided_feature_event_peak_pct_edit.text(),
@@ -23574,8 +23583,15 @@ class MainWindow(QMainWindow):
 
         self._guided_feature_event_signal_combo = QComboBox()
         self._guided_feature_event_signal_combo.setObjectName("guidedFeatureEventSignalCombo")
-        self._guided_feature_event_signal_combo.addItems(get_allowed_event_signals_from_config())
-        self._guided_feature_event_signal_combo.setCurrentText(str(defaults["event_signal"]))
+        for value in get_allowed_event_signals_from_config():
+            self._guided_feature_event_signal_combo.addItem(
+                feature_event_signal_display_label(value), value
+            )
+        signal_index = self._guided_feature_event_signal_combo.findData(
+            str(defaults["event_signal"])
+        )
+        if signal_index >= 0:
+            self._guided_feature_event_signal_combo.setCurrentIndex(signal_index)
         self._make_guided_widget_shrinkable(self._guided_feature_event_signal_combo)
         form.addRow("Event signal:", self._guided_feature_event_signal_combo)
 

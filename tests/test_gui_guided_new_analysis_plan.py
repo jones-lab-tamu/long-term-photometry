@@ -4699,6 +4699,47 @@ def test_per_roi_customize_dialog_note_is_scientist_facing(window):
         dialog.deleteLater()
 
 
+def test_guided_event_signal_selector_uses_scientist_labels_and_internal_values(window):
+    """The visible signal choices must not replace the stored signal tokens."""
+    from gui.main_window import _GuidedRoiFeatureEventDialog
+
+    combo = window._guided_feature_event_signal_combo
+    assert {combo.itemText(index) for index in range(combo.count())} == {
+        "dF/F",
+        "delta-F",
+    }
+    assert {combo.itemData(index) for index in range(combo.count())} == {
+        "dff",
+        "delta_f",
+    }
+    assert combo.currentData() == "dff"
+
+    combo.setCurrentText("delta-F")
+    values, error = window._guided_feature_event_current_values()
+    assert error is None
+    assert values["event_signal"] == "delta_f"
+
+    dialog = _GuidedRoiFeatureEventDialog(
+        "CH1", {"event_signal": "dff"}, parent=window
+    )
+    try:
+        assert {dialog._signal_combo.itemText(index) for index in range(dialog._signal_combo.count())} == {
+            "dF/F",
+            "delta-F",
+        }
+        assert {dialog._signal_combo.itemData(index) for index in range(dialog._signal_combo.count())} == {
+            "dff",
+            "delta_f",
+        }
+        assert dialog._signal_combo.currentData() == "dff"
+        dialog._signal_combo.setCurrentText("delta-F")
+        values, error = dialog._current_values()
+        assert error is None
+        assert values["event_signal"] == "delta_f"
+    finally:
+        dialog.deleteLater()
+
+
 def test_step5_visible_per_roi_text_has_no_internal_language(
     window, tmp_path, monkeypatch
 ):

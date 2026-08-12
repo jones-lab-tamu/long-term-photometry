@@ -240,7 +240,9 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
             "preview_id": "test-id"
         }
     }
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._refresh_guided_feature_detection_preview_panel()
 
 
@@ -325,7 +327,9 @@ def _setup_dynamic_evidence(
             "preview_id": "dynamic-preview",
         },
     }
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._refresh_guided_feature_detection_preview_panel()
 
 
@@ -1415,7 +1419,9 @@ def test_generate_preview_dynamic_fit_missing_dff(window):
 def test_generate_preview_dynamic_fit_delta_f_does_not_fallback(window):
     t = np.arange(100, dtype=float) * 0.1
     _setup_dynamic_evidence(window, time_sec=t, preview_dff=np.sin(t))
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("delta_f")
+    )
 
     window._on_guided_generate_feature_detection_preview()
 
@@ -1442,7 +1448,9 @@ def test_generate_preview_dynamic_fit_no_evidence(window):
         "dynamic_fit_mode": "global_linear_regression",
     }
     window._guided_local_preview_evidence_by_roi.clear()
-    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_signal_combo.setCurrentIndex(
+        window._guided_feature_event_signal_combo.findData("dff")
+    )
     window._refresh_guided_feature_detection_preview_panel()
 
     window._on_guided_generate_feature_detection_preview()
