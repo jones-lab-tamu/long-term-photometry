@@ -12,6 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -188,6 +189,71 @@ def test_guided_select_data_selectors_keep_native_geometry(
         assert mapped.bottom() <= viewport.rect().bottom()
         assert visible.width() >= 140
         assert visible.height() >= combo.minimumSizeHint().height()
+
+
+def test_guided_select_data_advanced_preprocessing_is_exactly_two_collapsed_controls(
+    window,
+):
+    select_data = window._guided_raw_setup_controls["Select data"]
+    group = select_data.findChild(QGroupBox, "guidedAdvancedPreprocessingGroup")
+    assert group is not None
+    assert group.isCheckable()
+    assert group.isChecked() is False
+    assert window._guided_advanced_preprocessing_content.isVisible() is False
+    assert group.findChild(
+        QDoubleSpinBox, "guidedLowpassPreprocessingCutoffHz"
+    ) is not None
+    assert group.findChild(
+        QComboBox, "guidedExponentialBleachDetrending"
+    ) is not None
+    assert len(group.findChildren(QDoubleSpinBox)) == 1
+    assert len(group.findChildren(QComboBox)) == 1
+    form = group.findChild(QFormLayout)
+    assert form is not None
+    assert form.rowCount() == 2
+    lowpass = group.findChild(
+        QDoubleSpinBox, "guidedLowpassPreprocessingCutoffHz"
+    )
+    bleach = group.findChild(
+        QComboBox, "guidedExponentialBleachDetrending"
+    )
+    assert lowpass.value() == 1.0
+    assert bleach.currentData() == "none"
+    assert [bleach.itemText(i) for i in range(bleach.count())] == [
+        "Off",
+        "Single exponential",
+        "Double exponential",
+    ]
+    assert [bleach.itemData(i) for i in range(bleach.count())] == [
+        "none",
+        "single_exponential",
+        "double_exponential",
+    ]
+    assert form.labelForField(lowpass).text() == (
+        "Low-pass preprocessing cutoff (Hz):"
+    )
+    assert form.labelForField(bleach).text() == (
+        "Exponential bleach detrending:"
+    )
+
+
+def test_guided_advanced_preprocessing_change_invalidates_existing_guided_evidence(
+    window,
+):
+    window._guided_preview_has_result = True
+    window._guided_preview_result_stale = False
+    window._guided_signal_f0_has_result = True
+    window._guided_signal_f0_result_stale = False
+    window._guided_feature_preview_last_result = {"status": "success"}
+    before_revision = int(getattr(window, "_guided_backend_validation_revision", 0))
+
+    window._guided_lowpass_hz_spin.setValue(2.5)
+
+    assert window._guided_preview_result_stale is True
+    assert window._guided_signal_f0_result_stale is True
+    assert window._guided_feature_preview_last_result is None
+    assert int(window._guided_backend_validation_revision) > before_revision
+    assert window._guided_preprocessing_values() == (2.5, "none")
 
 
 @pytest.mark.parametrize(

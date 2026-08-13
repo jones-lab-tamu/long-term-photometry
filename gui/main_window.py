@@ -676,6 +676,13 @@ GUIDED_CSV_DISCOVERY_GENERIC_FAILURE_MESSAGE = (
     "The selected CSV files could not be read with the current column "
     "mapping. Check the time and ROI column choices, then select ROIs again."
 )
+GUIDED_LOW_PASS_DEFAULT_HZ = 1.0
+GUIDED_BLEACH_DEFAULT_MODE = "none"
+GUIDED_BLEACH_MODE_LABELS = {
+    "none": "Off",
+    "single_exponential": "Single exponential",
+    "double_exponential": "Double exponential",
+}
 GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE = (
     "Return to Select data and confirm the CSV column interpretation before "
     "continuing."
@@ -1555,7 +1562,7 @@ class _GuidedContinuousRwdPreparationWorker(QObject):
             build_guided_continuous_rwd_target_grid,
         )
         from photometry_pipeline.guided_execution_payloads import (
-            build_guided_execution_startup_mapping_contract,
+            build_guided_execution_startup_mapping_contract_for_preprocessing,
         )
         from photometry_pipeline.io.rwd_continuous_projection_reader import (
             iter_project_guided_continuous_rwd_blocks,
@@ -1568,7 +1575,10 @@ class _GuidedContinuousRwdPreparationWorker(QObject):
                 self.failed.emit("cancelled: preparation was cancelled.")
                 return
             startup_mapping_contract = (
-                build_guided_execution_startup_mapping_contract()
+                build_guided_execution_startup_mapping_contract_for_preprocessing(
+                    lowpass_hz=draft.lowpass_hz,
+                    bleach_correction_mode=draft.bleach_correction_mode,
+                )
             )
             target_grid = build_guided_continuous_rwd_target_grid(
                 binding.recording, binding.continuity_evaluation
@@ -4456,6 +4466,63 @@ class MainWindow(QMainWindow):
         roi_layout.addWidget(self._guided_roi_list)
         form.addRow("", roi_group)
 
+        advanced_group = QGroupBox("Advanced preprocessing")
+        advanced_group.setObjectName("guidedAdvancedPreprocessingGroup")
+        advanced_group.setCheckable(True)
+        advanced_group.setChecked(False)
+        advanced_layout = QVBoxLayout(advanced_group)
+        advanced_layout.setContentsMargins(10, 10, 10, 10)
+        advanced_content = QWidget()
+        advanced_content.setObjectName("guidedAdvancedPreprocessingContent")
+        advanced_form = QFormLayout(advanced_content)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.setHorizontalSpacing(10)
+        advanced_form.setVerticalSpacing(8)
+
+        self._guided_lowpass_hz_spin = QDoubleSpinBox()
+        self._guided_lowpass_hz_spin.setObjectName("guidedLowpassPreprocessingCutoffHz")
+        self._guided_lowpass_hz_spin.setDecimals(6)
+        self._guided_lowpass_hz_spin.setRange(0.0, np.finfo(float).max)
+        self._guided_lowpass_hz_spin.setSingleStep(0.1)
+        self._guided_lowpass_hz_spin.setValue(GUIDED_LOW_PASS_DEFAULT_HZ)
+        self._guided_lowpass_hz_spin.setToolTip(
+            "Controls the low-pass preprocessing cutoff used before correction. "
+            "Values at or above the Nyquist frequency do not apply filtering."
+        )
+        advanced_form.addRow(
+            "Low-pass preprocessing cutoff (Hz):",
+            self._guided_lowpass_hz_spin,
+        )
+
+        self._guided_bleach_correction_mode_combo = QComboBox()
+        self._guided_bleach_correction_mode_combo.setObjectName(
+            "guidedExponentialBleachDetrending"
+        )
+        for token, label in GUIDED_BLEACH_MODE_LABELS.items():
+            self._guided_bleach_correction_mode_combo.addItem(label, token)
+        self._guided_bleach_correction_mode_combo.setCurrentIndex(0)
+        self._guided_bleach_correction_mode_combo.setToolTip(
+            "Optionally removes a recording-wide exponential photobleaching "
+            "trend before reference-based correction. Leave Off unless a "
+            "monotonic bleaching trend is evident."
+        )
+        advanced_form.addRow(
+            "Exponential bleach detrending:",
+            self._guided_bleach_correction_mode_combo,
+        )
+        advanced_layout.addWidget(advanced_content)
+        advanced_content.setVisible(False)
+        advanced_group.toggled.connect(advanced_content.setVisible)
+        self._guided_advanced_preprocessing_group = advanced_group
+        self._guided_advanced_preprocessing_content = advanced_content
+        self._guided_lowpass_hz_spin.valueChanged.connect(
+            self._on_guided_preprocessing_settings_changed
+        )
+        self._guided_bleach_correction_mode_combo.currentIndexChanged.connect(
+            self._on_guided_preprocessing_settings_changed
+        )
+        form.addRow("", advanced_group)
+
         self._connect_guided_setup_sync()
         self._sync_guided_setup_from_full()
         self._guided_raw_setup_controls["Select data"] = controls
@@ -5337,6 +5404,8 @@ class MainWindow(QMainWindow):
             "reference_correction_method": self._selected_dynamic_fit_mode(),
             "reference_correction_label": dynamic_fit_mode_label(self._selected_dynamic_fit_mode()),
             "guided_correction_intent": getattr(self, "_guided_correction_intent", "") or "not selected",
+            "lowpass_hz": self._guided_preprocessing_values()[0],
+            "bleach_correction_mode": self._guided_preprocessing_values()[1],
         }
 
     def _refresh_guided_setup_summary(
@@ -5604,10 +5673,51 @@ class MainWindow(QMainWindow):
             return False, GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE
         return True, ""
 
+    def _guided_preprocessing_values(self) -> tuple[float, str]:
+        spin = getattr(self, "_guided_lowpass_hz_spin", None)
+        combo = getattr(self, "_guided_bleach_correction_mode_combo", None)
+        cutoff = (
+            float(spin.value())
+            if spin is not None
+            else GUIDED_LOW_PASS_DEFAULT_HZ
+        )
+        mode = (
+            str(combo.currentData() or GUIDED_BLEACH_DEFAULT_MODE).strip().lower()
+            if combo is not None
+            else GUIDED_BLEACH_DEFAULT_MODE
+        )
+        return cutoff, mode
+
+    def _guided_preprocessing_readiness(self) -> tuple[bool, str]:
+        cutoff, mode = self._guided_preprocessing_values()
+        if not math.isfinite(cutoff) or cutoff <= 0.0:
+            return False, "Low-pass preprocessing cutoff must be finite and greater than 0 Hz."
+        if mode not in GUIDED_BLEACH_MODE_LABELS:
+            return False, "Choose Off, Single exponential, or Double exponential for bleach detrending."
+        return True, ""
+
+    def _on_guided_preprocessing_settings_changed(self, *_args) -> None:
+        self._guided_preview_mark_stale(
+            "Preview needs to be regenerated because Advanced preprocessing changed."
+        )
+        self._guided_signal_f0_mark_stale(
+            "Displayed Signal-Only F0 diagnostic review is stale because Advanced preprocessing changed."
+        )
+        self._clear_guided_feature_detection_preview_result(
+            "Feature preview needs to be regenerated because Advanced preprocessing changed."
+        )
+        self._invalidate_guided_backend_validation(
+            "Guided preprocessing settings changed"
+        )
+        self._refresh_guided_navigation_state()
+
     def _guided_select_data_readiness(self) -> tuple[bool, str]:
         default_reason = "Select data and include at least one ROI to continue."
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
             return False, default_reason
+        preprocessing_ready, preprocessing_reason = self._guided_preprocessing_readiness()
+        if not preprocessing_ready:
+            return False, preprocessing_reason
         if not self._guided_input_dir_edit.text().strip():
             return False, default_reason
         output_text = self._guided_output_dir_edit.text().strip()
@@ -9264,6 +9374,30 @@ class MainWindow(QMainWindow):
                     resolved[key] = segment[key]
         return resolved
 
+    def _guided_preview_recording_source_files(
+        self, segment: dict[str, object]
+    ) -> tuple[str, ...]:
+        """Resolve the accepted source set used by recording-wide preview."""
+        if segment.get("continuous_window_index") is not None:
+            source = str(segment.get("source_path") or "").strip()
+            return (os.path.realpath(source),) if source else ()
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        paths = []
+        for entry in discovery.get("sessions", ()) or ():
+            if not isinstance(entry, dict) or not entry.get("path"):
+                continue
+            if entry.get("included_in_preview", True) is False:
+                continue
+            paths.append(os.path.realpath(str(entry["path"])))
+        if paths:
+            return tuple(paths)
+        interpretation = self._guided_csv_interpretation()
+        return tuple(
+            os.path.realpath(str(path))
+            for path in interpretation.get("ordered_source_files", ())
+            if str(path)
+        )
+
     def _resolve_current_guided_preview_diagnostic_cache_source(self):
         record = getattr(self, "_guided_diagnostic_cache_record", None)
         if record is None:
@@ -9836,7 +9970,7 @@ class MainWindow(QMainWindow):
                 build_guided_continuous_rwd_target_grid,
             )
             from photometry_pipeline.guided_execution_payloads import (
-                build_guided_execution_startup_mapping_contract,
+                build_guided_execution_startup_mapping_contract_for_preprocessing,
             )
 
             target_grid = build_guided_continuous_rwd_target_grid(
@@ -9846,7 +9980,10 @@ class MainWindow(QMainWindow):
                 binding,
                 target_grid,
                 accepted_draft=draft,
-                startup_mapping_contract=build_guided_execution_startup_mapping_contract(),
+                startup_mapping_contract=build_guided_execution_startup_mapping_contract_for_preprocessing(
+                    lowpass_hz=draft.lowpass_hz,
+                    bleach_correction_mode=draft.bleach_correction_mode,
+                ),
             )
             return target_grid, segment_plan
         except Exception as exc:
@@ -10001,6 +10138,9 @@ class MainWindow(QMainWindow):
                 "allow_partial_final_window": False,
             }
         )
+        cutoff, bleach_mode = self._guided_preprocessing_values()
+        overrides["lowpass_hz"] = cutoff
+        overrides["bleach_correction_mode"] = bleach_mode
         return overrides
 
     def _guided_recording_target_fs_hz(self, input_format: str) -> float:
@@ -11556,6 +11696,11 @@ class MainWindow(QMainWindow):
                         )
                 if not isinstance(config_overrides, dict):
                     config_overrides = {}
+                advanced_cutoff, advanced_bleach_mode = (
+                    self._guided_preprocessing_values()
+                )
+                config_overrides["lowpass_hz"] = advanced_cutoff
+                config_overrides["bleach_correction_mode"] = advanced_bleach_mode
                 duration_text = self._duration_edit.text().strip()
                 if (
                     duration_text
@@ -11603,6 +11748,10 @@ class MainWindow(QMainWindow):
                     "preview_id": preview_id,
                     "config_overrides": config_overrides,
                     "parameter_sources": parameter_sources,
+                    "recording_source_files": self._guided_preview_recording_source_files(
+                        segment
+                    ),
+                    "recording_acquisition_mode": self._guided_effective_acquisition_mode(),
                 }
                 if continuous_window_index is not None:
                     preview_kwargs["continuous_window_index"] = int(
@@ -20108,6 +20257,7 @@ class MainWindow(QMainWindow):
                     
         win_val = float(self._guided_continuous_window_sec_spin.value()) if hasattr(self, "_guided_continuous_window_sec_spin") else 600.0
         step_val = win_val
+        guided_lowpass_hz, guided_bleach_mode = self._guided_preprocessing_values()
         timeline_values = self._guided_timeline_plan_values()
         
         allow_partial = self._guided_allow_partial_final_window_cb.isChecked() if hasattr(self, "_guided_allow_partial_final_window_cb") else False
@@ -20388,6 +20538,8 @@ class MainWindow(QMainWindow):
             output_overwrite=False,
             global_correction_strategy=global_corr_strategy,
             dynamic_fit_mode=df_mode,
+            lowpass_hz=guided_lowpass_hz,
+            bleach_correction_mode=guided_bleach_mode,
             dynamic_fit_parameter_contract=dynamic_fit_parameter_contract,
             discovered_roi_ids=discovered,
             included_roi_ids=included,
@@ -20675,6 +20827,8 @@ class MainWindow(QMainWindow):
             f"Format: {plan.input_format}",
             f"Acquisition mode: {acq_mode}",
             f"Acquisition structure summary: {timing_summary}",
+            f"Low-pass preprocessing cutoff: {plan.lowpass_hz} Hz",
+            f"Exponential bleach detrending: {GUIDED_BLEACH_MODE_LABELS.get(plan.bleach_correction_mode, plan.bleach_correction_mode)}",
             "Timeline placement:\n" + "\n".join(
                 f"  {line}" for line in self._guided_timeline_review_lines(plan)
             ),
@@ -22486,6 +22640,10 @@ class MainWindow(QMainWindow):
                 "choice": choice,
                 "feature_settings": feature_settings or {},
                 "setup_signature": self._guided_local_preview_setup_signature(),
+                "preprocessing": {
+                    "lowpass_hz": self._guided_preprocessing_values()[0],
+                    "bleach_correction_mode": self._guided_preprocessing_values()[1],
+                },
                 "segment": self._guided_feature_preview_segment_identity(segment),
                 "input_format": str(
                     (getattr(self, "_discovery_cache", None) or {}).get(
@@ -22752,6 +22910,8 @@ class MainWindow(QMainWindow):
             correction_strategy=correction_strategy,
             dynamic_fit_mode=dynamic_fit_mode,
             feature_settings=config_fields,
+            preprocessing_lowpass_hz=self._guided_preprocessing_values()[0],
+            preprocessing_bleach_correction_mode=self._guided_preprocessing_values()[1],
             feature_profile_id="preview-profile",
             segment_start_sec=(
                 float(segment["window_start_sec"])
@@ -22848,6 +23008,14 @@ class MainWindow(QMainWindow):
                             )
                             else None
                         ),
+                        recording_source_files=(
+                            self._guided_preview_recording_source_files(segment)
+                        ),
+                        recording_acquisition_mode=(
+                            self._guided_effective_acquisition_mode()
+                        ),
+                        guided_lowpass_hz=self._guided_preprocessing_values()[0],
+                        guided_bleach_correction_mode=self._guided_preprocessing_values()[1],
                     )
                 )
             except Exception as exc:

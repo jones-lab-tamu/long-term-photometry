@@ -1722,6 +1722,26 @@ def _materialize_correction_facts(
             )
         )
 
+    # Advanced preprocessing is plan-owned state, not a value inherited from
+    # the Full Control/YAML Config. Keep it in the same typed correction
+    # authority that startup payload derivation already consumes.
+    parameter_values.extend(
+        (
+            GuidedBackendTypedFieldValue(
+                field_name="lowpass_hz",
+                value_type="float",
+                value=float(draft.lowpass_hz),
+                source_classification="guided_advanced_preprocessing",
+            ),
+            GuidedBackendTypedFieldValue(
+                field_name="bleach_correction_mode",
+                value_type="str",
+                value=str(draft.bleach_correction_mode),
+                source_classification="guided_advanced_preprocessing",
+            ),
+        )
+    )
+
     choices_by_roi = {
         choice.roi_id: choice
         for choice in draft.per_roi_correction_strategy_choices

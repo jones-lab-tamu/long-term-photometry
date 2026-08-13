@@ -1143,7 +1143,7 @@ CORRECTION_TYPED_FIELD_CONFIG_MAP = frozenset(
         "adaptive_event_gate_min_trust_fraction",
         "adaptive_event_gate_freeze_interp_method", "window_sec", "step_sec",
         "r_low", "r_high", "g_min", "min_samples_per_window",
-        "min_valid_windows", "baseline_subtract_before_fit",
+        "min_valid_windows", "baseline_subtract_before_fit", "lowpass_hz",
         "bleach_correction_mode",
     }
 )

@@ -25,6 +25,7 @@ from photometry_pipeline.guided_completed_run_rejection_policy import (
 from photometry_pipeline.guided_execution_payloads import (
     GuidedExecutionPayloadDerivationResult,
     build_guided_execution_startup_mapping_contract,
+    build_guided_execution_startup_mapping_contract_for_preprocessing,
     derive_guided_execution_payloads,
 )
 from photometry_pipeline.guided_production_mapping import (
@@ -432,8 +433,14 @@ def build_guided_startup_request_from_validation(
             current_gui_revision,
         )
     try:
+        draft = validation_context.draft
         startup_mapping_contract = (
-            build_guided_execution_startup_mapping_contract()
+            build_guided_execution_startup_mapping_contract_for_preprocessing(
+                lowpass_hz=getattr(draft, "lowpass_hz", 1.0),
+                bleach_correction_mode=getattr(
+                    draft, "bleach_correction_mode", "none"
+                ),
+            )
         )
         payload_result = derive_guided_execution_payloads(
             authorization_result,
@@ -581,8 +588,14 @@ def build_guided_npm_startup_request_from_validation(
             current_gui_revision,
         )
     try:
+        draft = validation_context.draft
         startup_mapping_contract = (
-            build_guided_execution_startup_mapping_contract()
+            build_guided_execution_startup_mapping_contract_for_preprocessing(
+                lowpass_hz=getattr(draft, "lowpass_hz", 1.0),
+                bleach_correction_mode=getattr(
+                    draft, "bleach_correction_mode", "none"
+                ),
+            )
         )
         payload_result = compile_npm_generic_execution_payloads(
             intent,

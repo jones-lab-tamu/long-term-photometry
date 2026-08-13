@@ -33,6 +33,8 @@ class GuidedFeaturePreviewTraceRequest:
     segment_duration_sec: Optional[float] = None
     setup_signature: Optional[str] = None
     correction_signature: Optional[str] = None
+    preprocessing_lowpass_hz: Optional[float] = None
+    preprocessing_bleach_correction_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,8 @@ def build_feature_detection_preview_from_trace(
     feature_profile_id: str,
     trace_identity: dict[str, Any],
     correction_identity: dict[str, Any],
+    preprocessing_lowpass_hz: float | None = None,
+    preprocessing_bleach_correction_mode: str | None = None,
 ) -> GuidedFeatureDetectionPreviewResult:
     """Pure, no-write peak detection preview runner."""
     # 1. Validation
@@ -164,7 +168,10 @@ def build_feature_detection_preview_from_trace(
         )
 
     # 2. Adaptation and Execution
-    config_adapter = SettingsConfigAdapter(feature_settings)
+    adapter_settings = dict(feature_settings)
+    if preprocessing_lowpass_hz is not None:
+        adapter_settings["lowpass_hz"] = float(preprocessing_lowpass_hz)
+    config_adapter = SettingsConfigAdapter(adapter_settings)
     prefiltered, _ = apply_peak_prefilter(trace, fs_hz, config_adapter)
 
     # Compute threshold bounds
@@ -199,12 +206,28 @@ def build_feature_detection_preview_from_trace(
     neg_times = time_sec[neg_idx]
 
     # Deterministic metadata digests and version mappings
-    settings_digest = compute_settings_digest(feature_settings)
+    digest_settings = dict(feature_settings)
+    if preprocessing_lowpass_hz is not None:
+        digest_settings["guided_preprocessing_lowpass_hz"] = float(
+            preprocessing_lowpass_hz
+        )
+    if preprocessing_bleach_correction_mode is not None:
+        digest_settings["guided_preprocessing_bleach_correction_mode"] = str(
+            preprocessing_bleach_correction_mode
+        )
+    settings_digest = compute_settings_digest(digest_settings)
     detector_identity = {
         "function": "get_peak_indices_for_trace",
         "module": "photometry_pipeline.core.feature_extraction",
         "version": "1.0",
+        "lowpass_hz": float(
+            config_adapter.lowpass_hz
+        ),
     }
+    if preprocessing_bleach_correction_mode is not None:
+        detector_identity["guided_bleach_correction_mode"] = str(
+            preprocessing_bleach_correction_mode
+        )
 
     # Populate warnings list
     warnings_list = []
@@ -403,4 +426,8 @@ def build_guided_feature_detection_preview(
         feature_profile_id=trace_request.feature_profile_id,
         trace_identity=preview_trace.trace_identity,
         correction_identity=preview_trace.correction_identity,
+        preprocessing_lowpass_hz=trace_request.preprocessing_lowpass_hz,
+        preprocessing_bleach_correction_mode=(
+            trace_request.preprocessing_bleach_correction_mode
+        ),
     )

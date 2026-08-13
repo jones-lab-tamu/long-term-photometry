@@ -342,6 +342,8 @@ class Pipeline:
         self._applied_correction_records_by_roi = {}
         self._guided_reference_global_fit_provenance = {}
         self._guided_reference_f0_records_by_roi = {}
+        self._recording_wide_bleach_context = None
+        self._recording_wide_bleach_apply_session_offset_sec = 0.0
         self._rwd_contract_validation = dict(
             getattr(config, "rwd_contract_validation", {}) or {}
         )
@@ -2077,6 +2079,14 @@ class Pipeline:
         pass1_accumulate_sec = 0.0
         pass1_solve_sec = 0.0
         pass1_f0_compute_sec = 0.0
+
+        if self._is_continuous_mode_enabled():
+            # Continuous recording-wide preparation remains on its existing
+            # bounded, recording-relative path. Intermittent preparation is
+            # deferred until the accepted Pass-1 manifest is complete below.
+            self._prepare_guided_recording_wide_bleach_context(
+                force_format, entries=tuple(self.file_list)
+            )
         
         method = self.config.baseline_method
         reservoir = baseline.DeterministicReservoir(seed=self.config.seed)
@@ -2318,13 +2328,171 @@ class Pipeline:
                     else:
                         logging.warning(f"  Tonic Fit ({ch}) FAILED.")
             
+        if not self._is_continuous_mode_enabled():
+            # The Pass-1 manifest is the first authority that knows which
+            # intermittent sessions were actually accepted. Use that same
+            # frozen set for the recording-wide fit and Pass 2.
+            self._prepare_guided_recording_wide_bleach_context(
+                force_format, entries=tuple(self._pass1_manifest)
+            )
+
         # End Pass 1
+
+    def _guided_recording_wide_bleach_roi_ids(self) -> tuple[str, ...]:
+        if not isinstance(self.per_roi_correction, MappingProxyType):
+            correction_map = self.per_roi_correction
+        else:
+            correction_map = dict(self.per_roi_correction)
+        if not isinstance(correction_map, dict):
+            return ()
+        return tuple(
+            str(roi_id)
+            for roi_id, spec in correction_map.items()
+            if getattr(spec, "strategy_family", "") == "dynamic_fit"
+        )
+
+    def _guided_recording_wide_bleach_chunk_times(
+        self,
+        entry: str,
+        chunk: Chunk,
+        *,
+        session_offset_sec: float,
+    ) -> tuple[np.ndarray, float, bool]:
+        """Return bounded-chunk absolute times and duration for bleach use."""
+        local_time = np.asarray(chunk.time_sec, dtype=float).reshape(-1)
+        if local_time.size == 0 or not np.all(np.isfinite(local_time)):
+            raise ValueError("guided recording-wide bleach time axis is invalid")
+        rec = self._continuous_window_map.get(entry)
+        if rec is not None or self._is_continuous_mode_enabled():
+            metadata = dict(chunk.metadata or {})
+            window_start = float(
+                metadata.get(
+                    "window_start_sec",
+                    (rec or {}).get("window_start_sec", 0.0),
+                )
+            )
+            duration = float(
+                metadata.get(
+                    "original_file_duration_sec",
+                    (rec or {}).get("original_file_duration_sec", np.nan),
+                )
+            )
+            if not np.isfinite(duration) or duration <= 0.0:
+                duration = float(window_start + local_time[-1] - local_time[0])
+            return window_start + (local_time - local_time[0]), duration, True
+
+        # Authorized NPM chunks expose both the within-session axis and the
+        # cross-session placement. Use the within-session axis here so nominal
+        # wall-clock gaps never enter the bleach coordinate.
+        if "guided_npm_within_session_start_sec" in (chunk.metadata or {}):
+            actual_offset = float(
+                (chunk.metadata or {}).get("guided_npm_actual_elapsed_sec", 0.0)
+            )
+            local = local_time - actual_offset
+        else:
+            local = local_time
+        local = local - local[0]
+        duration = regression.recorded_duration_sec_from_chunk(chunk)
+        return float(session_offset_sec) + local, duration, False
+
+    def _prepare_guided_recording_wide_bleach_context(
+        self,
+        force_format: str,
+        *,
+        entries: tuple[str, ...] | None = None,
+    ) -> None:
+        """Prepare one bounded recording-wide bleach authority for Guided runs."""
+        self._recording_wide_bleach_context = None
+        mode = str(getattr(self.config, "bleach_correction_mode", "none") or "none")
+        if mode == "none":
+            return
+        roi_ids = self._guided_recording_wide_bleach_roi_ids()
+        if not roi_ids:
+            return
+        sampler = regression.RecordingWideBleachSampler(
+            capacity=regression.BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
+            seed=int(getattr(self.config, "seed", 0)),
+        )
+        session_offset = 0.0
+        recording_duration = 0.0
+        time_basis = (
+            "recording_relative_acquisition_time"
+            if self._is_continuous_mode_enabled()
+            else "cumulative_recorded_acquisition_time"
+        )
+        source_entries = tuple(self.file_list if entries is None else entries)
+        for _chunk_id, entry, chunk, _load_elapsed in self._iter_entry_chunks_for_pass(
+            source_entries, force_format, "guided_bleach_fit"
+        ):
+            try:
+                if self._selected_rois is not None:
+                    chunk = self._apply_roi_filter(chunk)
+                absolute_time, duration, is_continuous = (
+                    self._guided_recording_wide_bleach_chunk_times(
+                        entry,
+                        chunk,
+                        session_offset_sec=session_offset,
+                    )
+                )
+                channel_indexes = {
+                    str(name): index for index, name in enumerate(chunk.channel_names)
+                }
+                for roi_id in roi_ids:
+                    index = channel_indexes.get(str(roi_id))
+                    if index is None:
+                        continue
+                    sampler.add(
+                        str(roi_id),
+                        absolute_time,
+                        chunk.sig_raw[:, index],
+                        chunk.uv_raw[:, index],
+                    )
+                if is_continuous:
+                    recording_duration = max(recording_duration, duration)
+                else:
+                    session_offset += duration
+                    recording_duration = session_offset
+            except Exception as exc:
+                self._handle_pass_chunk_exception(entry, "guided_bleach_fit", exc)
+                continue
+        if recording_duration <= 0.0:
+            if not self._is_continuous_mode_enabled():
+                # An intermittent run with no accepted recorded samples has
+                # no valid cumulative bleach coordinate. Do not synthesize
+                # one from the configured nominal session duration.
+                return
+            recording_duration = float(getattr(self.config, "chunk_duration_sec", 0.0) or 0.0)
+        self._recording_wide_bleach_context = regression.build_recording_wide_bleach_context(
+            sampler,
+            mode=mode,
+            recording_duration_sec=recording_duration,
+            time_basis=time_basis,
+            sample_rate_hz=float(
+                getattr(self.config, "target_fs_hz", 0.0)
+                or getattr(self.config, "sampling_rate_hz_fallback", 40.0)
+            ),
+        )
 
     def _apply_standard_analysis(self, chunk, chunk_id):
         """
         Shared source of truth for standard analysis steps (preprocessing -> regression -> normalization).
         Returns the processed chunk.
         """
+        bleach_times = None
+        bleach_duration = None
+        if self._recording_wide_bleach_context is not None:
+            bleach_times, bleach_duration, _is_continuous = (
+                self._guided_recording_wide_bleach_chunk_times(
+                    str(chunk.source_file),
+                    chunk,
+                    session_offset_sec=self._recording_wide_bleach_apply_session_offset_sec,
+                )
+            )
+            if not hasattr(chunk, "metadata") or chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["bleach_correction_session_duration_sec"] = float(
+                bleach_duration
+            )
         t_filter = time.perf_counter()
         uv_filt, uv_meta = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
         sig_filt, sig_meta = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
@@ -2355,9 +2523,11 @@ class Pipeline:
                  # Native tonic consumes the same canonical per-session
                  # correction engine as phasic. ``mode='tonic'`` is reserved
                  # for the positive legacy recording-global tonic route.
-                 mode="phasic" if self.per_roi_correction is not None else self.mode,
-                 per_roi_correction=dispatch_map,
-             )
+                mode="phasic" if self.per_roi_correction is not None else self.mode,
+                per_roi_correction=dispatch_map,
+                bleach_correction_context=self._recording_wide_bleach_context,
+                bleach_time_sec=bleach_times,
+            )
              if self._is_phasic_timing_enabled():
                  self._add_phasic_detail_bucket("pass2.dynamic_regression", time.perf_counter() - t_reg)
                  dyn_timing = None
@@ -2897,6 +3067,7 @@ class Pipeline:
         
         # Freeze manifest to ensure it cannot be mutated after Pass 1
         frozen_manifest = tuple(self._pass1_manifest)
+        self._recording_wide_bleach_apply_session_offset_sec = 0.0
         
         # Check for new files not in pass 1 manifest
         t_manifest = time.perf_counter()
@@ -2948,6 +3119,12 @@ class Pipeline:
                 
                 # SHARED PROCESSING (single source of truth for filtering, regression, dff)
                 chunk = self._apply_standard_analysis(chunk, i)
+                if self._recording_wide_bleach_context is not None and not self._is_continuous_mode_enabled():
+                    self._recording_wide_bleach_apply_session_offset_sec += float(
+                        (chunk.metadata or {}).get(
+                            "bleach_correction_session_duration_sec", 0.0
+                        )
+                    )
                 self._record_dynamic_fit_slope_summaries(chunk, i, self._entry_source_file(fpath))
                 self._record_dynamic_fit_validity_metrics(chunk, i, self._entry_source_file(fpath))
                 self._record_baseline_reference_candidate_metrics(chunk, i, self._entry_source_file(fpath))
@@ -3740,6 +3917,12 @@ class Pipeline:
         t_pass1 = time.perf_counter()
         self.run_pass_1(force_format)
         self._add_phasic_phase_bucket("phase.pass1_total", time.perf_counter() - t_pass1)
+        if self._recording_wide_bleach_context is not None:
+            _append_run_report_section(
+                output_dir,
+                "bleach_correction_provenance",
+                self._recording_wide_bleach_context.metadata(),
+            )
         if authorized_npm_runtime is not None:
             # D1 dispatch boundary: the real first numerical pass has entered
             # and consumed every exact authorized source at least once.  Pass 2,

@@ -1,7 +1,8 @@
+import hashlib
 import numpy as np
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from ..config import Config
 from .types import Chunk, PerRoiCorrectionSpec, RESOLVED_DYNAMIC_FIT_MODES
 from .slope_qc import _negative_span_stats, apply_slope_constraint, summarize_slope
@@ -229,6 +230,18 @@ _BLEACH_CORRECTION_MODES = {
     "double_exponential",
 }
 _DOUBLE_BLEACH_MIN_TAU_RATIO = 1.8
+BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY = 200_000
+
+
+def recorded_duration_sec_from_chunk(chunk: Any) -> float:
+    """Return the right-open recorded duration represented by one chunk."""
+    n_samples = int(np.asarray(chunk.time_sec).reshape(-1).size)
+    fs_hz = float(chunk.fs_hz)
+    if n_samples <= 0 or not np.isfinite(fs_hz) or fs_hz <= 0.0:
+        raise ValueError(
+            "Chunk must contain samples and a positive finite sampling rate."
+        )
+    return float(n_samples) / fs_hz
 
 
 def _normalize_signal_excursion_polarity(mode_raw: str) -> str:
@@ -299,51 +312,74 @@ def _resolve_bleach_tau_bounds(
     return (float(tau_min), float(tau_max)), ""
 
 
-def _fit_single_exponential_with_offset(
-    trace: np.ndarray,
+def _resolve_bleach_tau_bounds_for_duration(
+    duration_sec: float,
     sample_rate_hz: float,
-) -> dict:
-    """
-    Fit y(t) ~= offset + amplitude*exp(-t/tau) using a tau grid + linear least squares.
+) -> tuple[tuple[float, float] | None, str]:
+    """Resolve the existing tau policy against the full recording duration."""
+    fs_hz = float(sample_rate_hz)
+    duration = float(duration_sec)
+    if (not np.isfinite(fs_hz)) or fs_hz <= 0.0:
+        return None, "invalid_sample_rate"
+    if (not np.isfinite(duration)) or duration <= 0.0:
+        return None, "nonpositive_duration"
+    tau_min = max(2.0 / fs_hz, min(2.0, 0.02 * duration))
+    tau_max = max(tau_min * 2.0, duration * 8.0)
+    if not (np.isfinite(tau_min) and np.isfinite(tau_max) and tau_max > tau_min):
+        return None, "invalid_tau_range"
+    return (float(tau_min), float(tau_max)), ""
 
-    Returns a metadata dict. On failure, fit_succeeded=False and fit_failure_reason
-    is populated; callers must fall back to no bleach correction for that trace.
-    """
+
+def _fit_single_exponential_with_offset_at_times(
+    trace: np.ndarray,
+    time_sec: np.ndarray,
+    sample_rate_hz: float,
+    *,
+    recording_duration_sec: float | None = None,
+) -> dict:
+    """Fit the existing single-exponential model at explicit acquisition times."""
     y = np.asarray(trace, dtype=float).reshape(-1)
-    finite = np.isfinite(y)
-    n_finite = int(np.sum(finite))
+    t = np.asarray(time_sec, dtype=float).reshape(-1)
     out = {
         "fit_model": "single_exponential",
         "fit_succeeded": False,
         "fit_failure_reason": "",
-        "n_finite_samples": n_finite,
+        "n_finite_samples": 0,
         "amplitude": float("nan"),
         "tau_sec": float("nan"),
         "offset": float("nan"),
         "fit_rmse": float("nan"),
     }
+    if y.shape != t.shape:
+        out["fit_failure_reason"] = "time_value_shape_mismatch"
+        return out
+    finite = np.isfinite(y) & np.isfinite(t)
+    n_finite = int(np.sum(finite))
+    out["n_finite_samples"] = n_finite
     if y.size < 8 or n_finite < 8:
         out["fit_failure_reason"] = "insufficient_finite_samples"
         return out
-
-    tau_bounds, tau_err = _resolve_bleach_tau_bounds(y.size, sample_rate_hz)
+    duration = (
+        float(recording_duration_sec)
+        if recording_duration_sec is not None
+        else float(np.nanmax(t[finite]) - np.nanmin(t[finite]))
+    )
+    tau_bounds, tau_err = _resolve_bleach_tau_bounds_for_duration(
+        duration, sample_rate_hz
+    )
     if tau_bounds is None:
         out["fit_failure_reason"] = tau_err or "invalid_tau_range"
         return out
-    fs_hz = float(sample_rate_hz)
     tau_min, tau_max = tau_bounds
-
-    t = np.arange(y.size, dtype=float) / fs_hz
     t_fit = t[finite]
     y_fit = y[finite]
     tau_grid = np.geomspace(tau_min, tau_max, num=40)
-
     best = None
     for tau in tau_grid:
         e = np.exp(-t_fit / float(tau))
         X = np.column_stack((e, np.ones_like(e)))
         try:
-            beta, residuals, rank, _singular = np.linalg.lstsq(X, y_fit, rcond=None)
+            beta, _residuals, rank, _singular = np.linalg.lstsq(X, y_fit, rcond=None)
         except Exception:
             continue
         if int(rank) < 2:
@@ -361,39 +397,29 @@ def _fit_single_exponential_with_offset(
                 "tau_sec": float(tau),
                 "fit_rmse": rmse,
             }
-
     if best is None:
         out["fit_failure_reason"] = "lstsq_fit_failed"
         return out
-
     out.update(best)
     out["fit_succeeded"] = True
-    out["fit_failure_reason"] = ""
     return out
 
 
-def _fit_double_exponential_with_offset(
+def _fit_double_exponential_with_offset_at_times(
     trace: np.ndarray,
+    time_sec: np.ndarray,
     sample_rate_hz: float,
+    *,
+    recording_duration_sec: float | None = None,
 ) -> dict:
-    """
-    Fit y(t) ~= offset + a_fast*exp(-t/tau_fast) + a_slow*exp(-t/tau_slow)
-    using constrained tau-pair grid search + linear least squares.
-
-    Constraints:
-      - tau_fast > 0, tau_slow > 0
-      - tau_fast < tau_slow
-      - tau_slow / tau_fast >= _DOUBLE_BLEACH_MIN_TAU_RATIO
-      - amplitudes constrained to be non-negative
-    """
+    """Fit the existing constrained double-exponential model at explicit times."""
     y = np.asarray(trace, dtype=float).reshape(-1)
-    finite = np.isfinite(y)
-    n_finite = int(np.sum(finite))
+    t = np.asarray(time_sec, dtype=float).reshape(-1)
     out = {
         "fit_model": "double_exponential",
         "fit_succeeded": False,
         "fit_failure_reason": "",
-        "n_finite_samples": n_finite,
+        "n_finite_samples": 0,
         "amplitude_fast": float("nan"),
         "tau_fast_sec": float("nan"),
         "amplitude_slow": float("nan"),
@@ -401,22 +427,30 @@ def _fit_double_exponential_with_offset(
         "offset": float("nan"),
         "fit_rmse": float("nan"),
     }
+    if y.shape != t.shape:
+        out["fit_failure_reason"] = "time_value_shape_mismatch"
+        return out
+    finite = np.isfinite(y) & np.isfinite(t)
+    n_finite = int(np.sum(finite))
+    out["n_finite_samples"] = n_finite
     if y.size < 12 or n_finite < 12:
         out["fit_failure_reason"] = "insufficient_finite_samples"
         return out
-
-    tau_bounds, tau_err = _resolve_bleach_tau_bounds(y.size, sample_rate_hz)
+    duration = (
+        float(recording_duration_sec)
+        if recording_duration_sec is not None
+        else float(np.nanmax(t[finite]) - np.nanmin(t[finite]))
+    )
+    tau_bounds, tau_err = _resolve_bleach_tau_bounds_for_duration(
+        duration, sample_rate_hz
+    )
     if tau_bounds is None:
         out["fit_failure_reason"] = tau_err or "invalid_tau_range"
         return out
-    fs_hz = float(sample_rate_hz)
     tau_min, tau_max = tau_bounds
-
-    t = np.arange(y.size, dtype=float) / fs_hz
     t_fit = t[finite]
     y_fit = y[finite]
     tau_grid = np.geomspace(tau_min, tau_max, num=28)
-
     best = None
     for fast_idx, tau_fast in enumerate(tau_grid[:-1]):
         for tau_slow in tau_grid[fast_idx + 1 :]:
@@ -432,13 +466,11 @@ def _fit_double_exponential_with_offset(
                 continue
             if int(rank) < 3:
                 continue
-            amp_fast = float(beta[0])
-            amp_slow = float(beta[1])
-            offset = float(beta[2])
+            amp_fast, amp_slow, offset = map(float, beta)
             if (
-                (not np.isfinite(amp_fast))
-                or (not np.isfinite(amp_slow))
-                or (not np.isfinite(offset))
+                not np.isfinite(amp_fast)
+                or not np.isfinite(amp_slow)
+                or not np.isfinite(offset)
                 or amp_fast < 0.0
                 or amp_slow < 0.0
             ):
@@ -457,27 +489,45 @@ def _fit_double_exponential_with_offset(
                     "fit_rmse": rmse,
                     "tau_ratio": tau_ratio,
                 }
-
     if best is None:
         out["fit_failure_reason"] = "lstsq_fit_failed_or_constrained_out"
         return out
     if float(best.get("tau_ratio", 0.0)) < _DOUBLE_BLEACH_MIN_TAU_RATIO:
         out["fit_failure_reason"] = "degenerate_tau_separation"
         return out
-
-    out.update(
-        {
-            "amplitude_fast": float(best["amplitude_fast"]),
-            "tau_fast_sec": float(best["tau_fast_sec"]),
-            "amplitude_slow": float(best["amplitude_slow"]),
-            "tau_slow_sec": float(best["tau_slow_sec"]),
-            "offset": float(best["offset"]),
-            "fit_rmse": float(best["fit_rmse"]),
-        }
-    )
+    out.update({key: value for key, value in best.items() if key != "tau_ratio"})
     out["fit_succeeded"] = True
-    out["fit_failure_reason"] = ""
     return out
+
+
+def _fit_single_exponential_with_offset(
+    trace: np.ndarray,
+    sample_rate_hz: float,
+) -> dict:
+    """Fit the existing single-exponential model on the legacy local axis."""
+    y = np.asarray(trace, dtype=float).reshape(-1)
+    fs_hz = float(sample_rate_hz)
+    return _fit_single_exponential_with_offset_at_times(
+        y,
+        np.arange(y.size, dtype=float) / max(fs_hz, 1e-9),
+        fs_hz,
+        recording_duration_sec=(y.size - 1) / fs_hz if y.size > 1 else 0.0,
+    )
+
+
+def _fit_double_exponential_with_offset(
+    trace: np.ndarray,
+    sample_rate_hz: float,
+) -> dict:
+    """Fit the existing double-exponential model on the legacy local axis."""
+    y = np.asarray(trace, dtype=float).reshape(-1)
+    fs_hz = float(sample_rate_hz)
+    return _fit_double_exponential_with_offset_at_times(
+        y,
+        np.arange(y.size, dtype=float) / max(fs_hz, 1e-9),
+        fs_hz,
+        recording_duration_sec=(y.size - 1) / fs_hz if y.size > 1 else 0.0,
+    )
 
 
 def _bleach_fit_components_from_meta(
@@ -513,6 +563,367 @@ def _bleach_fit_components_from_meta(
         )
     except Exception:
         return None, None
+
+
+def _bleach_fit_components_from_times(
+    time_sec: np.ndarray,
+    fit_meta: Mapping[str, Any],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Evaluate a fitted bleach model at explicit recording-relative times."""
+    if not isinstance(fit_meta, Mapping) or not bool(fit_meta.get("fit_succeeded", False)):
+        return None, None
+    t = np.asarray(time_sec, dtype=float).reshape(-1)
+    if not np.all(np.isfinite(t)):
+        return None, None
+    model = str(fit_meta.get("fit_model", "")).strip().lower()
+    if not model:
+        model = (
+            "double_exponential"
+            if "tau_fast_sec" in fit_meta or "tau_slow_sec" in fit_meta
+            else "single_exponential"
+        )
+    try:
+        if model == "double_exponential":
+            tau_fast = float(fit_meta["tau_fast_sec"])
+            tau_slow = float(fit_meta["tau_slow_sec"])
+            amp_fast = float(fit_meta["amplitude_fast"])
+            amp_slow = float(fit_meta["amplitude_slow"])
+            if tau_fast > tau_slow:
+                tau_fast, tau_slow = tau_slow, tau_fast
+                amp_fast, amp_slow = amp_slow, amp_fast
+            decay = amp_fast * np.exp(-t / tau_fast) + amp_slow * np.exp(-t / tau_slow)
+            return decay + float(fit_meta["offset"]), decay
+        tau = float(fit_meta["tau_sec"])
+        decay = float(fit_meta["amplitude"]) * np.exp(-t / tau)
+        return decay + float(fit_meta["offset"]), decay
+    except Exception:
+        return None, None
+
+
+class _RecordingWideBleachReservoir:
+    """Deterministic bounded reservoir retaining explicit time/value pairs."""
+
+    def __init__(self, *, seed: int, capacity: int) -> None:
+        self.capacity = max(1, int(capacity))
+        self._rng = np.random.default_rng(int(seed))
+        self._time = np.empty(self.capacity, dtype=float)
+        self._value = np.empty(self.capacity, dtype=float)
+        self.count = 0
+
+    def add(self, time_sec: np.ndarray, values: np.ndarray) -> None:
+        times = np.asarray(time_sec, dtype=float).reshape(-1)
+        vals = np.asarray(values, dtype=float).reshape(-1)
+        if times.shape != vals.shape:
+            raise ValueError("Bleach reservoir time/value shape mismatch.")
+        finite = np.isfinite(times) & np.isfinite(vals)
+        finite_times = times[finite]
+        finite_values = vals[finite]
+        n_new = int(finite_times.size)
+        if n_new == 0:
+            return
+
+        start_count = int(self.count)
+        end_count = start_count + n_new
+
+        # Fill the initial reservoir prefix directly.  Once full, draw all
+        # replacement decisions for this bounded input batch in one RNG call.
+        n_stored_directly = max(
+            0, min(n_new, self.capacity - start_count)
+        )
+        if n_stored_directly:
+            direct_end = start_count + n_stored_directly
+            self._time[start_count:direct_end] = finite_times[:n_stored_directly]
+            self._value[start_count:direct_end] = finite_values[:n_stored_directly]
+
+        tail_times = finite_times[n_stored_directly:]
+        tail_values = finite_values[n_stored_directly:]
+        if tail_times.size:
+            item_counts = np.arange(
+                start_count + n_stored_directly + 1,
+                end_count + 1,
+                dtype=np.int64,
+            )
+            replacements = np.floor(
+                self._rng.random(tail_times.size) * item_counts
+            ).astype(np.intp)
+            keep = replacements < self.capacity
+            if np.any(keep):
+                kept_replacements = replacements[keep]
+                kept_sources = np.flatnonzero(keep)
+                # A vectorized batch can draw the same slot more than once.
+                # The last input sample wins, matching sequential reservoir
+                # replacement semantics without a per-sample Python loop.
+                unique_replacements, reverse_first = np.unique(
+                    kept_replacements[::-1], return_index=True
+                )
+                winning_sources = kept_sources[::-1][reverse_first]
+                self._time[unique_replacements] = tail_times[winning_sources]
+                self._value[unique_replacements] = tail_values[winning_sources]
+
+        self.count = end_count
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        n = min(self.count, self.capacity)
+        return self._time[:n].copy(), self._value[:n].copy()
+
+
+class RecordingWideBleachSampler:
+    """Bounded deterministic `(time, value)` sampler for one recording."""
+
+    def __init__(
+        self,
+        *,
+        capacity: int = BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
+        seed: int = 0,
+    ) -> None:
+        self.capacity = max(1, int(capacity))
+        self.seed = int(seed)
+        self._reservoirs: dict[str, dict[str, _RecordingWideBleachReservoir]] = {}
+
+    def _reservoir(self, roi_id: str, kind: str) -> _RecordingWideBleachReservoir:
+        key = str(roi_id)
+        by_kind = self._reservoirs.setdefault(key, {})
+        if kind not in by_kind:
+            digest = hashlib.sha256(f"{key}:{kind}".encode("utf-8")).digest()
+            salt = int.from_bytes(digest[:8], "little", signed=False)
+            by_kind[kind] = _RecordingWideBleachReservoir(
+                seed=(self.seed + salt) % (2**63 - 1),
+                capacity=self.capacity,
+            )
+        return by_kind[kind]
+
+    def add(
+        self,
+        roi_id: str,
+        time_sec: np.ndarray,
+        signal_values: np.ndarray,
+        reference_values: np.ndarray,
+    ) -> None:
+        self._reservoir(roi_id, "signal").add(time_sec, signal_values)
+        self._reservoir(roi_id, "reference").add(time_sec, reference_values)
+
+    def sampled_arrays(self, roi_id: str, kind: str) -> tuple[np.ndarray, np.ndarray]:
+        return self._reservoir(str(roi_id), str(kind)).arrays()
+
+    def channels(self) -> tuple[str, ...]:
+        return tuple(sorted(self._reservoirs))
+
+
+@dataclass(frozen=True)
+class RecordingWideBleachContext:
+    mode_requested: str
+    mode_resolved: str
+    scope: str
+    time_basis: str
+    recording_duration_sec: float
+    sample_capacity: int
+    per_roi: Mapping[str, Mapping[str, Any]]
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "mode_requested": self.mode_requested,
+            "mode_resolved": self.mode_resolved,
+            "scope": self.scope,
+            "time_basis": self.time_basis,
+            "recording_duration_sec": float(self.recording_duration_sec),
+            "sample_capacity": int(self.sample_capacity),
+            "per_roi": {
+                str(roi): {
+                    key: dict(value) if isinstance(value, Mapping) else value
+                    for key, value in dict(entry).items()
+                    if key in {"signal", "reference", "signal_samples_seen", "reference_samples_seen", "signal_samples_used", "reference_samples_used"}
+                }
+                for roi, entry in self.per_roi.items()
+            },
+        }
+
+
+def build_recording_wide_bleach_context(
+    sampler: RecordingWideBleachSampler,
+    *,
+    mode: str,
+    recording_duration_sec: float,
+    time_basis: str,
+    sample_rate_hz: float | None = None,
+) -> RecordingWideBleachContext:
+    """Fit one independent signal/reference model per ROI from bounded samples."""
+    mode_requested = str(mode or "none")
+    mode_resolved = _normalize_bleach_correction_mode(mode_requested)
+    duration = float(recording_duration_sec)
+    per_roi: dict[str, dict[str, Any]] = {}
+    for roi_id in sampler.channels():
+        signal_time, signal_values = sampler.sampled_arrays(roi_id, "signal")
+        reference_time, reference_values = sampler.sampled_arrays(roi_id, "reference")
+        if mode_resolved == "single_exponential":
+            fit_fn = _fit_single_exponential_with_offset_at_times
+        else:
+            fit_fn = _fit_double_exponential_with_offset_at_times
+        if mode_resolved in {"single_exponential", "double_exponential"}:
+            def _resolve_effective_sample_rate(
+                sample_time: np.ndarray,
+                reservoir: _RecordingWideBleachReservoir,
+            ) -> float:
+                supplied_fs = (
+                    float(sample_rate_hz)
+                    if sample_rate_hz is not None
+                    else float("nan")
+                )
+                if np.isfinite(supplied_fs) and supplied_fs > 0.0:
+                    return supplied_fs
+
+                # Compatibility-only fallback for callers that do not provide
+                # fs: infer spacing only when the reservoir retained every
+                # finite sample. Randomly sampled coordinates are not a valid
+                # sampling-rate estimate, so use a fixed compatibility value
+                # after the bounded reservoir has replaced samples.
+                if reservoir.count <= reservoir.capacity and sample_time.size >= 2:
+                    deltas = np.diff(np.sort(sample_time))
+                    finite_deltas = deltas[np.isfinite(deltas) & (deltas > 0)]
+                    if finite_deltas.size:
+                        return 1.0 / float(np.median(finite_deltas))
+                return 1.0
+
+            signal_reservoir = sampler._reservoirs[str(roi_id)]["signal"]
+            reference_reservoir = sampler._reservoirs[str(roi_id)]["reference"]
+            signal_fs_hz = _resolve_effective_sample_rate(
+                signal_time, signal_reservoir
+            )
+            reference_fs_hz = _resolve_effective_sample_rate(
+                reference_time, reference_reservoir
+            )
+            signal_fit = fit_fn(
+                signal_values,
+                signal_time,
+                signal_fs_hz,
+                recording_duration_sec=duration,
+            )
+            reference_fit = fit_fn(
+                reference_values,
+                reference_time,
+                reference_fs_hz,
+                recording_duration_sec=duration,
+            )
+        else:
+            signal_fit = {
+                "fit_model": "none",
+                "fit_succeeded": False,
+                "fit_failure_reason": "disabled",
+                "n_finite_samples": int(signal_values.size),
+            }
+            reference_fit = {
+                "fit_model": "none",
+                "fit_succeeded": False,
+                "fit_failure_reason": "disabled",
+                "n_finite_samples": int(reference_values.size),
+            }
+        per_roi[str(roi_id)] = {
+            "signal": dict(signal_fit),
+            "reference": dict(reference_fit),
+            "signal_samples_seen": int(sampler._reservoirs[str(roi_id)]["signal"].count),
+            "reference_samples_seen": int(sampler._reservoirs[str(roi_id)]["reference"].count),
+            "signal_samples_used": int(signal_values.size),
+            "reference_samples_used": int(reference_values.size),
+        }
+    return RecordingWideBleachContext(
+        mode_requested=mode_requested,
+        mode_resolved=mode_resolved,
+        scope="recording_wide",
+        time_basis=str(time_basis),
+        recording_duration_sec=duration,
+        sample_capacity=int(sampler.capacity),
+        per_roi=per_roi,
+    )
+
+
+def _apply_recording_wide_bleach_to_chunk_inputs(
+    chunk: Chunk,
+    config: Config,
+    context: RecordingWideBleachContext,
+    *,
+    time_sec: np.ndarray,
+    dynamic_roi_indices: set[int] | None = None,
+) -> dict:
+    """Evaluate a recording-wide context on one bounded chunk."""
+    mode_requested = str(getattr(config, "bleach_correction_mode", "none"))
+    mode_resolved = _normalize_bleach_correction_mode(mode_requested)
+    sig_raw = np.asarray(chunk.sig_raw, dtype=float)
+    uv_raw = np.asarray(chunk.uv_raw, dtype=float)
+    times = np.asarray(time_sec, dtype=float).reshape(-1)
+    if times.shape[0] != sig_raw.shape[0] or not np.all(np.isfinite(times)):
+        raise ValueError("recording-wide bleach time axis is invalid")
+    if mode_resolved == "none":
+        return {
+            "mode_requested": mode_requested,
+            "mode_resolved": "none",
+            "scope": context.scope,
+            "time_basis": context.time_basis,
+            "recording_duration_sec": context.recording_duration_sec,
+            "sample_capacity": context.sample_capacity,
+            "target": "signal_and_isosbestic_independent",
+            "applied_any": False,
+            "sig_raw_corrected": sig_raw,
+            "uv_raw_corrected": uv_raw,
+            "sig_filt_corrected": chunk.sig_filt,
+            "uv_filt_corrected": chunk.uv_filt,
+            "sig_decay_removed": np.zeros_like(sig_raw),
+            "uv_decay_removed": np.zeros_like(uv_raw),
+            "per_roi": {},
+        }
+    sig_corr = sig_raw.copy()
+    uv_corr = uv_raw.copy()
+    sig_decay_removed = np.zeros_like(sig_raw)
+    uv_decay_removed = np.zeros_like(uv_raw)
+    per_roi: dict[str, dict[str, Any]] = {}
+    applied_any = False
+    indices = set(range(sig_raw.shape[1])) if dynamic_roi_indices is None else set(dynamic_roi_indices)
+    for r_idx in sorted(indices):
+        roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
+        fit_entry = dict(context.per_roi.get(roi_name, {}))
+        sig_meta = dict(fit_entry.get("signal", {}))
+        ref_meta = dict(fit_entry.get("reference", {}))
+        _sig_fit, sig_decay = _bleach_fit_components_from_times(times, sig_meta)
+        _ref_fit, ref_decay = _bleach_fit_components_from_times(times, ref_meta)
+        sig_applied = sig_decay is not None
+        ref_applied = ref_decay is not None
+        if sig_applied:
+            sig_decay_removed[:, r_idx] = sig_decay
+            sig_corr[:, r_idx] = sig_raw[:, r_idx] - sig_decay
+            applied_any = True
+        if ref_applied:
+            uv_decay_removed[:, r_idx] = ref_decay
+            uv_corr[:, r_idx] = uv_raw[:, r_idx] - ref_decay
+            applied_any = True
+        per_roi[roi_name] = {
+            "mode": mode_resolved,
+            "target": "signal_and_isosbestic_independent",
+            "scope": context.scope,
+            "time_basis": context.time_basis,
+            "recording_duration_sec": context.recording_duration_sec,
+            "sample_capacity": context.sample_capacity,
+            "signal": sig_meta,
+            "isosbestic": ref_meta,
+            "signal_applied": sig_applied,
+            "isosbestic_applied": ref_applied,
+        }
+    sig_filt_corr = None if chunk.sig_filt is None else np.asarray(chunk.sig_filt, dtype=float).copy() - sig_decay_removed
+    uv_filt_corr = None if chunk.uv_filt is None else np.asarray(chunk.uv_filt, dtype=float).copy() - uv_decay_removed
+    return {
+        "mode_requested": mode_requested,
+        "mode_resolved": mode_resolved,
+        "scope": context.scope,
+        "time_basis": context.time_basis,
+        "recording_duration_sec": context.recording_duration_sec,
+        "sample_capacity": context.sample_capacity,
+        "target": "signal_and_isosbestic_independent",
+        "applied_any": bool(applied_any),
+        "sig_raw_corrected": sig_corr,
+        "uv_raw_corrected": uv_corr,
+        "sig_filt_corrected": sig_filt_corr,
+        "uv_filt_corrected": uv_filt_corr,
+        "sig_decay_removed": sig_decay_removed,
+        "uv_decay_removed": uv_decay_removed,
+        "per_roi": per_roi,
+    }
 
 
 def _apply_bleach_correction_to_chunk_inputs(chunk: Chunk, config: Config) -> dict:
@@ -2832,6 +3243,9 @@ def fit_chunk_dynamic(
     config: Config,
     mode: str,
     per_roi_correction: Optional[Dict[str, PerRoiCorrectionSpec]] = None,
+    *,
+    bleach_correction_context: RecordingWideBleachContext | None = None,
+    bleach_time_sec: np.ndarray | None = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Orchestrates per-ROI dynamic fit dispatch and canonical numerator assembly.
@@ -2875,7 +3289,70 @@ def fit_chunk_dynamic(
     validate_per_roi_correction_map(channel_names, strategy_map)
 
     baseline_toggle = bool(getattr(config, "baseline_subtract_before_fit", False))
-    bleach_info = _apply_bleach_correction_to_chunk_inputs(chunk, config)
+    dynamic_roi_indices = {
+        index
+        for index, roi_name in enumerate(channel_names)
+        if strategy_map[str(roi_name)].strategy_family == "dynamic_fit"
+    }
+    bleach_mode_requested = str(getattr(config, "bleach_correction_mode", "none"))
+    bleach_mode_resolved_requested = _normalize_bleach_correction_mode(
+        bleach_mode_requested
+    )
+    if bleach_mode_resolved_requested == "none":
+        # Exact Off no-op: do not copy or mutate either raw or filtered arrays.
+        bleach_info = {
+            "mode_requested": bleach_mode_requested,
+            "mode_resolved": "none",
+            "scope": "none",
+            "time_basis": "none",
+            "target": "signal_and_isosbestic_independent",
+            "applied_any": False,
+            "sig_raw_corrected": chunk.sig_raw,
+            "uv_raw_corrected": chunk.uv_raw,
+            "sig_filt_corrected": chunk.sig_filt,
+            "uv_filt_corrected": chunk.uv_filt,
+            "sig_decay_removed": np.zeros_like(chunk.sig_raw, dtype=float),
+            "uv_decay_removed": np.zeros_like(chunk.uv_raw, dtype=float),
+            "per_roi": {},
+        }
+    elif bleach_correction_context is not None:
+        global_time = (
+            np.asarray(chunk.time_sec, dtype=float)
+            if bleach_time_sec is None
+            else np.asarray(bleach_time_sec, dtype=float)
+        )
+        bleach_info = _apply_recording_wide_bleach_to_chunk_inputs(
+            chunk,
+            config,
+            bleach_correction_context,
+            time_sec=global_time,
+            dynamic_roi_indices=dynamic_roi_indices,
+        )
+    else:
+        # Preserve the existing local behavior for non-Guided callers that do
+        # not supply a recording-wide authority.
+        bleach_info = _apply_bleach_correction_to_chunk_inputs(chunk, config)
+        if dynamic_roi_indices != set(range(len(channel_names))):
+            # Signal-Only F0 columns are deliberately outside this preprocessing
+            # boundary, even when a legacy caller supplies a uniform mode.
+            for r_idx in set(range(len(channel_names))) - dynamic_roi_indices:
+                bleach_info["sig_raw_corrected"][:, r_idx] = np.asarray(chunk.sig_raw)[:, r_idx]
+                bleach_info["uv_raw_corrected"][:, r_idx] = np.asarray(chunk.uv_raw)[:, r_idx]
+                if bleach_info.get("sig_filt_corrected") is not None:
+                    bleach_info["sig_filt_corrected"][:, r_idx] = np.asarray(chunk.sig_filt)[:, r_idx]
+                if bleach_info.get("uv_filt_corrected") is not None:
+                    bleach_info["uv_filt_corrected"][:, r_idx] = np.asarray(chunk.uv_filt)[:, r_idx]
+                bleach_info["sig_decay_removed"][:, r_idx] = 0.0
+                bleach_info["uv_decay_removed"][:, r_idx] = 0.0
+                roi_name = str(channel_names[r_idx])
+                bleach_info["per_roi"].pop(roi_name, None)
+            bleach_info["applied_any"] = bool(
+                any(
+                    bool(value.get("signal_applied")) or bool(value.get("isosbestic_applied"))
+                    for value in bleach_info.get("per_roi", {}).values()
+                    if isinstance(value, dict)
+                )
+            )
     bleach_mode_resolved = str(bleach_info.get("mode_resolved", "none"))
     bleach_applied = bool(bleach_info.get("applied_any", False))
 
@@ -3024,6 +3501,20 @@ def fit_chunk_dynamic(
         bleach_info.get("target", "signal_and_isosbestic_independent")
     )
     chunk.metadata["bleach_correction_applied"] = bleach_applied
+    chunk.metadata["bleach_correction_scope"] = str(
+        bleach_info.get("scope", "chunk_local" if bleach_mode_resolved != "none" else "none")
+    )
+    chunk.metadata["bleach_correction_time_basis"] = str(
+        bleach_info.get("time_basis", "chunk_relative_seconds" if bleach_mode_resolved != "none" else "none")
+    )
+    if bleach_info.get("recording_duration_sec") is not None:
+        chunk.metadata["bleach_correction_recording_duration_sec"] = float(
+            bleach_info["recording_duration_sec"]
+        )
+    if bleach_info.get("sample_capacity") is not None:
+        chunk.metadata["bleach_correction_sample_capacity"] = int(
+            bleach_info["sample_capacity"]
+        )
     chunk.metadata["bleach_correction"] = dict(bleach_info.get("per_roi", {}))
 
     # Bleach info is legitimately chunk-wide (bleach correction runs once for

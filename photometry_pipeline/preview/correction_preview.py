@@ -704,6 +704,10 @@ def compute_guided_local_preview_dff_trace_in_memory(
     dynamic_fit_mode: str | None = None,
     config_overrides: dict[str, Any] | None = None,
     continuous_window: dict[str, Any] | None = None,
+    recording_source_files: Iterable[str | os.PathLike[str]] | None = None,
+    recording_acquisition_mode: str | None = None,
+    guided_lowpass_hz: float | None = None,
+    guided_bleach_correction_mode: str | None = None,
 ) -> dict[str, Any]:
     """Compute one local percent-style dF/F trace without creating artifacts."""
     family = str(strategy_family or "").strip()
@@ -751,6 +755,12 @@ def compute_guided_local_preview_dff_trace_in_memory(
             cfg_values = dataclasses.asdict(cfg)
             cfg_values.update(overrides)
             cfg = Config(**cfg_values)
+        if guided_lowpass_hz is not None:
+            cfg.lowpass_hz = float(guided_lowpass_hz)
+        if guided_bleach_correction_mode is not None:
+            cfg.bleach_correction_mode = str(guided_bleach_correction_mode)
+        bleach_context = None
+        bleach_absolute_time = None
         load_kwargs: dict[str, Any] = {}
         selected_window = None
         if continuous_window is not None:
@@ -771,6 +781,29 @@ def compute_guided_local_preview_dff_trace_in_memory(
             int(adapter_chunk_index),
             **load_kwargs,
         )
+        if (
+            family == "dynamic_fit"
+            and str(getattr(cfg, "bleach_correction_mode", "none")) != "none"
+        ):
+            bleach_sources = tuple(recording_source_files or ())
+            if not bleach_sources:
+                raise GuidedCorrectionPreviewError(
+                    "Recording-wide bleach preview context is unavailable."
+                )
+            bleach_context, bleach_absolute_time = (
+                _build_guided_preview_recording_wide_bleach_context(
+                    source_files=bleach_sources,
+                    selected_source_file=source_path,
+                    selected_roi=str(roi),
+                    input_format=str(input_format),
+                    cfg=cfg,
+                    acquisition_mode=(
+                        recording_acquisition_mode
+                        or ("continuous" if selected_window is not None else "intermittent")
+                    ),
+                    selected_window=selected_window,
+                )
+            )
         if roi not in raw_chunk.channel_names:
             raise GuidedCorrectionPreviewError(
                 f"Requested ROI '{roi}' is not present in the selected segment."
@@ -804,6 +837,16 @@ def compute_guided_local_preview_dff_trace_in_memory(
             "window": None,
             "metadata": dict(raw_chunk.metadata or {}),
         }
+        if bleach_absolute_time is not None:
+            selected_start = float(source_time[mask][0])
+            record["bleach_time_sec"] = np.asarray(
+                bleach_absolute_time, dtype=float
+            )[mask] if bleach_absolute_time.shape == source_time.shape else (
+                np.asarray(bleach_absolute_time, dtype=float)
+                - float(np.asarray(bleach_absolute_time, dtype=float)[0])
+            )
+        if bleach_context is not None:
+            record["bleach_correction_context"] = bleach_context
         if family == "signal_only_f0" and selected == "signal_only_f0":
             evidence = compute_guided_local_signal_only_f0_preview(
                 record["sig_raw"],
@@ -822,8 +865,14 @@ def compute_guided_local_preview_dff_trace_in_memory(
             chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(
                 chunk.sig_raw, chunk.fs_hz, method_cfg
             )
+            fit_kwargs = {}
+            if bleach_context is not None:
+                fit_kwargs = {
+                    "bleach_correction_context": bleach_context,
+                    "bleach_time_sec": record.get("bleach_time_sec"),
+                }
             uv_fit, delta_f = regression.fit_chunk_dynamic(
-                chunk, method_cfg, mode="phasic"
+                chunk, method_cfg, mode="phasic", **fit_kwargs
             )
             if uv_fit is None or delta_f is None:
                 raise GuidedCorrectionPreviewError(
@@ -876,6 +925,21 @@ def compute_guided_local_preview_dff_trace_in_memory(
             "issues": [],
             "continuous_analysis_window": (
                 dict(selected_window) if selected_window is not None else None
+            ),
+            "bleach_correction_scope": (
+                bleach_context.scope if bleach_context is not None else "none"
+            ),
+            "bleach_correction_time_basis": (
+                bleach_context.time_basis if bleach_context is not None else "none"
+            ),
+            "lowpass_hz": float(getattr(cfg, "lowpass_hz", 1.0)),
+            "bleach_correction_mode": str(
+                getattr(cfg, "bleach_correction_mode", "none")
+            ),
+            "bleach_correction_recording_duration_sec": (
+                float(bleach_context.recording_duration_sec)
+                if bleach_context is not None
+                else None
             ),
         }
     except Exception as exc:
@@ -1820,7 +1884,17 @@ def _run_preview_method(
         chunk = _make_preview_chunk(record, roi)
         chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, cfg)
         chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, cfg)
-        uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, cfg, mode="phasic")
+        fit_kwargs = {}
+        if record.get("bleach_correction_context") is not None:
+            fit_kwargs = {
+                "bleach_correction_context": record.get(
+                    "bleach_correction_context"
+                ),
+                "bleach_time_sec": record.get("bleach_time_sec"),
+            }
+        uv_fit, delta_f = regression.fit_chunk_dynamic(
+            chunk, cfg, mode="phasic", **fit_kwargs
+        )
         if uv_fit is None or delta_f is None:
             raise GuidedCorrectionPreviewError(f"{method} did not produce fit_ref and delta_f.")
         chunk.uv_fit = uv_fit
@@ -2237,6 +2311,107 @@ def _select_continuous_preview_window(
     return full_windows[window_index]
 
 
+def _build_guided_preview_recording_wide_bleach_context(
+    *,
+    source_files: Iterable[str | os.PathLike[str]],
+    selected_source_file: str,
+    selected_roi: str,
+    input_format: str,
+    cfg: Config,
+    acquisition_mode: str,
+    selected_window: dict[str, Any] | None = None,
+) -> tuple[regression.RecordingWideBleachContext, np.ndarray | None]:
+    """Build preview context from the same accepted recording sources."""
+    sources = [os.path.realpath(str(path)) for path in source_files if str(path)]
+    if not sources:
+        raise GuidedCorrectionPreviewError(
+            "Recording-wide bleach preview context is unavailable."
+        )
+    fmt = str(input_format).strip().lower()
+    continuous = str(acquisition_mode or "").strip().lower() == "continuous"
+    sampler = regression.RecordingWideBleachSampler(
+        capacity=regression.BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
+        seed=int(getattr(cfg, "seed", 0)),
+    )
+    selected_absolute_time = None
+    recording_duration = 0.0
+    session_offset = 0.0
+    for source_index, source in enumerate(sources):
+        if continuous:
+            source_cache: dict[str, Any] = {}
+            windows = plan_continuous_windows_for_source(
+                source, fmt, cfg, source_cache=source_cache
+            )
+            for window in windows:
+                raw = load_chunk(
+                    source,
+                    fmt,
+                    cfg,
+                    chunk_id=int(window.get("window_index", 0)),
+                    continuous_window=window,
+                    source_cache=source_cache,
+                )
+                local = np.asarray(raw.time_sec, dtype=float).reshape(-1)
+                absolute = float(window["window_start_sec"]) + (local - local[0])
+                recording_duration = max(
+                    recording_duration,
+                    float(window.get("original_file_duration_sec", absolute[-1])),
+                )
+                if source == os.path.realpath(selected_source_file):
+                    selected_index = (
+                        int(selected_window.get("window_index", -1))
+                        if selected_window is not None
+                        else -1
+                    )
+                    if int(window.get("window_index", -1)) == selected_index:
+                        selected_absolute_time = absolute.copy()
+                if selected_roi in raw.channel_names:
+                    index = raw.channel_names.index(selected_roi)
+                    sampler.add(
+                        selected_roi,
+                        absolute,
+                        raw.sig_raw[:, index],
+                        raw.uv_raw[:, index],
+                    )
+        else:
+            raw = load_chunk(source, fmt, cfg, chunk_id=source_index)
+            local = np.asarray(raw.time_sec, dtype=float).reshape(-1)
+            local = local - local[0]
+            absolute = session_offset + local
+            if source == os.path.realpath(selected_source_file):
+                selected_absolute_time = absolute.copy()
+            if selected_roi in raw.channel_names:
+                index = raw.channel_names.index(selected_roi)
+                sampler.add(
+                    selected_roi,
+                    absolute,
+                    raw.sig_raw[:, index],
+                    raw.uv_raw[:, index],
+                )
+            duration = regression.recorded_duration_sec_from_chunk(raw)
+            session_offset += duration
+            recording_duration = session_offset
+    if recording_duration <= 0.0:
+        raise GuidedCorrectionPreviewError(
+            "Recording-wide bleach preview context contains no recorded duration."
+        )
+    context = regression.build_recording_wide_bleach_context(
+        sampler,
+        mode=str(getattr(cfg, "bleach_correction_mode", "none")),
+        recording_duration_sec=recording_duration,
+        time_basis=(
+            "recording_relative_acquisition_time"
+            if continuous
+            else "cumulative_recorded_acquisition_time"
+        ),
+        sample_rate_hz=float(
+            getattr(cfg, "target_fs_hz", 0.0)
+            or getattr(cfg, "sampling_rate_hz_fallback", 40.0)
+        ),
+    )
+    return context, selected_absolute_time
+
+
 def run_guided_local_correction_preview(
     source_file: str | os.PathLike[str],
     preview_output_dir: str | os.PathLike[str],
@@ -2254,6 +2429,10 @@ def run_guided_local_correction_preview(
     parameter_sources: dict[str, str] | None = None,
     continuous_window_index: int | None = None,
     continuous_window: dict[str, Any] | None = None,
+    recording_source_files: Iterable[str | os.PathLike[str]] | None = None,
+    recording_acquisition_mode: str | None = None,
+    guided_lowpass_hz: float | None = None,
+    guided_bleach_correction_mode: str | None = None,
 ) -> dict[str, Any]:
     """Run preview-only correction methods on one raw source segment.
 
@@ -2344,6 +2523,10 @@ def run_guided_local_correction_preview(
             config_values = dataclasses.asdict(base_cfg)
             config_values.update(applied_config_overrides)
             base_cfg = Config(**config_values)
+        if guided_lowpass_hz is not None:
+            base_cfg.lowpass_hz = float(guided_lowpass_hz)
+        if guided_bleach_correction_mode is not None:
+            base_cfg.bleach_correction_mode = str(guided_bleach_correction_mode)
         load_kwargs = {}
         if str(input_format).strip().lower() == "npm":
             load_kwargs["selected_roi"] = str(roi)
@@ -2367,6 +2550,31 @@ def run_guided_local_correction_preview(
             int(adapter_chunk_index),
             **load_kwargs,
         )
+        bleach_context = None
+        bleach_absolute_time = None
+        if (
+            any(str(method) in GUIDED_REFERENCE_PREVIEW_METHODS for method in method_result.methods)
+            and str(getattr(base_cfg, "bleach_correction_mode", "none")) != "none"
+        ):
+            bleach_sources = tuple(recording_source_files or ())
+            if not bleach_sources:
+                raise GuidedCorrectionPreviewError(
+                    "Recording-wide bleach preview context is unavailable."
+                )
+            bleach_context, bleach_absolute_time = (
+                _build_guided_preview_recording_wide_bleach_context(
+                    source_files=bleach_sources,
+                    selected_source_file=source_path,
+                    selected_roi=str(roi),
+                    input_format=str(input_format),
+                    cfg=base_cfg,
+                    acquisition_mode=(
+                        recording_acquisition_mode
+                        or ("continuous" if selected_window is not None else "intermittent")
+                    ),
+                    selected_window=selected_window,
+                )
+            )
         if roi not in raw_chunk.channel_names:
             raise GuidedCorrectionPreviewError(
                 f"Requested ROI '{roi}' is not present in the selected preview segment."
@@ -2402,6 +2610,12 @@ def run_guided_local_correction_preview(
             "window": None,
             "metadata": dict(raw_chunk.metadata or {}),
         }
+        if bleach_context is not None:
+            record["bleach_correction_context"] = bleach_context
+            if bleach_absolute_time is not None:
+                record["bleach_time_sec"] = np.asarray(
+                    bleach_absolute_time, dtype=float
+                )[segment_mask]
     except Exception as exc:
         return failed(f"{type(exc).__name__}: {exc}")
 
@@ -2514,12 +2728,25 @@ def run_guided_local_correction_preview(
             "chunk_duration_sec": float(base_cfg.chunk_duration_sec),
             "lowpass_hz": float(base_cfg.lowpass_hz),
             "filter_order": int(base_cfg.filter_order),
+            "bleach_correction_mode": str(
+                getattr(base_cfg, "bleach_correction_mode", "none")
+            ),
         },
         "baseline_scope": "not_computed_delta_f_preview",
         "reference_fit_scope": (
-            "selected_continuous_analysis_window"
+            "recording_wide_continuous_analysis_window"
+            if bleach_context is not None and selected_window is not None
+            else "recording_wide_intermittent_session"
+            if bleach_context is not None
+            else "selected_continuous_analysis_window"
             if selected_window is not None
             else "selected_session"
+        ),
+        "bleach_correction_scope": (
+            bleach_context.scope if bleach_context is not None else "none"
+        ),
+        "bleach_correction_time_basis": (
+            bleach_context.time_basis if bleach_context is not None else "none"
         ),
         "pipeline_run_executed": False,
         "feature_extraction_run": False,
@@ -2532,6 +2759,8 @@ def run_guided_local_correction_preview(
             "recomputes correction using the full selected recordings."
         ),
     }
+    if bleach_context is not None:
+        provenance["recording_wide_bleach_fit"] = bleach_context.metadata()
     if selected_window is not None:
         provenance["continuous_analysis_window"] = {
             "window_index": int(selected_window["window_index"]),

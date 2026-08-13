@@ -79,7 +79,8 @@ def build_guided_continuous_rwd_run_config(
 
     try:
         config, _identity = resolve_guided_continuous_rwd_correction_settings(
-            startup_mapping_contract
+            startup_mapping_contract,
+            accepted_draft=accepted_draft,
         )
     except Exception as exc:
         raise GuidedContinuousRwdRunConfigError(

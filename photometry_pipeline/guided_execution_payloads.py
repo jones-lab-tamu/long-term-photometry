@@ -523,6 +523,33 @@ def build_guided_execution_startup_mapping_contract(
     )
 
 
+def build_guided_execution_startup_mapping_contract_for_preprocessing(
+    *,
+    lowpass_hz: float = 1.0,
+    bleach_correction_mode: str = "none",
+    exact_candidate_manifest_consumption_capable: bool = True,
+    exact_roi_consumption_capable: bool = True,
+) -> GuidedExecutionStartupMappingContract:
+    """Build the accepted Guided startup contract with its two preprocessing choices."""
+    try:
+        cutoff = float(lowpass_hz)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Guided lowpass_hz must be finite and greater than 0") from exc
+    if not math.isfinite(cutoff) or cutoff <= 0.0:
+        raise ValueError("Guided lowpass_hz must be finite and greater than 0")
+    mode = str(bleach_correction_mode or "").strip().lower()
+    if mode not in {"none", "single_exponential", "double_exponential"}:
+        raise ValueError("Guided bleach_correction_mode is invalid")
+    overrides = dict(GUIDED_CONFIG_DEFAULT_OVERRIDES)
+    overrides["lowpass_hz"] = cutoff
+    overrides["bleach_correction_mode"] = mode
+    return build_guided_execution_startup_mapping_contract(
+        exact_candidate_manifest_consumption_capable=exact_candidate_manifest_consumption_capable,
+        exact_roi_consumption_capable=exact_roi_consumption_capable,
+        fixed_config_overrides=overrides,
+    )
+
+
 def compute_guided_execution_config_payload_identity(
     payload: GuidedExecutionConfigPayload,
 ) -> str:

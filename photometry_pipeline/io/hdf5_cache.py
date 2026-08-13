@@ -422,6 +422,9 @@ class Hdf5TraceCacheWriter:
                 grp.attrs['bleach_correction_mode'] = str(
                     getattr(self.config, 'bleach_correction_mode', 'none')
                 )
+                grp.attrs['lowpass_hz'] = float(
+                    getattr(self.config, 'lowpass_hz', 1.0)
+                )
                 grp.attrs['bleach_correction_target'] = "signal_and_isosbestic_independent"
                 if (
                     hasattr(chunk, 'metadata')
@@ -435,6 +438,15 @@ class Hdf5TraceCacheWriter:
                         if isinstance(consumed_by_roi, dict)
                         else {}
                     )
+                    for attr_name, key in (
+                        ('bleach_correction_scope', 'bleach_correction_scope'),
+                        ('bleach_correction_time_basis', 'bleach_correction_time_basis'),
+                        ('bleach_correction_recording_duration_sec', 'bleach_correction_recording_duration_sec'),
+                        ('bleach_correction_sample_capacity', 'bleach_correction_sample_capacity'),
+                    ):
+                        value = chunk.metadata.get(key)
+                        if value is not None:
+                            grp.attrs[attr_name] = value
                     if isinstance(consumed_meta, dict) and consumed_meta:
                         for attr_name, key in (
                             ('correction_strategy_family', 'strategy_family'),

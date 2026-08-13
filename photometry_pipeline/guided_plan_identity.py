@@ -221,6 +221,12 @@ def build_guided_new_analysis_draft_plan_identity_payload(
             "included_roi_ids": sorted(str(roi) for roi in plan.included_roi_ids),
             "excluded_roi_ids": sorted(str(roi) for roi in plan.excluded_roi_ids),
         },
+        "preprocessing": {
+            "lowpass_hz": float(getattr(plan, "lowpass_hz", 1.0)),
+            "bleach_correction_mode": str(
+                getattr(plan, "bleach_correction_mode", "none")
+            ),
+        },
         "correction": {
             "global_correction_strategy": str(plan.global_correction_strategy or ""),
             "dynamic_fit_mode": str(plan.dynamic_fit_mode or ""),

@@ -406,6 +406,8 @@ _C4A_FIXED_SETTING_NAMES = (
 
 def _resolve_fixed_correction_config(
     startup_mapping_contract: object,
+    *,
+    accepted_draft: GuidedNewAnalysisDraftPlan | None = None,
 ) -> tuple[Config, str]:
     canonical = build_guided_execution_startup_mapping_contract()
     if not isinstance(startup_mapping_contract, GuidedExecutionStartupMappingContract):
@@ -415,22 +417,87 @@ def _resolve_fixed_correction_config(
             actual=type(startup_mapping_contract).__name__,
             reason="wrong_type",
         )
-    if startup_mapping_contract != canonical:
+    canonical_overrides = {
+        item.name: item.value for item in canonical.fixed_config_overrides
+    }
+    actual_overrides = {
+        item.name: item.value
+        for item in startup_mapping_contract.fixed_config_overrides
+    }
+    advanced_names = {"lowpass_hz", "bleach_correction_mode"}
+    if (
+        set(actual_overrides) != set(canonical_overrides)
+        or any(
+            actual_overrides.get(name) != expected
+            for name, expected in canonical_overrides.items()
+            if name not in advanced_names
+        )
+    ):
         _binding_mismatch(
             "startup_mapping_contract",
             expected=canonical.contract_version,
             actual=getattr(startup_mapping_contract, "contract_version", None),
             reason="fixed_settings_contract_mismatch",
         )
-    overrides = {
-        item.name: item.value for item in startup_mapping_contract.fixed_config_overrides
-    }
+    overrides = actual_overrides
+    expected_lowpass = float(
+        getattr(accepted_draft, "lowpass_hz", GUIDED_CONFIG_DEFAULT_OVERRIDES["lowpass_hz"])
+    )
+    expected_bleach = str(
+        getattr(
+            accepted_draft,
+            "bleach_correction_mode",
+            GUIDED_CONFIG_DEFAULT_OVERRIDES["bleach_correction_mode"],
+        )
+    )
+    if (
+        overrides.get("lowpass_hz") != expected_lowpass
+        or overrides.get("bleach_correction_mode") != expected_bleach
+    ):
+        _binding_mismatch(
+            "startup_mapping_contract",
+            expected={
+                "lowpass_hz": expected_lowpass,
+                "bleach_correction_mode": expected_bleach,
+            },
+            actual={
+                "lowpass_hz": overrides.get("lowpass_hz"),
+                "bleach_correction_mode": overrides.get("bleach_correction_mode"),
+            },
+            reason="advanced_preprocessing_contract_mismatch",
+        )
+    try:
+        if not math.isfinite(float(overrides["lowpass_hz"])) or float(overrides["lowpass_hz"]) <= 0.0:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        _binding_mismatch(
+            "lowpass_hz",
+            expected="finite value greater than 0",
+            actual=overrides.get("lowpass_hz"),
+            reason="invalid_guided_preprocessing_value",
+        )
+    if str(overrides.get("bleach_correction_mode", "")) not in {
+        "none",
+        "single_exponential",
+        "double_exponential",
+    }:
+        _binding_mismatch(
+            "bleach_correction_mode",
+            expected="none|single_exponential|double_exponential",
+            actual=overrides.get("bleach_correction_mode"),
+            reason="invalid_guided_preprocessing_value",
+        )
     settings: dict[str, Any] = {}
     for name in _C4A_FIXED_SETTING_NAMES:
-        if name not in overrides or overrides[name] != GUIDED_CONFIG_DEFAULT_OVERRIDES[name]:
+        expected = (
+            overrides.get(name)
+            if name in advanced_names
+            else GUIDED_CONFIG_DEFAULT_OVERRIDES[name]
+        )
+        if name not in overrides or overrides[name] != expected:
             _binding_mismatch(
                 name,
-                expected=GUIDED_CONFIG_DEFAULT_OVERRIDES[name],
+                expected=expected,
                 actual=overrides.get(name),
                 reason="fixed_correction_setting_mismatch",
             )
@@ -560,7 +627,8 @@ def _resolve_accepted_correction_context(
     bindings = _canonical_correction_bindings(roi_order, specs)
     payload_identity = correction_payload_identity(roi_order, specs)
     config, fixed_identity = _resolve_fixed_correction_config(
-        startup_mapping_contract
+        startup_mapping_contract,
+        accepted_draft=accepted_draft,
     )
     contract_identity = _correction_contract_identity(
         accepted_guided_plan_identity=actual_plan_identity,

@@ -49,6 +49,9 @@ PER_ROI_FEATURE_EVENT_MAP_VERSION = (
 )
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
+GUIDED_LOWPASS_DEFAULT_HZ = 1.0
+GUIDED_BLEACH_DEFAULT_MODE = "none"
+GUIDED_BLEACH_MODES = {"none", "single_exponential", "double_exponential"}
 DATASET_CONTRACT_SNAPSHOT_STATUSES = {
     "missing",
     "inferred",
@@ -932,6 +935,10 @@ def compute_guided_local_preview_source_setup_signature(
         "continuous_window_sec": plan.continuous_window_sec,
         "continuous_step_sec": plan.continuous_step_sec,
         "allow_partial_final_window": bool(plan.allow_partial_final_window),
+        "lowpass_hz": float(getattr(plan, "lowpass_hz", GUIDED_LOWPASS_DEFAULT_HZ)),
+        "bleach_correction_mode": str(
+            getattr(plan, "bleach_correction_mode", GUIDED_BLEACH_DEFAULT_MODE)
+        ),
         "included_roi_ids": sorted(str(x) for x in plan.included_roi_ids),
     }
     canonical = json.dumps(payload, sort_keys=True, default=str)
@@ -1347,6 +1354,10 @@ class GuidedNewAnalysisDraftPlan:
     output_overwrite: bool = False
     global_correction_strategy: str | None = None
     dynamic_fit_mode: str | None = None
+    # These are the only Advanced preprocessing choices owned by Guided. They
+    # intentionally do not read Config/YAML defaults during draft creation.
+    lowpass_hz: float = GUIDED_LOWPASS_DEFAULT_HZ
+    bleach_correction_mode: str = GUIDED_BLEACH_DEFAULT_MODE
 
     # Dataset contract snapshot planning state. This is reviewed/applied plan
     # state only; it does not infer fields or generate executable config.
@@ -1454,6 +1465,20 @@ class GuidedNewAnalysisDraftPlan:
     def __post_init__(self) -> None:
         if self.mode != "new_analysis":
             raise ValueError(f"mode must be 'new_analysis', got {self.mode}")
+        try:
+            lowpass_hz = float(self.lowpass_hz)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lowpass_hz must be finite and greater than 0") from exc
+        if not math.isfinite(lowpass_hz) or lowpass_hz <= 0.0:
+            raise ValueError("lowpass_hz must be finite and greater than 0")
+        object.__setattr__(self, "lowpass_hz", lowpass_hz)
+        bleach_mode = str(self.bleach_correction_mode or "").strip().lower()
+        if bleach_mode not in GUIDED_BLEACH_MODES:
+            raise ValueError(
+                "bleach_correction_mode must be one of: "
+                "none, single_exponential, double_exponential"
+            )
+        object.__setattr__(self, "bleach_correction_mode", bleach_mode)
 
 
 NEW_ANALYSIS_DRAFT_PLAN_EXPORT_SCHEMA_VERSION = (

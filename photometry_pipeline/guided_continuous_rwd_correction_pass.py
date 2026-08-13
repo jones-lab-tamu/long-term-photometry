@@ -31,6 +31,8 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any, Callable, Iterator
 
+from photometry_pipeline.core import regression
+
 from photometry_pipeline.guided_continuous_rwd_block_plan import (
     GuidedContinuousRwdBlockPlan,
 )
@@ -146,6 +148,72 @@ def _check_cancellation(callback: Callable[[], bool] | None) -> None:
             "segment_correction_pass_interrupted",
             "The corrected-segment traversal was cancelled.",
         )
+
+
+def _prepare_recording_wide_bleach_context(
+    review_binding: GuidedContinuousRwdReviewBinding,
+    target_grid: GuidedContinuousRwdTargetGridDescription,
+    block_plan: GuidedContinuousRwdBlockPlan,
+    segment_plan: GuidedContinuousRwdCorrectionSegmentPlan,
+    *,
+    accepted_draft: GuidedNewAnalysisDraftPlan,
+    startup_mapping_contract: GuidedExecutionStartupMappingContract,
+    cancellation_requested: Callable[[], bool] | None,
+) -> regression.RecordingWideBleachContext | None:
+    """Fit one bounded bleach authority before the normal C4c traversal."""
+    mode = str(getattr(accepted_draft, "bleach_correction_mode", "none") or "none")
+    if mode == "none":
+        return None
+    accepted = _resolve_accepted_correction_context(
+        review_binding, accepted_draft, startup_mapping_contract
+    )
+    dynamic_roi_ids = tuple(
+        binding.roi_id
+        for binding in accepted.bindings
+        if binding.strategy_family == "dynamic_fit"
+    )
+    if not dynamic_roi_ids:
+        return None
+    sampler = regression.RecordingWideBleachSampler(
+        capacity=regression.BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
+        seed=0,
+    )
+    projected_blocks = iter_project_guided_continuous_rwd_blocks(
+        review_binding,
+        target_grid,
+        block_plan,
+        cancellation_requested=cancellation_requested,
+    )
+    raw_segments = iter_assemble_guided_continuous_rwd_correction_segments(
+        review_binding,
+        target_grid,
+        block_plan,
+        segment_plan,
+        projected_blocks,
+        accepted_draft=accepted_draft,
+        startup_mapping_contract=startup_mapping_contract,
+        cancellation_requested=cancellation_requested,
+    )
+    indexes = {roi_id: index for index, roi_id in enumerate(accepted.roi_order)}
+    for raw in raw_segments:
+        _check_cancellation(cancellation_requested)
+        for roi_id in dynamic_roi_ids:
+            index = indexes.get(roi_id)
+            if index is None:
+                continue
+            sampler.add(
+                roi_id,
+                raw.target_elapsed_seconds,
+                raw.signal_values[:, index],
+                raw.control_values[:, index],
+            )
+    return regression.build_recording_wide_bleach_context(
+        sampler,
+        mode=mode,
+        recording_duration_sec=target_grid.source_support_end_seconds,
+        time_basis="recording_relative_acquisition_time",
+        sample_rate_hz=1.0 / float(target_grid.cadence_fraction),
+    )
 
 
 @dataclass(frozen=True)
@@ -299,7 +367,8 @@ def _resolve_expected_bindings(
             accepted_context=accepted,
         )
         _, segment_correction_settings_identity = _resolve_segment_correction_settings(
-            startup_mapping_contract
+            startup_mapping_contract,
+            accepted_draft=accepted_draft,
         )
     except Exception as exc:
         raise GuidedContinuousRwdCorrectionPassError(
@@ -372,6 +441,15 @@ def _run_correction_pass(
 ) -> Iterator[GuidedContinuousRwdCorrectedSegment]:
     """Yield provisional corrected segments; normal exhaustion proves completion."""
     _check_cancellation(cancellation_requested)
+    bleach_context = _prepare_recording_wide_bleach_context(
+        review_binding,
+        target_grid,
+        block_plan,
+        segment_plan,
+        accepted_draft=accepted_draft,
+        startup_mapping_contract=startup_mapping_contract,
+        cancellation_requested=cancellation_requested,
+    )
     projected_blocks = iter_project_guided_continuous_rwd_blocks(
         review_binding,
         target_grid,
@@ -408,6 +486,7 @@ def _run_correction_pass(
             raw,
             accepted_draft=accepted_draft,
             startup_mapping_contract=startup_mapping_contract,
+            bleach_correction_context=bleach_context,
             cancellation_requested=cancellation_requested,
         )
         _check_cancellation(cancellation_requested)

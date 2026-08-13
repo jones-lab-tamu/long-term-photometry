@@ -128,6 +128,8 @@ _C4B_FIXED_POLICY_CONSTANTS: Mapping[str, Any] = {
 
 def _resolve_segment_correction_settings(
     startup_mapping_contract: object,
+    *,
+    accepted_draft: GuidedNewAnalysisDraftPlan | None = None,
 ) -> tuple[Config, str]:
     canonical = build_guided_execution_startup_mapping_contract()
     if not isinstance(startup_mapping_contract, GuidedExecutionStartupMappingContract):
@@ -135,18 +137,72 @@ def _resolve_segment_correction_settings(
             "accepted_correction_binding_mismatch",
             "startup_mapping_contract has the wrong type.",
         )
-    if startup_mapping_contract != canonical:
+    canonical_overrides = {
+        item.name: item.value for item in canonical.fixed_config_overrides
+    }
+    overrides = {
+        item.name: item.value
+        for item in startup_mapping_contract.fixed_config_overrides
+    }
+    advanced_names = {"lowpass_hz", "bleach_correction_mode"}
+    if (
+        set(overrides) != set(canonical_overrides)
+        or any(
+            overrides.get(name) != expected
+            for name, expected in canonical_overrides.items()
+            if name not in advanced_names
+        )
+    ):
         _raise(
             "accepted_correction_binding_mismatch",
             "startup_mapping_contract does not match the canonical accepted "
             "Guided contract.",
         )
-    overrides = {
-        item.name: item.value for item in startup_mapping_contract.fixed_config_overrides
-    }
+    expected_lowpass = float(
+        getattr(accepted_draft, "lowpass_hz", GUIDED_CONFIG_DEFAULT_OVERRIDES["lowpass_hz"])
+    )
+    expected_bleach = str(
+        getattr(
+            accepted_draft,
+            "bleach_correction_mode",
+            GUIDED_CONFIG_DEFAULT_OVERRIDES["bleach_correction_mode"],
+        )
+    )
+    if (
+        overrides.get("lowpass_hz") != expected_lowpass
+        or overrides.get("bleach_correction_mode") != expected_bleach
+    ):
+        _raise(
+            "accepted_correction_binding_mismatch",
+            "Advanced preprocessing overrides do not match the accepted plan.",
+        )
+    try:
+        if not math.isfinite(float(overrides["lowpass_hz"])) or float(overrides["lowpass_hz"]) <= 0.0:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        _raise(
+            "accepted_correction_binding_mismatch",
+            "lowpass_hz must be finite and greater than 0.",
+            field="lowpass_hz",
+        )
+    if str(overrides.get("bleach_correction_mode", "")) not in {
+        "none",
+        "single_exponential",
+        "double_exponential",
+    }:
+        _raise(
+            "accepted_correction_binding_mismatch",
+            "bleach_correction_mode is invalid.",
+            field="bleach_correction_mode",
+        )
     settings: dict[str, Any] = {}
     for name in _C4B_LOAD_BEARING_SETTING_NAMES:
-        if name not in overrides or overrides[name] != GUIDED_CONFIG_DEFAULT_OVERRIDES[name]:
+        expected = (
+            overrides.get(name)
+            if name in advanced_names
+            else GUIDED_CONFIG_DEFAULT_OVERRIDES[name]
+        )
+        if name not in overrides or overrides[name] != expected:
             _raise(
                 "accepted_correction_binding_mismatch",
                 f"{name} does not match the accepted Guided correction authority.",
@@ -178,6 +234,8 @@ def _resolve_segment_correction_settings(
 
 def resolve_guided_continuous_rwd_correction_settings(
     startup_mapping_contract: object,
+    *,
+    accepted_draft: GuidedNewAnalysisDraftPlan | None = None,
 ) -> tuple[Config, str]:
     """Public accessor for the accepted base correction settings.
 
@@ -192,7 +250,10 @@ def resolve_guided_continuous_rwd_correction_settings(
     Correction itself never consumes the caller's ``Config``: it resolves
     these settings internally, from the same contract, on every segment.
     """
-    return _resolve_segment_correction_settings(startup_mapping_contract)
+    return _resolve_segment_correction_settings(
+        startup_mapping_contract,
+        accepted_draft=accepted_draft,
+    )
 
 
 REFERENCE_FITTED_CONTROL = "fitted_control"
@@ -546,6 +607,7 @@ def _correct_dynamic_roi(
     config: object,
     scalar_f0: float,
     sampling_rate_hz: float,
+    bleach_correction_context: regression.RecordingWideBleachContext | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, tuple[str, ...], str]:
     correction_config = config
     if spec.effective_parameters:
@@ -598,6 +660,8 @@ def _correct_dynamic_roi(
             correction_config,
             mode="phasic",
             per_roi_correction={spec.roi_id: spec},
+            bleach_correction_context=bleach_correction_context,
+            bleach_time_sec=raw_segment.target_elapsed_seconds,
         )
     except Exception as exc:
         raise GuidedContinuousRwdSegmentCorrectionError(
@@ -639,6 +703,20 @@ def _correct_dynamic_roi(
             failed_stage=applied,
             reason="nonfinite_dynamic_output",
         )
+    if bleach_correction_context is not None:
+        try:
+            qc_payload = json.loads(qc) if qc else {}
+        except (TypeError, ValueError):
+            qc_payload = {"dynamic_qc": qc}
+        qc_payload["bleach_correction_scope"] = bleach_correction_context.scope
+        qc_payload["bleach_correction_time_basis"] = bleach_correction_context.time_basis
+        qc_payload["bleach_correction_recording_duration_sec"] = float(
+            bleach_correction_context.recording_duration_sec
+        )
+        qc_payload["bleach_correction"] = chunk.metadata.get(
+            "bleach_correction", {}
+        )
+        qc = _qc_json(qc_payload)
     return reference, delta_f, dff, applied, fallback, qc
 
 
@@ -784,6 +862,7 @@ def correct_guided_continuous_rwd_segment(
     *,
     accepted_draft: GuidedNewAnalysisDraftPlan,
     startup_mapping_contract: GuidedExecutionStartupMappingContract,
+    bleach_correction_context: regression.RecordingWideBleachContext | None = None,
     cancellation_requested: Callable[[], bool] | None = None,
 ) -> GuidedContinuousRwdCorrectedSegment:
     """Correct exactly one complete accepted C4a raw correction segment."""
@@ -801,7 +880,10 @@ def correct_guided_continuous_rwd_segment(
         )
         _validate_segment_plan(segment_plan, target_grid, review_binding, accepted)
         segment_correction_config, segment_correction_settings_identity = (
-            _resolve_segment_correction_settings(startup_mapping_contract)
+            _resolve_segment_correction_settings(
+                startup_mapping_contract,
+                accepted_draft=accepted_draft,
+            )
         )
     except Exception as exc:
         raise GuidedContinuousRwdSegmentCorrectionError(
@@ -864,6 +946,7 @@ def correct_guided_continuous_rwd_segment(
                 segment_correction_config,
                 scalar,
                 1.0 / float(target_grid.cadence_fraction),
+                bleach_correction_context,
             )
             reference_kind = REFERENCE_FITTED_CONTROL
             scalar_result: float | None = scalar

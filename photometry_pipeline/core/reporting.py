@@ -365,7 +365,24 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "traces_only": traces_only,
             "event_signal": getattr(config, 'event_signal', 'dff'),
             "signal_excursion_polarity": getattr(config, "signal_excursion_polarity", "positive"),
+            "lowpass_hz": float(getattr(config, "lowpass_hz", 1.0)),
             "bleach_correction_mode": getattr(config, "bleach_correction_mode", "none"),
+            "bleach_correction_scope": (
+                "recording_wide"
+                if str(getattr(config, "bleach_correction_mode", "none")) != "none"
+                else "none"
+            ),
+            "bleach_correction_time_basis": (
+                "recording_relative_acquisition_time"
+                if str(getattr(config, "bleach_correction_mode", "none")) != "none"
+                and str(getattr(config, "acquisition_mode", "intermittent")).lower()
+                == "continuous"
+                else (
+                    "cumulative_recorded_acquisition_time"
+                    if str(getattr(config, "bleach_correction_mode", "none")) != "none"
+                    else "none"
+                )
+            ),
             "custom_tabular_contract": custom_tabular_contract,
             "sessions_per_hour": resolved_sph,
             "sessions_per_hour_source": resolved_sph_source,
