@@ -50,6 +50,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
 )
 from photometry_pipeline.io.adapters import (
+    _scan_rwd_source_metadata,
     load_chunk,
     plan_continuous_windows_for_source,
     resolve_continuous_window_for_source,
@@ -802,6 +803,7 @@ def compute_guided_local_preview_dff_trace_in_memory(
                         or ("continuous" if selected_window is not None else "intermittent")
                     ),
                     selected_window=selected_window,
+                    selected_chunk=raw_chunk,
                 )
             )
         if roi not in raw_chunk.channel_names:
@@ -2320,6 +2322,7 @@ def _build_guided_preview_recording_wide_bleach_context(
     cfg: Config,
     acquisition_mode: str,
     selected_window: dict[str, Any] | None = None,
+    selected_chunk: Chunk | None = None,
 ) -> tuple[regression.RecordingWideBleachContext, np.ndarray | None]:
     """Build preview context from the same accepted recording sources."""
     fmt = str(input_format).strip().lower()
@@ -2348,6 +2351,15 @@ def _build_guided_preview_recording_wide_bleach_context(
         )
     selected_source = _loader_source_path(selected_source_file)
     continuous = str(acquisition_mode or "").strip().lower() == "continuous"
+
+    def _session_local_config(source: str) -> Config:
+        if continuous or fmt != "rwd" or not os.path.isfile(source):
+            return cfg
+        source_data = _scan_rwd_source_metadata(source, cfg)
+        values = dataclasses.asdict(cfg)
+        values["chunk_duration_sec"] = float(source_data["duration_sec"])
+        return Config(**values)
+
     sampler = regression.RecordingWideBleachSampler(
         capacity=regression.BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
         seed=int(getattr(cfg, "seed", 0)),
@@ -2393,7 +2405,15 @@ def _build_guided_preview_recording_wide_bleach_context(
                         raw.uv_raw[:, index],
                     )
         else:
-            raw = load_chunk(source, fmt, cfg, chunk_id=source_index)
+            if source == selected_source and selected_chunk is not None:
+                raw = selected_chunk
+            else:
+                raw = load_chunk(
+                    source,
+                    fmt,
+                    _session_local_config(source),
+                    chunk_id=source_index,
+                )
             local = np.asarray(raw.time_sec, dtype=float).reshape(-1)
             local = local - local[0]
             absolute = session_offset + local
@@ -2592,6 +2612,7 @@ def run_guided_local_correction_preview(
                         or ("continuous" if selected_window is not None else "intermittent")
                     ),
                     selected_window=selected_window,
+                    selected_chunk=raw_chunk,
                 )
             )
         if roi not in raw_chunk.channel_names:

@@ -397,15 +397,31 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _write_realistic_rwd_session(path: Path, *, offset: float) -> None:
+def _write_realistic_rwd_session(
+    path: Path,
+    *,
+    offset: float,
+    sample_count: int = 12000,
+    final_timestamp_sec: float | None = None,
+) -> None:
     path.parent.mkdir(parents=True)
     rows = [
         '{"Light":{"Led410Enable":true;"Led470Enable":true};'
         '"Excitation":{"continuous_time":600};"Fps":40.0}',
         "TimeStamp,Events,CH1-410,CH1-470,CH2-410,CH2-470,",
     ]
-    for index in range(12000):
-        timestamp_ms = index * 50.0
+    timestamps_ms = [
+        index * 50.0 for index in range(max(0, sample_count - 1))
+    ]
+    if sample_count > 0:
+        timestamps_ms.append(
+            (
+                float(final_timestamp_sec) * 1000.0
+                if final_timestamp_sec is not None
+                else (sample_count - 1) * 50.0
+            )
+        )
+    for index, timestamp_ms in enumerate(timestamps_ms):
         uv1 = offset + 100.0 + 0.01 * np.sin(index / 50.0)
         sig1 = offset + 125.0 + 0.012 * np.sin(index / 50.0)
         uv2 = offset + 90.0 + 0.008 * np.cos(index / 60.0)
@@ -1111,6 +1127,74 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert not (tmp_path / "applied_dff").exists()
 
 
+def test_local_preview_bleach_on_uses_session_local_rwd_contract_for_short_source(
+    tmp_path,
+):
+    selected = tmp_path / "session-selected" / "Fluorescence.csv"
+    short = tmp_path / "session-short" / "Fluorescence.csv"
+    _write_realistic_rwd_session(selected, offset=0.0, sample_count=12001)
+    _write_realistic_rwd_session(
+        short,
+        offset=20.0,
+        sample_count=12000,
+        final_timestamp_sec=599.9329,
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.05\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 1.0\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+    common = {
+        "roi": "CH1",
+        "chunk_index": 0,
+        "adapter_chunk_index": 0,
+        "segment_label": "session-selected",
+        "input_format": "rwd",
+        "config_path": config,
+        "methods": ["global_linear_regression"],
+        "include_signal_only_f0_preview": True,
+        "recording_source_files": (str(selected.parent), str(short.parent)),
+        "recording_acquisition_mode": "intermittent",
+    }
+    off = run_guided_local_correction_preview(
+        selected,
+        tmp_path / "off-preview",
+        preview_id="rwd_short_endpoint_bleach_off",
+        guided_bleach_correction_mode="none",
+        **common,
+    )
+    on = run_guided_local_correction_preview(
+        selected,
+        tmp_path / "on-preview",
+        preview_id="rwd_short_endpoint_bleach_on",
+        guided_bleach_correction_mode="single_exponential",
+        **common,
+    )
+
+    assert off["status"] == "success", off["errors"]
+    assert on["status"] == "success", on["errors"]
+    assert off["source_file"] == on["source_file"] == str(selected.resolve())
+    for result in (off, on):
+        evidence = result["method_statuses"]["global_linear_regression"][
+            "local_preview_dff_evidence"
+        ]
+        assert evidence["valid"] is True
+        assert len(evidence["time_sec"]) == len(evidence["preview_dff"])
+    provenance = _load_json(Path(on["preview_provenance_path"]))
+    assert provenance["recording_wide_bleach_fit"]["scope"] == (
+        "recording_wide"
+    )
+    assert provenance["recording_wide_bleach_fit"]["time_basis"] == (
+        "cumulative_recorded_acquisition_time"
+    )
+
+
 @pytest.mark.parametrize(
     "filename",
     ("Fluorescence.csv", "fluorescence.csv"),
@@ -1177,7 +1261,11 @@ def test_local_preview_signal_only_f0_does_not_require_bleach_context(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "session-0" / "fluorescence.csv"
-    _write_realistic_rwd_session(source, offset=0.0)
+    _write_realistic_rwd_session(
+        source,
+        offset=0.0,
+        final_timestamp_sec=599.9329,
+    )
     config = tmp_path / "config.yaml"
     config.write_text(
         "target_fs_hz: 20.0\n"
