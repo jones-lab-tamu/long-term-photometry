@@ -683,6 +683,17 @@ GUIDED_BLEACH_MODE_LABELS = {
     "single_exponential": "Single exponential",
     "double_exponential": "Double exponential",
 }
+GUIDED_LOW_PASS_TOOLTIP = (
+    "Controls how much fast variation is retained before correction. Lower "
+    "values smooth more strongly and attenuate faster fluctuations; higher "
+    "values preserve more rapid variation but also more high-frequency noise. "
+    "Leave 1.0 Hz unchanged unless you understand why another cutoff is needed."
+)
+GUIDED_BLEACH_TOOLTIP = (
+    "Fits a slow recording-wide monotonic decay independently to signal and "
+    "reference, then removes the fitted decay before reference-based correction. "
+    "Use only when clear photobleaching is present; otherwise leave Off."
+)
 GUIDED_CSV_INTERPRETATION_CONFIRMATION_REQUIRED_MESSAGE = (
     "Return to Select data and confirm the CSV column interpretation before "
     "continuing."
@@ -4485,14 +4496,14 @@ class MainWindow(QMainWindow):
         self._guided_lowpass_hz_spin.setRange(0.0, np.finfo(float).max)
         self._guided_lowpass_hz_spin.setSingleStep(0.1)
         self._guided_lowpass_hz_spin.setValue(GUIDED_LOW_PASS_DEFAULT_HZ)
-        self._guided_lowpass_hz_spin.setToolTip(
-            "Controls the low-pass preprocessing cutoff used before correction. "
-            "Values at or above the Nyquist frequency do not apply filtering."
-        )
+        self._guided_lowpass_hz_spin.setToolTip(GUIDED_LOW_PASS_TOOLTIP)
         advanced_form.addRow(
             "Low-pass preprocessing cutoff (Hz):",
             self._guided_lowpass_hz_spin,
         )
+        lowpass_label = advanced_form.labelForField(self._guided_lowpass_hz_spin)
+        if lowpass_label is not None:
+            lowpass_label.setToolTip(GUIDED_LOW_PASS_TOOLTIP)
 
         self._guided_bleach_correction_mode_combo = QComboBox()
         self._guided_bleach_correction_mode_combo.setObjectName(
@@ -4501,15 +4512,16 @@ class MainWindow(QMainWindow):
         for token, label in GUIDED_BLEACH_MODE_LABELS.items():
             self._guided_bleach_correction_mode_combo.addItem(label, token)
         self._guided_bleach_correction_mode_combo.setCurrentIndex(0)
-        self._guided_bleach_correction_mode_combo.setToolTip(
-            "Optionally removes a recording-wide exponential photobleaching "
-            "trend before reference-based correction. Leave Off unless a "
-            "monotonic bleaching trend is evident."
-        )
+        self._guided_bleach_correction_mode_combo.setToolTip(GUIDED_BLEACH_TOOLTIP)
         advanced_form.addRow(
             "Exponential bleach detrending:",
             self._guided_bleach_correction_mode_combo,
         )
+        bleach_label = advanced_form.labelForField(
+            self._guided_bleach_correction_mode_combo
+        )
+        if bleach_label is not None:
+            bleach_label.setToolTip(GUIDED_BLEACH_TOOLTIP)
         advanced_layout.addWidget(advanced_content)
         advanced_content.setVisible(False)
         advanced_group.toggled.connect(advanced_content.setVisible)

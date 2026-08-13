@@ -235,6 +235,16 @@ def test_guided_select_data_advanced_preprocessing_is_exactly_two_collapsed_cont
     assert form.labelForField(bleach).text() == (
         "Exponential bleach detrending:"
     )
+    assert "Lower values smooth more strongly" in lowpass.toolTip()
+    assert "Leave 1.0 Hz unchanged" in lowpass.toolTip()
+    assert "Lower values smooth more strongly" in form.labelForField(
+        lowpass
+    ).toolTip()
+    assert "fits a slow recording-wide monotonic decay" in bleach.toolTip().lower()
+    assert "leave Off" in bleach.toolTip()
+    assert "fits a slow recording-wide monotonic decay" in form.labelForField(
+        bleach
+    ).toolTip().lower()
 
 
 def test_guided_advanced_preprocessing_change_invalidates_existing_guided_evidence(

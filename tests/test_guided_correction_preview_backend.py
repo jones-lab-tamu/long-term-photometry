@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import h5py
 import numpy as np
+import pytest
 import photometry_pipeline.preview.correction_preview as correction_preview_module
 
 from photometry_pipeline.preview.correction_preview import (
@@ -1082,6 +1083,7 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert len(dynamic_evidence["time_sec"]) == len(
         dynamic_evidence["preview_dff"]
     )
+
     diagnostics = _load_json(
         Path(
             result["method_statuses"]["global_linear_regression"][
@@ -1107,6 +1109,113 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
         "strategy_family"
     ] == "signal_only_f0"
     assert not (tmp_path / "applied_dff").exists()
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ("Fluorescence.csv", "fluorescence.csv"),
+    ids=("canonical_fluorescence_filename", "lowercase_compatibility"),
+)
+def test_local_preview_bleach_off_and_on_normalize_rwd_session_sources(
+    tmp_path, filename,
+):
+    first = tmp_path / "session-0" / filename
+    second = tmp_path / "session-1" / filename
+    _write_realistic_rwd_session(first, offset=0.0)
+    _write_realistic_rwd_session(second, offset=20.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 1.0\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+    source_set = (str(first.parent), str(second.parent))
+    common = {
+        "roi": "CH1",
+        "chunk_index": 1,
+        "adapter_chunk_index": 0,
+        "segment_label": "session-1",
+        "input_format": "rwd",
+        "config_path": config,
+        "methods": ["global_linear_regression"],
+        "include_signal_only_f0_preview": True,
+        "recording_source_files": source_set,
+        "recording_acquisition_mode": "intermittent",
+    }
+    off = run_guided_local_correction_preview(
+        second,
+        tmp_path / "off-preview",
+        preview_id="rwd_bleach_off",
+        guided_bleach_correction_mode="none",
+        **common,
+    )
+    on = run_guided_local_correction_preview(
+        second,
+        tmp_path / "on-preview",
+        preview_id="rwd_bleach_on",
+        guided_bleach_correction_mode="single_exponential",
+        **common,
+    )
+
+    assert off["status"] == "success", off["errors"]
+    assert on["status"] == "success", on["errors"]
+    provenance = _load_json(Path(on["preview_provenance_path"]))
+    assert provenance["recording_wide_bleach_fit"]["scope"] == (
+        "recording_wide"
+    )
+    assert provenance["recording_wide_bleach_fit"]["time_basis"] == (
+        "cumulative_recorded_acquisition_time"
+    )
+
+
+def test_local_preview_signal_only_f0_does_not_require_bleach_context(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError(
+            "Signal-Only F0 preview must not require recording-wide bleach context"
+        )
+
+    monkeypatch.setattr(
+        correction_preview_module,
+        "_build_guided_preview_recording_wide_bleach_context",
+        fail_if_called,
+    )
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "signal-only-preview-with-bleach",
+        roi="CH1",
+        chunk_index=0,
+        adapter_chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=[],
+        include_signal_only_f0_preview=True,
+        preview_id="rwd_signal_only_f0_bleach_on",
+        recording_source_files=(str(source.parent),),
+        recording_acquisition_mode="intermittent",
+        guided_bleach_correction_mode="single_exponential",
+    )
+
+    assert result["status"] == "success", result["errors"]
+    assert result["signal_only_f0_preview_evidence"]["valid"] is True
 
 
 def test_on_demand_local_preview_service_is_no_write_and_strategy_exact(

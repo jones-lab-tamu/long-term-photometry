@@ -2322,12 +2322,31 @@ def _build_guided_preview_recording_wide_bleach_context(
     selected_window: dict[str, Any] | None = None,
 ) -> tuple[regression.RecordingWideBleachContext, np.ndarray | None]:
     """Build preview context from the same accepted recording sources."""
-    sources = [os.path.realpath(str(path)) for path in source_files if str(path)]
+    fmt = str(input_format).strip().lower()
+
+    def _loader_source_path(path: str | os.PathLike[str]) -> str:
+        source = os.path.realpath(str(path))
+        if fmt == "rwd" and os.path.isdir(source):
+            canonical_fluorescence_path = os.path.join(
+                source, "Fluorescence.csv"
+            )
+            if os.path.isfile(canonical_fluorescence_path):
+                return os.path.realpath(canonical_fluorescence_path)
+            legacy_fluorescence_path = os.path.join(
+                source, "fluorescence.csv"
+            )
+            if os.path.isfile(legacy_fluorescence_path):
+                return os.path.realpath(legacy_fluorescence_path)
+        return source
+
+    sources = [
+        _loader_source_path(path) for path in source_files if str(path)
+    ]
     if not sources:
         raise GuidedCorrectionPreviewError(
             "Recording-wide bleach preview context is unavailable."
         )
-    fmt = str(input_format).strip().lower()
+    selected_source = _loader_source_path(selected_source_file)
     continuous = str(acquisition_mode or "").strip().lower() == "continuous"
     sampler = regression.RecordingWideBleachSampler(
         capacity=regression.BLEACH_RECORDING_WIDE_SAMPLE_CAPACITY,
@@ -2357,7 +2376,7 @@ def _build_guided_preview_recording_wide_bleach_context(
                     recording_duration,
                     float(window.get("original_file_duration_sec", absolute[-1])),
                 )
-                if source == os.path.realpath(selected_source_file):
+                if source == selected_source:
                     selected_index = (
                         int(selected_window.get("window_index", -1))
                         if selected_window is not None
@@ -2378,7 +2397,7 @@ def _build_guided_preview_recording_wide_bleach_context(
             local = np.asarray(raw.time_sec, dtype=float).reshape(-1)
             local = local - local[0]
             absolute = session_offset + local
-            if source == os.path.realpath(selected_source_file):
+            if source == selected_source:
                 selected_absolute_time = absolute.copy()
             if selected_roi in raw.channel_names:
                 index = raw.channel_names.index(selected_roi)
