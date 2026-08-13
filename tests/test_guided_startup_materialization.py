@@ -383,45 +383,27 @@ def test_current_native_materialization_never_writes_posthoc_artifact(
 
 
 @pytest.mark.parametrize(
-    "scenario_label,execution_mode,selected",
+    "execution_mode,selected",
     (
-        ("phasic_all_signal_only_f0", "phasic", ("signal_only_f0", "signal_only_f0")),
-        ("tonic_all_signal_only_f0", "tonic", ("signal_only_f0", "signal_only_f0")),
-        ("combined_all_signal_only_f0", "both", ("signal_only_f0", "signal_only_f0")),
+        ("phasic", ("signal_only_f0", "signal_only_f0")),
+        ("tonic", ("signal_only_f0", "signal_only_f0")),
+        ("both", ("signal_only_f0", "signal_only_f0")),
         (
-            "combined_mixed_strategies",
             "both",
             ("robust_global_event_reject", "signal_only_f0"),
         ),
         (
-            "fit_only_native_per_roi_execution",
             "phasic",
             ("robust_global_event_reject", "global_linear_regression"),
         ),
     ),
 )
-def test_native_materialization_never_calls_old_orchestration(
-    allocated_case, monkeypatch, scenario_label, execution_mode, selected
+def test_native_materialization_preserves_current_per_roi_path(
+    allocated_case, monkeypatch, execution_mode, selected
 ):
-    """Interception test (task: retire obsolete Guided post-hoc applied-dF/F
-    route): for every current-native strategy matrix, materialization must
-    never invoke the retired guided_applied_dff_orchestration entry point,
-    regardless of applied_dff_orchestration_enabled or execution_mode."""
+    """Current-native strategy matrices materialize the per-ROI artifact."""
     from photometry_pipeline.guided_production_mapping import (
         GuidedProductionPerRoiStrategy,
-    )
-    import photometry_pipeline.guided_applied_dff_orchestration as old_orchestration
-
-    def _fail_if_called(*_args, **_kwargs):
-        raise AssertionError(
-            f"old Guided orchestration entry point must not be called for "
-            f"{scenario_label}"
-        )
-
-    monkeypatch.setattr(
-        old_orchestration,
-        "run_guided_applied_dff_orchestration_if_enabled",
-        _fail_if_called,
     )
 
     request, plan, allocated = allocated_case

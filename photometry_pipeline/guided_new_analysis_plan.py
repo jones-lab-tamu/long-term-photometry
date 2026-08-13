@@ -1294,13 +1294,9 @@ def build_per_roi_effective_feature_config_fields_for_overrides(
 ) -> dict[str, dict[str, Any]]:
     """Build {roi_id: effective_config_fields} for ROIs with an explicit override.
 
-    Suitable for write_per_roi_feature_config_files (the current native
-    per-ROI correction route). A ROI resolved from the default profile is
-    omitted, so it keeps the default feature config.
-    (guided_applied_dff_orchestration.py's
-    run_guided_applied_dff_orchestration_if_enabled has the same
-    per_roi_feature_event_overrides parameter shape, but that function is
-    retired and has no remaining caller in current-Guided production.)
+    Suitable for the current native per-ROI correction route. A ROI resolved
+    from the default profile is omitted, so it keeps the default feature
+    config.
 
     Unlike GuidedPerRoiFeatureEventProfile.config_fields (which may be a
     SPARSE set of fields an override profile explicitly set),

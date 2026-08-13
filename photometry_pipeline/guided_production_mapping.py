@@ -2552,15 +2552,9 @@ def build_per_roi_feature_event_backend_shapes(
       guided_new_analysis_plan.build_per_roi_feature_backend_config.
     - "per_roi_effective_feature_config_fields_for_overrides": {roi_id:
       COMPLETE effective fields} for source="override" ROIs only. Already
-      complete (every FEATURE_EVENT_CONFIG_FIELDS name present) -- ready to
-      pass directly to write_per_roi_feature_config_files (the current
-      native per-ROI correction route) with no further merging. Never the
-      sparse override_config_fields. (guided_applied_dff_orchestration.py's
-      run_guided_applied_dff_orchestration_if_enabled has the same
-      per_roi_feature_event_overrides argument shape, but that function is
-      retired: it has no remaining caller anywhere in current-Guided
-      production, including tools/run_full_pipeline_deliverables.py, whose
-      former call site to it has been removed.)
+      complete (every FEATURE_EVENT_CONFIG_FIELDS name present) -- ready for
+      current per-ROI correction execution with no further merging. Never the
+      sparse override_config_fields.
     - "per_roi_feature_provenance": {roi_id: {"source", "feature_event_profile_id",
       "override_config_fields", "effective_config_fields"}} for every
       resolved ROI (both "default" and "override"). Ready to pass directly
