@@ -855,6 +855,8 @@ def _npm_shared_completion_runner(monkeypatch):
                     attrs["correction_execution_status"] = "consumed"
                     attrs["correction_strategy_family"] = "dynamic_fit"
                     attrs["correction_selected_strategy"] = dynamic_fit_mode
+                    attrs["correction_applied_strategy"] = dynamic_fit_mode
+                    attrs["correction_applied_source"] = "fitted_reference"
                     attrs["correction_dynamic_fit_mode"] = dynamic_fit_mode
                     attrs["dynamic_fit_mode_resolved"] = dynamic_fit_mode
                     attrs["dynamic_fit_engine"] = "rolling_local_regression"
