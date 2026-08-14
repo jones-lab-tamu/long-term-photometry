@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 import pytest
 from PySide6.QtCore import QObject, QPoint, QRect, QSignalBlocker, QTimer, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 import gui.main_window as main_window_module
 import photometry_pipeline.preview.correction_preview as correction_preview_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from gui.interactive_image import InteractiveImageController, InteractiveImageLabel
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.guided_new_analysis_plan import (
@@ -8852,11 +8854,14 @@ def test_correction_preview_ready_has_openable_review_summary(
         count > 0
         for count in result["visual_trace_sample_counts"].values()
     )
-    assert window._guided_preview_visual_label.pixmap().isNull() is False
-    assert window._guided_preview_visual_display_width <= 820
-    assert window._guided_preview_visual_display_width <= max(
-        320, window._guided_preview_visual_viewport_width - 72
+    assert isinstance(window._guided_preview_visual_label, InteractiveImageLabel)
+    assert isinstance(
+        window._guided_preview_visual_interaction, InteractiveImageController
     )
+    assert window._guided_preview_visual_scroll.widget() is (
+        window._guided_preview_visual_label
+    )
+    assert window._guided_preview_visual_label.pixmap().isNull() is False
     visual_text = window._guided_preview_visual_status_label.text()
     assert "Use the arrows below to review the selected correction strategies for CH1." == (
         visual_text
@@ -8873,6 +8878,73 @@ def test_correction_preview_ready_has_openable_review_summary(
     assert opened == [str(report_path)]
     window._guided_preview_technical_toggle_btn.click()
     assert window._guided_preview_technical_details_group.isHidden() is True
+
+
+def test_guided_correction_preview_viewer_preserves_carousel_and_interaction(
+    window, qapp, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window.show()
+    window.resize(1280, 900)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    qapp.processEvents()
+
+    _generate_ready_guided_correction_preview(window)
+    qapp.processEvents()
+    result = window._guided_preview_last_result
+    visual_paths = result["visual_preview_paths"]
+    label = window._guided_preview_visual_label
+    controller = window._guided_preview_visual_interaction
+    scroll = window._guided_preview_visual_scroll
+
+    assert isinstance(label, InteractiveImageLabel)
+    assert isinstance(controller, InteractiveImageController)
+    assert scroll.widget() is label
+    assert controller.zoom_mode is False
+    fit_pixmap = label.pixmap()
+    assert fit_pixmap is not None and not fit_pixmap.isNull()
+    assert fit_pixmap.width() <= scroll.viewport().width()
+    assert fit_pixmap.height() <= scroll.viewport().height()
+    first_cache_key = fit_pixmap.cacheKey()
+
+    label.wheel_zoom.emit(1, QPoint(100, 100))
+    qapp.processEvents()
+    zoomed_pixmap = label.pixmap()
+    assert controller.zoom_mode is True
+    assert zoomed_pixmap.width() > fit_pixmap.width()
+    assert label.cursor().shape() == Qt.OpenHandCursor
+
+    label.drag_started.emit(QPoint(200, 160))
+    assert label.cursor().shape() == Qt.ClosedHandCursor
+    label.drag_moved.emit(QPoint(140, 120))
+    label.drag_finished.emit()
+    qapp.processEvents()
+    assert label.cursor().shape() == Qt.OpenHandCursor
+
+    label.clicked.emit()
+    qapp.processEvents()
+    assert controller.zoom_mode is False
+    label.clicked.emit()
+    qapp.processEvents()
+    assert controller.zoom_mode is True
+    assert label.pixmap().size() == QPixmap(visual_paths[0]).size()
+
+    window._guided_preview_next_btn.click()
+    qapp.processEvents()
+    assert window._guided_preview_visual_index == 1
+    assert result["visual_preview_path"] == visual_paths[1]
+    assert window._guided_preview_visual_item_label.text().startswith("2 of 3")
+    assert controller.zoom_mode is False
+    assert label.pixmap().isNull() is False
+    assert label.pixmap().cacheKey() != first_cache_key
+
+    window._guided_preview_previous_btn.click()
+    qapp.processEvents()
+    assert window._guided_preview_visual_index == 0
+    assert result["visual_preview_path"] == visual_paths[0]
+    assert window._guided_preview_visual_item_label.text().startswith("1 of 3")
 
 
 def test_signal_only_f0_preview_has_plain_review_affordance(

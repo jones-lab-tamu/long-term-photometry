@@ -8918,16 +8918,60 @@ class MainWindow(QMainWindow):
         )
         preview_navigation.addWidget(self._guided_preview_next_btn)
         preview_layout.addLayout(preview_navigation)
-        self._guided_preview_visual_label = QLabel()
+        self._guided_preview_visual_label = InteractiveImageLabel()
         self._guided_preview_visual_label.setObjectName(
             "guidedCorrectionPreviewVisual"
         )
         self._guided_preview_visual_label.setAlignment(Qt.AlignCenter)
-        self._guided_preview_visual_label.setMinimumSize(0, 0)
         self._guided_preview_visual_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Preferred
+            QSizePolicy.Ignored, QSizePolicy.Ignored
         )
-        preview_layout.addWidget(self._guided_preview_visual_label)
+        self._guided_preview_visual_label.setStyleSheet(
+            "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
+        )
+        self._guided_preview_visual_label.setToolTip(
+            "Click image to toggle fit/full-size inspection."
+        )
+        self._guided_preview_visual_scroll = QScrollArea()
+        self._guided_preview_visual_scroll.setObjectName(
+            "guidedCorrectionPreviewVisualScroll"
+        )
+        self._guided_preview_visual_scroll.setWidgetResizable(False)
+        self._guided_preview_visual_scroll.setAlignment(Qt.AlignCenter)
+        self._guided_preview_visual_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._guided_preview_visual_scroll.setWidget(
+            self._guided_preview_visual_label
+        )
+        self._guided_preview_visual_scroll.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self._guided_preview_visual_scroll.setMinimumHeight(260)
+        preview_layout.addWidget(self._guided_preview_visual_scroll)
+        self._guided_preview_visual_zoom_hint_label = QLabel(
+            "Scroll wheel to zoom. Click image to toggle fit/full size."
+        )
+        self._guided_preview_visual_zoom_hint_label.setObjectName(
+            "guidedCorrectionPreviewVisualZoomHint"
+        )
+        self._guided_preview_visual_zoom_hint_label.setAlignment(Qt.AlignCenter)
+        self._guided_preview_visual_zoom_hint_label.setStyleSheet(
+            "font-size: 11px; color: #666;"
+        )
+        preview_layout.addWidget(self._guided_preview_visual_zoom_hint_label)
+        self._guided_preview_visual_interaction = InteractiveImageController(
+            label=self._guided_preview_visual_label,
+            scroll_area=self._guided_preview_visual_scroll,
+            set_hint_text=self._guided_preview_visual_zoom_hint_label.setText,
+            fit_hint="Scroll wheel to zoom. Click image to toggle fit/full size.",
+            zoom_hint=(
+                "Scroll wheel to zoom in/out. Drag to pan. "
+                "Click image to return to fit."
+            ),
+            allow_upscale_in_fit=True,
+        )
+        self._guided_preview_visual_label.clicked.connect(
+            self._guided_preview_visual_interaction.toggle_zoom
+        )
         self._guided_local_signal_f0_preview_label = QLabel("")
         self._guided_local_signal_f0_preview_label.setObjectName(
             "guidedLocalSignalOnlyF0PreviewEvidence"
@@ -8961,6 +9005,8 @@ class MainWindow(QMainWindow):
         self._guided_preview_previous_btn.setVisible(False)
         self._guided_preview_visual_item_label.setVisible(False)
         self._guided_preview_next_btn.setVisible(False)
+        self._guided_preview_visual_scroll.setVisible(False)
+        self._guided_preview_visual_zoom_hint_label.setVisible(False)
         self._guided_preview_visual_label.setVisible(False)
         self._guided_preview_open_btn.setVisible(False)
 
@@ -10860,33 +10906,12 @@ class MainWindow(QMainWindow):
             "Hide technical details" if visible else "Show technical details"
         )
 
-    def _fit_guided_preview_visual_to_page(self) -> None:
-        source = getattr(
-            self, "_guided_preview_visual_source_pixmap", QPixmap()
+    def _render_guided_preview_visual(self) -> None:
+        interaction = getattr(
+            self, "_guided_preview_visual_interaction", None
         )
-        label = getattr(self, "_guided_preview_visual_label", None)
-        if (
-            label is None
-            or source.isNull()
-            or not hasattr(self, "_guided_workflow_stack")
-        ):
-            return
-        scroll = self._guided_workflow_stack.widget(
-            list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
-        )
-        viewport_width = (
-            scroll.viewport().width()
-            if isinstance(scroll, QScrollArea)
-            else self._guided_workflow_stack.width()
-        )
-        target_width = max(320, min(820, int(viewport_width) - 72))
-        scaled = source.scaledToWidth(
-            target_width, Qt.SmoothTransformation
-        )
-        label.setMaximumWidth(target_width)
-        label.setPixmap(scaled)
-        self._guided_preview_visual_display_width = scaled.width()
-        self._guided_preview_visual_viewport_width = viewport_width
+        if interaction is not None:
+            interaction.render()
 
     def _set_guided_preview_visual_index(self, index: int) -> None:
         if getattr(self, "_guided_preview_result_stale", False):
@@ -11016,8 +11041,15 @@ class MainWindow(QMainWindow):
             if visual_ready:
                 pixmap = QPixmap(visual_path)
                 if not pixmap.isNull():
-                    self._guided_preview_visual_source_pixmap = pixmap
-                    self._fit_guided_preview_visual_to_page()
+                    self._guided_preview_visual_scroll.setVisible(True)
+                    self._guided_preview_visual_label.setVisible(True)
+                    self._guided_preview_visual_zoom_hint_label.setVisible(True)
+                    self._guided_preview_visual_interaction.set_pixmap(
+                        pixmap, reset_zoom=True
+                    )
+                    QTimer.singleShot(
+                        0, self._render_guided_preview_visual
+                    )
                     self._guided_preview_visual_status_label.setText(
                         "Use the arrows below to review the selected "
                         f"correction strategies for {preview.get('roi', '')}."
@@ -11045,8 +11077,9 @@ class MainWindow(QMainWindow):
                 else:
                     visual_ready = False
             if not visual_ready:
-                self._guided_preview_visual_source_pixmap = QPixmap()
-                self._guided_preview_visual_label.setPixmap(QPixmap())
+                self._guided_preview_visual_interaction.clear(
+                    "", fallback_width=640, fallback_height=320
+                )
                 self._guided_preview_visual_item_label.setText("")
                 self._guided_preview_visual_item_label.setVisible(False)
                 self._guided_preview_previous_btn.setVisible(False)
@@ -11064,6 +11097,8 @@ class MainWindow(QMainWindow):
                     else ""
                 )
             self._guided_preview_visual_status_label.setVisible(show_summary)
+            self._guided_preview_visual_scroll.setVisible(visual_ready)
+            self._guided_preview_visual_zoom_hint_label.setVisible(visual_ready)
             self._guided_preview_visual_label.setVisible(visual_ready)
 
         signal = getattr(self, "_guided_signal_f0_last_result", {}) or {}
@@ -30315,7 +30350,7 @@ class MainWindow(QMainWindow):
         self._apply_splitter_workspace_policy()
         self._render_tuning_overlay()
         self._render_correction_tuning_overlay()
-        QTimer.singleShot(0, self._fit_guided_preview_visual_to_page)
+        QTimer.singleShot(0, self._render_guided_preview_visual)
 
     def _update_adv_group_visibility(self):
         # In our GUI contract, "both" maps to mode_val=None (which implies phasic runs)
