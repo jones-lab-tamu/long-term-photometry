@@ -88,14 +88,14 @@ def test_worker_safe_report_generation_uses_only_plain_snapshot(tmp_path):
     assert result["visual_preview_methods"] == ["global_linear_regression"]
     assert Path(result["user_report_path"]).is_file()
     assert result["visual_trace_labels"] == [
-        "Raw signal",
-        "Raw reference",
+        "Signal used for correction",
+        "Reference used for correction",
         "Signal used for correction",
         "Fitted reference",
         "Corrected dF/F",
     ]
     assert result["visual_panel_titles"] == [
-        "Original Signal and Reference",
+        "Correction Signal and Reference",
         "Correction Reference",
         "Corrected dF/F",
     ]
@@ -185,13 +185,19 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
         axes = list(np.asarray(axes).reshape(-1))
         assert len(axes) == 3
         label = labels[method]
-        assert axes[0].get_title() == "Original Signal and Reference"
+        expected_top_title = (
+            "Original Signal and Reference"
+            if method == "signal_only_f0"
+            else "Correction Signal and Reference"
+        )
+        assert axes[0].get_title() == expected_top_title
         assert axes[1].get_title() == "Correction Reference"
         assert axes[2].get_title() == "Corrected dF/F"
-        assert [line.get_label() for line in axes[0].lines] == [
-            "Raw signal",
-            "Raw reference",
-        ]
+        assert [line.get_label() for line in axes[0].lines] == (
+            ["Raw signal", "Raw reference"]
+            if method == "signal_only_f0"
+            else ["Signal used for correction", "Reference used for correction"]
+        )
         assert axes[0].lines[0].get_color() == RAW_SIGNAL_COLOR
         assert axes[0].lines[1].get_color() == RAW_REFERENCE_COLOR
         evidence = (
@@ -265,6 +271,101 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
             equal_nan=True,
         )
         assert axes[2].lines[0].get_color() == DFF_COLOR
+
+
+def test_dynamic_preview_panels_use_actual_filtered_correction_inputs(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+    captured_inputs = []
+
+    def fake_fit(chunk, _config, *, mode):
+        signal_input = np.asarray(chunk.sig_filt, dtype=float).copy()
+        reference_input = np.asarray(chunk.uv_filt, dtype=float).copy()
+        captured_inputs.append((signal_input.copy(), reference_input.copy()))
+        uv_fit = reference_input.copy()
+        return uv_fit, signal_input - uv_fit
+
+    monkeypatch.setattr(
+        correction_preview_module.regression,
+        "fit_chunk_dynamic",
+        fake_fit,
+    )
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "filtered-input-preview",
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=["global_linear_regression"],
+        include_signal_only_f0_preview=False,
+        preview_id="filtered_input_preview",
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    captured_axes = []
+    original_subplots = plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = original_subplots(*args, **kwargs)
+        captured_axes.append(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plt, "subplots", capture_subplots)
+    generate_guided_correction_preview_reports(
+        result,
+        report_inputs={
+            "preview_output_dir": result["preview_output_dir"],
+            "method_labels": {
+                "global_linear_regression": "Global Linear Regression"
+            },
+            "selected_roi": "CH1",
+            "selected_chunk_index": 0,
+            "selected_segment_label": "session-0",
+            "max_plot_points": 800,
+            "figure_dpi": 80,
+        },
+    )
+
+    assert len(captured_inputs) == 1
+    assert len(captured_axes) == 1
+    signal_input, reference_input = captured_inputs[0]
+    trace = correction_preview_module._load_guided_preview_trace(
+        Path(result["method_statuses"]["global_linear_regression"]["trace_csv"])
+    )
+    axes = list(np.asarray(captured_axes[0]).reshape(-1))
+    stride = max(1, int(np.ceil(signal_input.shape[0] / 800)))
+
+    np.testing.assert_allclose(trace["sig_raw"], signal_input[:, 0])
+    np.testing.assert_allclose(trace["uv_raw"], reference_input[:, 0])
+    np.testing.assert_allclose(
+        axes[0].lines[0].get_ydata(), signal_input[::stride, 0]
+    )
+    np.testing.assert_allclose(
+        axes[0].lines[1].get_ydata(), reference_input[::stride, 0]
+    )
+    np.testing.assert_allclose(
+        axes[1].lines[0].get_ydata(), signal_input[::stride, 0]
+    )
+    assert [line.get_label() for line in axes[0].lines] == [
+        "Signal used for correction",
+        "Reference used for correction",
+    ]
 
 
 def test_local_dynamic_fit_preview_dff_uses_percent_style_units():

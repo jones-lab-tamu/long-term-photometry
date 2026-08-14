@@ -161,15 +161,34 @@ def test_homogeneous_grouped_dispatch_matches_old_direct_call(dynamic_fit_mode):
     _prepare_filtered(chunk_grouped, cfg)
 
     old_uv_fit = _direct_dispatch(dynamic_fit_mode, chunk_direct, cfg)
-    old_delta_f = regression._assemble_delta_f_from_fit(chunk_direct.sig_raw, old_uv_fit)
+    delta_signal = (
+        chunk_direct.sig_filt
+        if dynamic_fit_mode in {
+            "global_linear_regression",
+            "robust_global_event_reject",
+            "adaptive_event_gated_regression",
+        }
+        else chunk_direct.sig_raw
+    )
+    old_delta_f = regression._assemble_delta_f_from_fit(delta_signal, old_uv_fit)
 
     grouped_uv_fit, grouped_delta_f = regression.fit_chunk_dynamic(chunk_grouped, cfg, mode="phasic")
 
     np.testing.assert_allclose(grouped_uv_fit, old_uv_fit, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(grouped_delta_f, old_delta_f, rtol=0.0, atol=1e-12)
-    # Full lifecycle sanity: delta_f is assembled from the same sig_raw/uv_fit.
+    # Full lifecycle sanity: delta_f is assembled from the selected strategy's
+    # signal input domain and the matching fitted reference.
+    grouped_delta_signal = (
+        chunk_grouped.sig_filt
+        if dynamic_fit_mode in {
+            "global_linear_regression",
+            "robust_global_event_reject",
+            "adaptive_event_gated_regression",
+        }
+        else chunk_grouped.sig_raw
+    )
     np.testing.assert_allclose(
-        grouped_delta_f, chunk_grouped.sig_raw - grouped_uv_fit, rtol=0.0, atol=1e-12
+        grouped_delta_f, grouped_delta_signal - grouped_uv_fit, rtol=0.0, atol=1e-12
     )
     # Homogeneous run must resolve to the single mode, not "mixed", and every
     # ROI must be tagged with it (this is what completion/provenance reads).

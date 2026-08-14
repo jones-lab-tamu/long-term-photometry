@@ -83,7 +83,7 @@ def test_dynamic_fit_produces_uvfit_deltaf_and_dff_for_rwd_and_npm(fmt, channel_
     assert delta_f.shape == chunk.sig_raw.shape
     assert np.isfinite(uv_fit).mean() > 0.99
     assert np.isfinite(delta_f).mean() > 0.99
-    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_raw[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_filt[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
 
     chunk.uv_fit = uv_fit
     chunk.delta_f = delta_f

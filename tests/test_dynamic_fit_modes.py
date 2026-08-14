@@ -665,7 +665,7 @@ def test_robust_global_event_reject_excludes_large_event_and_preserves_backgroun
 
     np.testing.assert_allclose(
         delta_robust[:, 0],
-        c_robust.sig_raw[:, 0] - uv_fit_robust[:, 0],
+        c_robust.sig_filt[:, 0] - uv_fit_robust[:, 0],
         rtol=0.0,
         atol=1e-12,
     )
@@ -965,7 +965,7 @@ def test_adaptive_event_gated_regression_synthetic_event_and_drift_behavior():
     uv_global, _ = fit_chunk_dynamic(c_global, cfg_global, mode="phasic")
     uv_adapt, df_adapt = fit_chunk_dynamic(c_adapt, cfg_adapt, mode="phasic")
 
-    np.testing.assert_allclose(df_adapt[:, 0], c_adapt.sig_raw[:, 0] - uv_adapt[:, 0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(df_adapt[:, 0], c_adapt.sig_filt[:, 0] - uv_adapt[:, 0], rtol=0.0, atol=1e-12)
     assert c_adapt.metadata["dynamic_fit_mode_resolved"] == "adaptive_event_gated_regression"
     assert c_adapt.metadata["dynamic_fit_engine"] == "adaptive_event_gated_regression_v1"
 
@@ -1044,7 +1044,7 @@ def test_adaptive_event_gated_regression_sparse_trust_falls_back_safely():
     uv_fit, delta_f = fit_chunk_dynamic(chunk, cfg, mode="phasic")
     assert uv_fit is not None
     assert delta_f is not None
-    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_raw[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_filt[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
 
     warns = chunk.metadata.get("qc_warnings", [])
     assert any("ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK" in str(w) for w in warns)

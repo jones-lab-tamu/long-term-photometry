@@ -337,13 +337,13 @@ def render_guided_correction_preview_visuals(
                     ]
                 else:
                     panel_titles = [
-                        "Original Signal and Reference",
+                        "Correction Signal and Reference",
                         "Correction Reference",
                         "Corrected dF/F",
                     ]
                     trace_labels = [
-                        "Raw signal",
-                        "Raw reference",
+                        "Signal used for correction",
+                        "Reference used for correction",
                         "Signal used for correction",
                         "Fitted reference",
                         "Corrected dF/F",
@@ -366,14 +366,22 @@ def render_guided_correction_preview_visuals(
                 axes[0].plot(
                     time_plot,
                     series["sig_raw"][::stride],
-                    label="Raw signal",
+                    label=(
+                        "Raw signal"
+                        if method == "signal_only_f0"
+                        else "Signal used for correction"
+                    ),
                     color=RAW_SIGNAL_COLOR,
                     linewidth=1.2,
                 )
                 axes[0].plot(
                     time_plot,
                     series["uv_raw"][::stride],
-                    label="Raw reference",
+                    label=(
+                        "Raw reference"
+                        if method == "signal_only_f0"
+                        else "Reference used for correction"
+                    ),
                     color=RAW_REFERENCE_COLOR,
                     linewidth=1.0,
                     alpha=0.8,
@@ -1780,19 +1788,8 @@ def _compute_local_dynamic_fit_dff_evidence(
         }
     delta_f = np.asarray(chunk.delta_f[:, 0], dtype=float).reshape(-1)
     preview_dff = 100.0 * delta_f / f0
-    fit_input_signal = np.asarray(
-        chunk.sig_raw[:, 0], dtype=float
-    ).reshape(-1)
-    engine_info = (chunk.metadata or {}).get("dynamic_fit_engine_info", {})
-    fit_input_domain = (
-        str(engine_info.get("fit_input_domain") or "")
-        if isinstance(engine_info, dict)
-        else ""
-    )
-    if (
-        fit_input_domain in {"filtered", "filtered_if_available_else_raw"}
-        and chunk.sig_filt is not None
-    ):
+    fit_input_signal = np.asarray(chunk.sig_raw[:, 0], dtype=float).reshape(-1)
+    if chunk.sig_filt is not None and chunk.uv_filt is not None:
         fit_input_signal = np.asarray(
             chunk.sig_filt[:, 0], dtype=float
         ).reshape(-1)
@@ -1819,8 +1816,12 @@ def _write_method_trace_csv(
     chunk: Chunk,
 ) -> None:
     time_sec = np.asarray(record["time_sec"], dtype=float).reshape(-1)
-    sig_raw = np.asarray(record["sig_raw"], dtype=float).reshape(-1)
-    uv_raw = np.asarray(record["uv_raw"], dtype=float).reshape(-1)
+    if chunk.sig_filt is not None and chunk.uv_filt is not None:
+        correction_signal = np.asarray(chunk.sig_filt[:, 0], dtype=float).reshape(-1)
+        correction_reference = np.asarray(chunk.uv_filt[:, 0], dtype=float).reshape(-1)
+    else:
+        correction_signal = np.asarray(chunk.sig_raw[:, 0], dtype=float).reshape(-1)
+        correction_reference = np.asarray(chunk.uv_raw[:, 0], dtype=float).reshape(-1)
     fit_ref = (
         np.asarray(chunk.uv_fit[:, 0], dtype=float).reshape(-1)
         if chunk.uv_fit is not None
@@ -1851,8 +1852,8 @@ def _write_method_trace_csv(
                     "preview_only": True,
                     "method": method,
                     "time_sec": float(time_sec[idx]),
-                    "sig_raw": float(sig_raw[idx]),
-                    "uv_raw": float(uv_raw[idx]),
+                    "sig_raw": float(correction_signal[idx]),
+                    "uv_raw": float(correction_reference[idx]),
                     "fit_ref": float(fit_ref[idx]) if np.isfinite(fit_ref[idx]) else "",
                     "delta_f": float(delta_f[idx]) if np.isfinite(delta_f[idx]) else "",
                 }

@@ -83,6 +83,109 @@ def _single_bleach_context(time_sec: np.ndarray) -> regression.RecordingWideBlea
     )
 
 
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "global_linear_regression",
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    ],
+)
+def test_guided_reference_correction_stays_in_preprocessed_filtered_domain(strategy):
+    n = 2400
+    fs_hz = 40.0
+    time_sec = np.arange(n, dtype=float) / fs_hz
+    filtered_reference = 4.0 + 0.25 * np.sin(2.0 * np.pi * 0.2 * time_sec)
+    filtered_signal = (
+        1.6 * filtered_reference
+        + 0.7
+        + 0.08 * np.sin(2.0 * np.pi * 0.35 * time_sec)
+    )
+    raw_reference = filtered_reference + 1.5 * np.sin(2.0 * np.pi * 8.0 * time_sec)
+    raw_signal = filtered_signal + 3.0 * np.sin(2.0 * np.pi * 11.0 * time_sec + 0.3)
+    chunk = Chunk(
+        chunk_id=0,
+        source_file="guided-domain-synthetic.rwd",
+        format="rwd",
+        time_sec=time_sec,
+        uv_raw=raw_reference[:, None],
+        sig_raw=raw_signal[:, None],
+        fs_hz=fs_hz,
+        channel_names=["ROI0"],
+        metadata={},
+    )
+    cfg = Config(
+        dynamic_fit_mode=strategy,
+        lowpass_hz=2.0,
+        filter_order=2,
+        window_sec=30.0,
+        min_samples_per_window=20,
+    )
+    chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(
+        chunk.uv_raw, chunk.fs_hz, cfg
+    )
+    chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(
+        chunk.sig_raw, chunk.fs_hz, cfg
+    )
+    expected_signal = np.asarray(chunk.sig_filt[:, 0], dtype=float)
+    expected_reference = np.asarray(chunk.uv_filt[:, 0], dtype=float)
+
+    assert float(np.max(np.abs(raw_signal - expected_signal))) > 1.0
+    assert float(np.max(np.abs(raw_reference - expected_reference))) > 0.5
+
+    if strategy == "global_linear_regression":
+        params, fail_code, _var_u = regression._global_fit_params(
+            expected_reference, expected_signal
+        )
+        assert params is not None, fail_code
+        expected_fit = params[0] * expected_reference + params[1]
+    elif strategy == "robust_global_event_reject":
+        expected_fit = regression.fit_robust_global_event_reject(
+            signal_raw=expected_signal,
+            iso_raw=expected_reference,
+            max_iters=cfg.robust_event_reject_max_iters,
+            residual_z_thresh=cfg.robust_event_reject_residual_z_thresh,
+            local_var_window_sec=cfg.robust_event_reject_local_var_window_sec,
+            local_var_ratio_thresh=cfg.robust_event_reject_local_var_ratio_thresh,
+            min_keep_fraction=cfg.robust_event_reject_min_keep_fraction,
+            sample_rate_hz=fs_hz,
+            use_intercept=True,
+            signal_excursion_polarity=cfg.signal_excursion_polarity,
+            slope_constraint=cfg.dynamic_fit_slope_constraint,
+            min_slope=cfg.dynamic_fit_min_slope,
+        )["iso_fit_signal_units"]
+    else:
+        expected_fit = regression.fit_adaptive_event_gated_regression(
+            signal_raw=expected_signal,
+            iso_raw=expected_reference,
+            signal_fit_input=expected_signal,
+            iso_fit_input=expected_reference,
+            sample_rate_hz=fs_hz,
+            residual_z_thresh=cfg.adaptive_event_gate_residual_z_thresh,
+            local_var_window_sec=cfg.adaptive_event_gate_local_var_window_sec,
+            local_var_ratio_thresh=cfg.adaptive_event_gate_local_var_ratio_thresh,
+            smooth_window_sec=cfg.adaptive_event_gate_smooth_window_sec,
+            min_trust_fraction=cfg.adaptive_event_gate_min_trust_fraction,
+            freeze_interp_method=cfg.adaptive_event_gate_freeze_interp_method,
+            use_intercept=True,
+            signal_excursion_polarity=cfg.signal_excursion_polarity,
+            slope_constraint=cfg.dynamic_fit_slope_constraint,
+            min_slope=cfg.dynamic_fit_min_slope,
+        )["iso_fit_signal_units"]
+
+    uv_fit, delta_f = regression.fit_chunk_dynamic(
+        chunk, cfg, mode="phasic"
+    )
+
+    np.testing.assert_allclose(uv_fit[:, 0], expected_fit, rtol=0.0, atol=1e-10)
+    np.testing.assert_allclose(
+        delta_f[:, 0], expected_signal - expected_fit, rtol=0.0, atol=1e-10
+    )
+    assert not np.allclose(
+        delta_f[:, 0], raw_signal - expected_fit, rtol=0.0, atol=1e-6
+    )
+
+
 def test_guided_preprocessing_defaults_validate_and_change_plan_identity():
     plan = GuidedNewAnalysisDraftPlan()
     assert plan.lowpass_hz == 1.0

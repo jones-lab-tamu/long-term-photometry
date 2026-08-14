@@ -1884,7 +1884,8 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
     """
     Global OLS dynamic-fit mode:
       - fit filtered traces once per ROI: sig_filt ~ a*uv_filt + b
-      - reconstruct fitted reference on raw UV: uv_fit = a*uv_raw + b
+      - reconstruct fitted reference on the same filtered UV domain:
+        uv_fit = a*uv_filt + b
     """
     if mode == "tonic":
         raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
@@ -1898,7 +1899,7 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
     chunk.metadata["dynamic_fit_engine"] = "global_linear_ols_v1"
     chunk.metadata["dynamic_fit_engine_info"] = {
         "fit_inputs": "sig_filt ~ a*uv_filt + b",
-        "reconstruction_signal": "uv_raw",
+        "reconstruction_signal": "uv_filt",
         "fit_mode_resolved": "global_linear_regression",
         "fit_input_domain": "filtered",
         "signal_excursion_polarity": str(
@@ -1954,7 +1955,7 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
             "warning_level": str(constraint_summary.get("constrained_slope_summary", {}).get("warning_level", "none")),
         })
 
-        uv_fit_all[:, r_idx] = intercept + slope_used * chunk.uv_raw[:, r_idx]
+        uv_fit_all[:, r_idx] = intercept + slope_used * u_f
         slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_global_linear"][roi_name] = {
             "final_coef": {
@@ -1978,7 +1979,8 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
 ) -> Optional[np.ndarray]:
     """
     Robust global fit with iterative event-dominated sample rejection.
-    Fits on raw traces and reconstructs on raw UV.
+    Fits and reconstructs on filtered traces when available, preserving a
+    raw-domain fallback for callers that do not provide filtered arrays.
     """
     if mode == "tonic":
         raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
@@ -1988,10 +1990,13 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
     _ensure_chunk_metadata(chunk)
     chunk.metadata["dynamic_fit_engine"] = "robust_global_event_reject_v1"
     chunk.metadata["dynamic_fit_engine_info"] = {
-        "fit_inputs": "sig_raw ~ a*uv_raw + b with iterative event-point rejection",
-        "reconstruction_signal": "uv_raw",
+        "fit_inputs": (
+            "sig_filt ~ a*uv_filt + b when available, otherwise raw, "
+            "with iterative event-point rejection"
+        ),
+        "reconstruction_signal": "uv_filt_if_available_else_uv_raw",
         "fit_mode_resolved": "robust_global_event_reject",
-        "fit_input_domain": "raw",
+        "fit_input_domain": "filtered_if_available_else_raw",
         "signal_excursion_polarity": str(
             getattr(config, "signal_excursion_polarity", "positive")
         ),
@@ -2036,10 +2041,16 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
         roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
         sig_raw = np.asarray(chunk.sig_raw[:, r_idx], dtype=float)
         uv_raw = np.asarray(chunk.uv_raw[:, r_idx], dtype=float)
+        if chunk.uv_filt is None or chunk.sig_filt is None:
+            sig_fit_input = sig_raw
+            uv_fit_input = uv_raw
+        else:
+            sig_fit_input = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+            uv_fit_input = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
         try:
             robust_result = fit_robust_global_event_reject(
-                signal_raw=sig_raw,
-                iso_raw=uv_raw,
+                signal_raw=sig_fit_input,
+                iso_raw=uv_fit_input,
                 max_iters=max_iters,
                 residual_z_thresh=residual_z_thresh,
                 local_var_window_sec=local_var_window_sec,
@@ -2111,12 +2122,8 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 f"roi={roi_name} reason={exc}"
             )
 
-        if chunk.uv_filt is None or chunk.sig_filt is None:
-            u_fit = uv_raw
-            s_fit = sig_raw
-        else:
-            u_fit = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
-            s_fit = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+        u_fit = uv_fit_input
+        s_fit = sig_fit_input
 
         params, fail_code, var_u = _global_fit_params(u_fit, s_fit)
         if params is None:
@@ -2160,8 +2167,8 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
         global_negative_slope_constrained = False
         if slope_constraint_mode == "nonnegative" and slope < slope_min_allowed:
             slope_used = slope_min_allowed
-            m = np.isfinite(sig_raw) & np.isfinite(uv_raw)
-            intercept = float(np.median(sig_raw[m] - slope_used * uv_raw[m]))
+            m = np.isfinite(s_fit) & np.isfinite(u_fit)
+            intercept = float(np.median(s_fit[m] - slope_used * u_fit[m]))
             intercept_recomputed = True
             global_negative_slope_constrained = True
 
@@ -2173,11 +2180,11 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
             "warning_level": str(constraint_summary.get("constrained_slope_summary", {}).get("warning_level", "none")),
         })
 
-        uv_fit_all[:, r_idx] = intercept + slope_used * uv_raw
+        uv_fit_all[:, r_idx] = intercept + slope_used * u_fit
         slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_event_reject"][roi_name] = {
-            "keep_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
-            "excluded_mask": np.zeros(sig_raw.shape, dtype=bool),
+            "keep_mask": np.isfinite(s_fit) & np.isfinite(u_fit),
+            "excluded_mask": np.zeros(s_fit.shape, dtype=bool),
             "final_coef": {
                 "slope": float(slope_used),
                 "unconstrained_slope": float(slope),
@@ -2216,7 +2223,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
       - trust/gating from polarity-aware residual robust-z (+ optional local variance asymmetry)
       - slow local coefficient adaptation from trusted windows
       - coefficient freezing through gated spans
-      - reconstruction on raw UV
+      - reconstruction on the same filtered fit-input domain when available
     """
     if mode == "tonic":
         raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
@@ -2230,7 +2237,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
         "fit_mode_resolved": "adaptive_event_gated_regression",
         "fit_input_domain": "filtered_if_available_else_raw",
         "trust_scoring_domain": "filtered_if_available_else_raw",
-        "reconstruction_signal": "uv_raw",
+        "reconstruction_signal": "uv_filt_if_available_else_uv_raw",
         "signal_excursion_polarity": str(
             getattr(config, "signal_excursion_polarity", "positive")
         ),
@@ -2287,21 +2294,17 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
         roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
         sig_raw = np.asarray(chunk.sig_raw[:, r_idx], dtype=float)
         uv_raw = np.asarray(chunk.uv_raw[:, r_idx], dtype=float)
-        sig_fit_input = (
-            np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
-            if chunk.sig_filt is not None
-            else sig_raw
-        )
-        uv_fit_input = (
-            np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
-            if chunk.uv_filt is not None
-            else uv_raw
-        )
+        if chunk.sig_filt is not None and chunk.uv_filt is not None:
+            sig_fit_input = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+            uv_fit_input = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
+        else:
+            sig_fit_input = sig_raw
+            uv_fit_input = uv_raw
 
         try:
             adaptive_result = fit_adaptive_event_gated_regression(
-                signal_raw=sig_raw,
-                iso_raw=uv_raw,
+                signal_raw=sig_fit_input,
+                iso_raw=uv_fit_input,
                 signal_fit_input=sig_fit_input,
                 iso_fit_input=uv_fit_input,
                 sample_rate_hz=float(chunk.fs_hz),
@@ -2389,8 +2392,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
 
         try:
             robust_result = fit_robust_global_event_reject(
-                signal_raw=sig_raw,
-                iso_raw=uv_raw,
+                signal_raw=sig_fit_input,
+                iso_raw=uv_fit_input,
                 max_iters=int(getattr(config, "robust_event_reject_max_iters", 3)),
                 residual_z_thresh=float(getattr(config, "robust_event_reject_residual_z_thresh", 3.5)),
                 local_var_window_sec=getattr(config, "robust_event_reject_local_var_window_sec", 10.0),
@@ -2436,7 +2439,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "trust_fraction": float(robust_result.get("final_keep_fraction", np.nan)),
                 "gated_fraction": float(np.mean(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
                 "n_trusted": int(np.sum(np.asarray(robust_result.get("keep_mask", []), dtype=bool))),
-                "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+                "n_finite": int(np.sum(np.isfinite(sig_fit_input) & np.isfinite(uv_fit_input))),
                 "n_gated_residual": int(np.sum(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
                 "n_gated_residual_upper_tail": int(
                     robust_result.get("iteration_summaries", [{}])[-1].get(
@@ -2485,12 +2488,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 f"roi={roi_name} reason={exc}"
             )
 
-        if chunk.uv_filt is None or chunk.sig_filt is None:
-            u_fit = uv_raw
-            s_fit = sig_raw
-        else:
-            u_fit = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
-            s_fit = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+        u_fit = uv_fit_input
+        s_fit = sig_fit_input
         params, fail_code, var_u = _global_fit_params(u_fit, s_fit)
         if params is None:
             if fail_code == "DD1":
@@ -2514,7 +2513,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "trust_fraction": 0.0,
                 "gated_fraction": 0.0,
                 "n_trusted": 0,
-                "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+                "n_finite": int(np.sum(np.isfinite(s_fit) & np.isfinite(u_fit))),
                 "n_gated_residual": 0,
                 "n_gated_local_var": 0,
                 "local_var_rule_enabled": False,
@@ -2538,8 +2537,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
         global_negative_slope_constrained = False
         if slope_constraint_mode == "nonnegative" and slope < slope_min_allowed:
             slope_used = slope_min_allowed
-            m = np.isfinite(sig_raw) & np.isfinite(uv_raw)
-            intercept = float(np.median(sig_raw[m] - slope_used * uv_raw[m]))
+            m = np.isfinite(s_fit) & np.isfinite(u_fit)
+            intercept = float(np.median(s_fit[m] - slope_used * u_fit[m]))
             intercept_recomputed = True
             global_negative_slope_constrained = True
 
@@ -2551,11 +2550,11 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
             "warning_level": str(constraint_summary.get("constrained_slope_summary", {}).get("warning_level", "none")),
         })
 
-        uv_fit_all[:, r_idx] = intercept + slope_used * uv_raw
+        uv_fit_all[:, r_idx] = intercept + slope_used * u_fit
         slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
-            "trusted_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
-            "gated_mask": np.zeros(sig_raw.shape, dtype=bool),
+            "trusted_mask": np.isfinite(s_fit) & np.isfinite(u_fit),
+            "gated_mask": np.zeros(s_fit.shape, dtype=bool),
             "global_init_coef": {
                 "slope": float(slope_used),
                 "unconstrained_slope": float(slope),
@@ -2568,8 +2567,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
             **_constraint_metadata(constraint_summary),
             "trust_fraction": 1.0,
             "gated_fraction": 0.0,
-            "n_trusted": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
-            "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+            "n_trusted": int(np.sum(np.isfinite(s_fit) & np.isfinite(u_fit))),
+            "n_finite": int(np.sum(np.isfinite(s_fit) & np.isfinite(u_fit))),
             "n_gated_residual": 0,
             "n_gated_local_var": 0,
             "local_var_rule_enabled": False,
@@ -3268,13 +3267,15 @@ def fit_chunk_dynamic(
     Preprocessing-ownership boundary (this function owns bleach correction
     for dynamic-fit ROIs only): the temporary chunk.sig_raw/uv_raw/sig_filt/
     uv_filt bleach-corrected swap below is scoped strictly to dynamic-fit
-    dispatch and is always undone (see `finally`) before this function
-    returns. Signal-Only F0 is NOT dispatched from inside this function or
-    this swapped window, by design. Pipeline's native Signal-Only F0 assembly
-    runs strictly AFTER this function returns and chunk.sig_raw/uv_raw have
-    already been restored to their original, non-bleach-corrected values --
-    i.e. Signal-Only F0 consumes genuinely raw, unmutated signal, never
-    filtered and never bleach-corrected. That input boundary is explicit in
+    dispatch. The raw fields are always restored before this function
+    returns; corrected filtered fields remain on the existing Chunk fields so
+    the correction preview can display the exact inputs used by the fit.
+    Signal-Only F0 is NOT dispatched from inside this function or this swapped
+    window, by design. Pipeline's native Signal-Only F0 assembly runs strictly
+    AFTER this function returns and chunk.sig_raw/uv_raw have already been
+    restored to their original, non-bleach-corrected values -- i.e.
+    Signal-Only F0 consumes genuinely raw, unmutated signal, never filtered
+    and never bleach-corrected. That input boundary is explicit in
     Pipeline._compute_signal_only_f0_production and must not be changed by
     this regression helper's temporary bleach mutation.
     """
@@ -3375,6 +3376,7 @@ def fit_chunk_dynamic(
         )
 
     n_samples = int(chunk.uv_raw.shape[0])
+    dispatch_completed = False
     try:
         groups = _partition_rois_by_dynamic_fit_mode(channel_names, strategy_map)
         mode_group_counts: Dict[str, int] = {}
@@ -3423,11 +3425,24 @@ def fit_chunk_dynamic(
                 metadata_key=metadata_key,
                 effective_parameters=effective_parameters,
             )
+        dispatch_completed = True
     finally:
         chunk.sig_raw = orig_sig_raw
         chunk.uv_raw = orig_uv_raw
-        chunk.sig_filt = orig_sig_filt
-        chunk.uv_filt = orig_uv_filt
+        if bleach_mode_resolved == "none" or not dispatch_completed:
+            chunk.sig_filt = orig_sig_filt
+            chunk.uv_filt = orig_uv_filt
+        else:
+            chunk.sig_filt = (
+                None
+                if bleach_info.get("sig_filt_corrected") is None
+                else np.asarray(bleach_info["sig_filt_corrected"], dtype=float)
+            )
+            chunk.uv_filt = (
+                None
+                if bleach_info.get("uv_filt_corrected") is None
+                else np.asarray(bleach_info["uv_filt_corrected"], dtype=float)
+            )
 
     # Intentional "no ROI requested dynamic fitting" (today only reachable
     # with an explicit per_roi_correction map that is 100% non-dynamic-fit,
@@ -3438,11 +3453,24 @@ def fit_chunk_dynamic(
     # "some groups"; chunk.metadata["dynamic_fit_group_count"] (below) is
     # the explicit, unambiguous signal for "were there zero dynamic groups",
     # not an inferred-from-None convention.
+    filtered_domain_modes = {
+        "global_linear_regression",
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    }
     if bleach_mode_resolved != "none":
-        uv_fit = np.asarray(uv_fit, dtype=float) + np.asarray(
+        sig_decay_removed = np.asarray(
             bleach_info.get("sig_decay_removed", np.zeros_like(uv_fit)),
             dtype=float,
         )
+        for r_idx, roi_name in enumerate(channel_names):
+            spec = strategy_map[str(roi_name)]
+            resolved_mode = str(spec.dynamic_fit_mode)
+            if (
+                spec.strategy_family == "dynamic_fit"
+                and resolved_mode not in filtered_domain_modes
+            ):
+                uv_fit[:, r_idx] = np.asarray(uv_fit[:, r_idx], dtype=float) + sig_decay_removed[:, r_idx]
 
     _ensure_chunk_metadata(chunk)
     # Always present (possibly empty), even with zero dynamic groups: callers
@@ -3551,5 +3579,18 @@ def fit_chunk_dynamic(
         chunk.metadata["dynamic_fit_engine"] = None
         chunk.metadata["dynamic_fit_engine_info"] = None
 
-    delta_f = _assemble_delta_f_from_fit(chunk.sig_raw, uv_fit)
+    delta_signal = np.asarray(chunk.sig_raw, dtype=float).copy()
+    corrected_sig_filt = bleach_info.get("sig_filt_corrected")
+    corrected_uv_filt = bleach_info.get("uv_filt_corrected")
+    if corrected_sig_filt is not None and corrected_uv_filt is not None:
+        corrected_sig_filt = np.asarray(corrected_sig_filt, dtype=float)
+        for r_idx, roi_name in enumerate(channel_names):
+            spec = strategy_map[str(roi_name)]
+            if (
+                spec.strategy_family == "dynamic_fit"
+                and str(spec.dynamic_fit_mode) in filtered_domain_modes
+            ):
+                delta_signal[:, r_idx] = corrected_sig_filt[:, r_idx]
+
+    delta_f = _assemble_delta_f_from_fit(delta_signal, uv_fit)
     return uv_fit, delta_f
