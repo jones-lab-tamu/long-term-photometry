@@ -13,7 +13,7 @@ import pytest
 import photometry_pipeline.pipeline as pipeline_module
 import photometry_pipeline.signal_only_f0 as signal_only_module
 from photometry_pipeline.config import Config
-from photometry_pipeline.core import regression
+from photometry_pipeline.core import preprocessing, regression
 from photometry_pipeline.core.signal_only_f0_candidate import (
     compute_signal_only_f0_candidate,
 )
@@ -190,8 +190,9 @@ def test_signal_only_candidate_is_computed_once_and_persisted_baseline_is_exact(
     assert len(calls) == 2
 
     for roi_index, roi in enumerate(("ROI0", "ROI1")):
+        signal_input = np.asarray(processed.sig_filt[:, roi_index], dtype=float)
         direct = compute_signal_only_f0_candidate(
-            processed.sig_raw[:, roi_index],
+            signal_input,
             processed.time_sec,
             signal_state=processed.metadata["signal_only_f0_production_qc"][roi][
                 "signal_state"
@@ -209,7 +210,7 @@ def test_signal_only_candidate_is_computed_once_and_persisted_baseline_is_exact(
             processed.dff[:, roi_index],
             100.0
             * (
-                processed.sig_raw[:, roi_index]
+                signal_input
                 - direct["signal_only_f0_candidate_uncapped"]
             )
             / direct["signal_only_f0_candidate_uncapped"],
@@ -258,6 +259,44 @@ def test_signal_only_coverage_is_measured_against_expected_trace_length():
     pipeline = Pipeline(cfg, mode="phasic", per_roi_correction=_signal_only_map("ROI0", "ROI1"))
     pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
     assert np.isfinite(pipeline._apply_standard_analysis(fully_valid, 4).dff).all()
+
+
+def test_signal_only_uses_pre_bleach_lowpass_input_for_all_bleach_modes(monkeypatch):
+    cfg = _cfg()
+    cfg.lowpass_hz = 0.1
+    raw = _chunk()
+    expected, _ = preprocessing.lowpass_filter_with_meta(
+        raw.sig_raw, raw.fs_hz, cfg
+    )
+    seen_inputs = []
+    original = pipeline_module.compute_signal_only_f0_production
+
+    def capture(signal, *args, **kwargs):
+        seen_inputs.append(np.asarray(signal, dtype=float).copy())
+        return original(signal, *args, **kwargs)
+
+    monkeypatch.setattr(
+        pipeline_module, "compute_signal_only_f0_production", capture
+    )
+    outputs = []
+    for bleach_mode in ("none", "single_exponential", "double_exponential"):
+        mode_cfg = replace(cfg, bleach_correction_mode=bleach_mode)
+        pipeline = Pipeline(
+            mode_cfg,
+            mode="phasic",
+            per_roi_correction=_signal_only_map("ROI0", "ROI1"),
+        )
+        pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
+        outputs.append(pipeline._apply_standard_analysis(_chunk(), 4).dff.copy())
+
+    assert len(seen_inputs) == 6
+    for signal in seen_inputs[::2]:
+        np.testing.assert_allclose(signal, expected[:, 0], rtol=0.0, atol=0.0)
+    for signal in seen_inputs[1::2]:
+        np.testing.assert_allclose(signal, expected[:, 1], rtol=0.0, atol=0.0)
+    assert not np.allclose(seen_inputs[0], raw.sig_raw[:, 0])
+    for output in outputs[1:]:
+        np.testing.assert_allclose(output, outputs[0], rtol=0.0, atol=0.0)
 
     limited_edge_nan = _chunk()
     limited_edge_nan.sig_raw[:20, 0] = np.nan
@@ -683,7 +722,7 @@ def test_real_pipeline_feature_extraction_receives_canonical_selected_traces(
     assert len(captured_chunks) == 1
     chunk = captured_chunks[0]
     baseline = chunk.metadata["signal_only_f0_production_baseline"]["Region0"]
-    expected_dff = 100.0 * (chunk.sig_raw[:, 0] - baseline) / baseline
+    expected_dff = 100.0 * (chunk.sig_filt[:, 0] - baseline) / baseline
     np.testing.assert_allclose(chunk.dff[:, 0], expected_dff, rtol=0.0, atol=0.0)
     assert np.isfinite(chunk.dff[:, 0]).mean() > 0.99
     assert np.isnan(chunk.uv_fit[:, 0]).all()
@@ -751,7 +790,7 @@ def test_real_pipeline_feature_extraction_receives_canonical_selected_traces(
     mixed_baseline = mixed_chunk.metadata["signal_only_f0_production_baseline"]["Region1"]
     np.testing.assert_allclose(
         mixed_chunk.dff[:, 1],
-        100.0 * (mixed_chunk.sig_raw[:, 1] - mixed_baseline) / mixed_baseline,
+        100.0 * (mixed_chunk.sig_filt[:, 1] - mixed_baseline) / mixed_baseline,
         rtol=0.0,
         atol=0.0,
     )

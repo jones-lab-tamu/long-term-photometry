@@ -727,6 +727,7 @@ def _validate_result(
     dynamic_f0_authority: GuidedContinuousRwdDynamicF0Authority,
     accepted: object,
     segment_correction_settings_identity: str,
+    signal_only_inputs: Mapping[str, np.ndarray] | None = None,
 ) -> None:
     if not isinstance(result, GuidedContinuousRwdCorrectedSegment):
         _raise("result_identity_mismatch", "Corrected segment has the wrong type.")
@@ -808,7 +809,32 @@ def _validate_result(
                 "Per-ROI QC evidence is invalid.",
                 roi=item.roi_id,
             ) from exc
-        expected_delta = result.raw_signal_values[:, index] - result.correction_reference_values[:, index]
+        if item.strategy_family == SIGNAL_ONLY_STRATEGY:
+            signal_input = (
+                None
+                if signal_only_inputs is None
+                else signal_only_inputs.get(item.roi_id)
+            )
+            if signal_input is None:
+                elapsed = np.asarray(
+                    raw_segment.target_elapsed_seconds, dtype=float
+                )
+                sampling_rate_hz = 1.0 / float(np.median(np.diff(elapsed)))
+                signal_input, _ = preprocessing.lowpass_filter_with_meta(
+                    raw_segment.signal_values[:, index : index + 1],
+                    sampling_rate_hz,
+                    accepted.config,
+                )
+                signal_input = np.asarray(signal_input[:, 0], dtype=float)
+            expected_delta = (
+                np.asarray(signal_input, dtype=float)
+                - result.correction_reference_values[:, index]
+            )
+        else:
+            expected_delta = (
+                result.raw_signal_values[:, index]
+                - result.correction_reference_values[:, index]
+            )
         if not np.allclose(result.delta_f_values[:, index], expected_delta, rtol=1e-12, atol=1e-12):
             _raise("result_identity_mismatch", "Delta-F formula is inconsistent.", roi=item.roi_id)
         if item.strategy_family == "dynamic_fit":
@@ -924,6 +950,7 @@ def correct_guided_continuous_rwd_segment(
     reference = np.empty((rows, columns), dtype=np.float64)
     delta_f = np.empty((rows, columns), dtype=np.float64)
     dff = np.empty((rows, columns), dtype=np.float64)
+    signal_only_inputs: dict[str, np.ndarray] = {}
     per_roi: list[GuidedContinuousRwdPerRoiCorrectionResult] = []
     local_time = raw.target_elapsed_seconds - raw.target_elapsed_seconds[0]
     for roi_index, binding in enumerate(accepted.bindings):
@@ -966,9 +993,17 @@ def correct_guided_continuous_rwd_segment(
                 "global_fit_n_used": authority_value.global_fit_n_used,
             }
         elif binding.selected_strategy == SIGNAL_ONLY_STRATEGY:
+            signal_only_input, _ = preprocessing.lowpass_filter_with_meta(
+                raw.signal_values[:, roi_index : roi_index + 1],
+                1.0 / float(target_grid.cadence_fraction),
+                segment_correction_config,
+            )
+            signal_only_inputs[binding.roi_id] = np.asarray(
+                signal_only_input[:, 0], dtype=np.float64
+            )
             try:
                 signal_only = compute_signal_only_f0_production(
-                    raw.signal_values[:, roi_index],
+                    np.asarray(signal_only_input[:, 0], dtype=float),
                     local_time,
                     signal_state_config=dict(vars(segment_correction_config)),
                     signal_only_f0_config=dict(vars(segment_correction_config)),
@@ -1073,5 +1108,6 @@ def correct_guided_continuous_rwd_segment(
         dynamic_f0_authority=dynamic_f0_authority,
         accepted=accepted,
         segment_correction_settings_identity=segment_correction_settings_identity,
+        signal_only_inputs=signal_only_inputs,
     )
     return result

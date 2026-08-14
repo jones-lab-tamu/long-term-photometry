@@ -204,6 +204,66 @@ def _contract_with_override(contract, name, value):
     return replace(contract, fixed_config_overrides=overrides)
 
 
+def _all_signal_only_artifacts(accepted_case, *, bleach_mode="none"):
+    binding, grid, draft, contract = accepted_case
+    signal_only_draft = replace(
+        draft,
+        global_correction_strategy="signal_only_f0",
+        lowpass_hz=0.1,
+        bleach_correction_mode=bleach_mode,
+        per_roi_correction_strategy_choices=_choices(
+            {"ROI1": "signal_only_f0", "ROI2": "signal_only_f0"}
+        ),
+    )
+    signal_only_contract = _contract_with_override(
+        _contract_with_override(contract, "lowpass_hz", 0.1),
+        "bleach_correction_mode",
+        bleach_mode,
+    )
+    signal_only_binding = build_guided_continuous_rwd_review_binding(
+        signal_only_draft,
+        recording=binding.recording,
+        continuity_evaluation=binding.continuity_evaluation,
+        current_source_path=binding.current_source_path,
+    )
+    block_plan = block_subject.build_guided_continuous_rwd_block_plan(grid)
+    segment_plan = c4a.build_guided_continuous_rwd_correction_segment_plan(
+        signal_only_binding,
+        grid,
+        accepted_draft=signal_only_draft,
+        startup_mapping_contract=signal_only_contract,
+    )
+    f0 = c4a.prepare_guided_continuous_rwd_dynamic_f0_authority(
+        signal_only_binding,
+        grid,
+        block_plan,
+        segment_plan,
+        lambda: _projected(signal_only_binding, grid, block_plan),
+        accepted_draft=signal_only_draft,
+        startup_mapping_contract=signal_only_contract,
+    )
+    raw = next(
+        c4a.iter_assemble_guided_continuous_rwd_correction_segments(
+            signal_only_binding,
+            grid,
+            block_plan,
+            segment_plan,
+            _projected(signal_only_binding, grid, block_plan),
+            accepted_draft=signal_only_draft,
+            startup_mapping_contract=signal_only_contract,
+        )
+    )
+    return (
+        signal_only_binding,
+        grid,
+        signal_only_draft,
+        signal_only_contract,
+        segment_plan,
+        f0,
+        raw,
+    )
+
+
 def _correct(artifacts, **kwargs):
     binding, grid, draft, contract, plan, f0, raw = artifacts
     return subject.correct_guided_continuous_rwd_segment(
@@ -216,6 +276,56 @@ def _correct(artifacts, **kwargs):
         startup_mapping_contract=kwargs.get("contract", contract),
         cancellation_requested=kwargs.get("cancellation"),
     )
+
+
+@pytest.mark.parametrize(
+    "bleach_mode", ("none", "single_exponential", "double_exponential")
+)
+def test_all_signal_only_continuous_uses_lowpass_before_f0(
+    accepted_case, bleach_mode, monkeypatch
+):
+    artifacts = _all_signal_only_artifacts(
+        accepted_case, bleach_mode=bleach_mode
+    )
+    binding, grid, draft, contract, plan, f0, raw = artifacts
+    seen_inputs = []
+    original = subject.compute_signal_only_f0_production
+
+    def capture(signal, *args, **kwargs):
+        seen_inputs.append(np.asarray(signal, dtype=float).copy())
+        return original(signal, *args, **kwargs)
+
+    monkeypatch.setattr(subject, "compute_signal_only_f0_production", capture)
+    result = _correct(artifacts)
+    accepted = c4a._resolve_accepted_correction_context(
+        binding, draft, contract
+    )
+    expected, _ = preprocessing.lowpass_filter_with_meta(
+        raw.signal_values, 10.0, accepted.config
+    )
+    assert len(seen_inputs) == 2
+    for roi_index in (0, 1):
+        np.testing.assert_allclose(
+            seen_inputs[roi_index], expected[:, roi_index], rtol=0.0, atol=0.0
+        )
+        expected_signal = original(
+            expected[:, roi_index],
+            raw.target_elapsed_seconds - raw.target_elapsed_seconds[0],
+            signal_state_config=dict(vars(accepted.config)),
+            signal_only_f0_config=dict(vars(accepted.config)),
+            coverage_fraction=accepted.config.signal_only_f0_min_coverage_fraction,
+            f0_min_value=accepted.config.f0_min_value,
+        )
+        np.testing.assert_allclose(
+            result.correction_reference_values[:, roi_index],
+            expected_signal.baseline,
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            result.dff_values[:, roi_index], expected_signal.dff, rtol=0.0, atol=0.0
+        )
+    assert not np.allclose(seen_inputs[0], raw.signal_values[:, 0])
 
 
 def test_mixed_segment_matches_native_global_and_signal_only_references(accepted_case):
@@ -271,8 +381,13 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
         rtol=1e-11,
         atol=1e-12,
     )
+    expected_signal_input, _ = preprocessing.lowpass_filter_with_meta(
+        raw.signal_values[:, 1:2],
+        10.0,
+        accepted.config,
+    )
     expected_signal = compute_signal_only_f0_production(
-        raw.signal_values[:, 1],
+        expected_signal_input[:, 0],
         local_time,
         signal_state_config=dict(vars(accepted.config)),
         signal_only_f0_config=dict(vars(accepted.config)),
@@ -291,6 +406,7 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
             time_sec=local_time,
             uv_raw=raw.control_values[:, 1:2].copy(),
             sig_raw=raw.signal_values[:, 1:2].copy(),
+            sig_filt=expected_signal_input.copy(),
             fs_hz=10.0,
             channel_names=["ROI2"],
             metadata={},
@@ -298,6 +414,7 @@ def test_mixed_segment_matches_native_global_and_signal_only_references(accepted
         roi_index=0,
         roi_id="ROI2",
         chunk_id=raw.segment_index,
+        signal_input=expected_signal_input,
     )
     np.testing.assert_array_equal(result.delta_f_values[:, 1], pipeline_values[0])
     np.testing.assert_array_equal(result.dff_values[:, 1], pipeline_values[1])

@@ -34,6 +34,7 @@ from photometry_pipeline.guided_diagnostic_cache import (
     write_json_file,
 )
 from photometry_pipeline.config import Config
+from photometry_pipeline.core import preprocessing
 from photometry_pipeline.core.types import Chunk
 
 
@@ -185,16 +186,12 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
         axes = list(np.asarray(axes).reshape(-1))
         assert len(axes) == 3
         label = labels[method]
-        expected_top_title = (
-            "Original Signal and Reference"
-            if method == "signal_only_f0"
-            else "Correction Signal and Reference"
-        )
+        expected_top_title = "Correction Signal and Reference"
         assert axes[0].get_title() == expected_top_title
         assert axes[1].get_title() == "Correction Reference"
         assert axes[2].get_title() == "Corrected dF/F"
         assert [line.get_label() for line in axes[0].lines] == (
-            ["Raw signal", "Raw reference"]
+            ["Signal used for correction", "Raw reference"]
             if method == "signal_only_f0"
             else ["Signal used for correction", "Reference used for correction"]
         )
@@ -211,7 +208,7 @@ def test_strategy_specific_preview_images_use_ordered_three_panel_arrays(
             assert evidence["dff_scale"] == "percent"
             assert "Fitted reference" not in axes[1].get_title()
             assert [line.get_label() for line in axes[1].lines] == [
-                "Raw signal",
+                "Signal used for correction",
                 "F0 baseline",
             ]
             assert axes[1].lines[0].get_color() == RAW_SIGNAL_COLOR
@@ -504,6 +501,7 @@ def _write_realistic_rwd_session(
     offset: float,
     sample_count: int = 12000,
     final_timestamp_sec: float | None = None,
+    signal_frequency_hz: float | None = None,
 ) -> None:
     path.parent.mkdir(parents=True)
     rows = [
@@ -524,7 +522,12 @@ def _write_realistic_rwd_session(
         )
     for index, timestamp_ms in enumerate(timestamps_ms):
         uv1 = offset + 100.0 + 0.01 * np.sin(index / 50.0)
-        sig1 = offset + 125.0 + 0.012 * np.sin(index / 50.0)
+        if signal_frequency_hz is None:
+            sig1 = offset + 125.0 + 0.012 * np.sin(index / 50.0)
+        else:
+            sig1 = offset + 125.0 + 0.2 * np.sin(index / 50.0) + 3.0 * np.sin(
+                2.0 * np.pi * float(signal_frequency_hz) * timestamp_ms / 1000.0
+            )
         uv2 = offset + 90.0 + 0.008 * np.cos(index / 60.0)
         sig2 = offset + 112.0 + 0.01 * np.cos(index / 60.0)
         rows.append(
@@ -1405,6 +1408,91 @@ def test_local_preview_signal_only_f0_does_not_require_bleach_context(
 
     assert result["status"] == "success", result["errors"]
     assert result["signal_only_f0_preview_evidence"]["valid"] is True
+
+
+def test_signal_only_preview_uses_lowpass_and_ignores_bleach_modes(tmp_path):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(
+        source,
+        offset=0.0,
+        sample_count=12000,
+        signal_frequency_hz=4.0,
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 0.5\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+    cfg = Config.from_yaml(config)
+    raw_chunk = correction_preview_module.load_chunk(source, "rwd", cfg, 0)
+    expected, _ = preprocessing.lowpass_filter_with_meta(
+        raw_chunk.sig_raw[:, :1], raw_chunk.fs_hz, cfg
+    )
+    evidence_by_mode = {}
+    for bleach_mode in ("none", "single_exponential", "double_exponential"):
+        result = run_guided_local_correction_preview(
+            source,
+            tmp_path / f"preview-{bleach_mode}",
+            roi="CH1",
+            chunk_index=0,
+            adapter_chunk_index=0,
+            input_format="rwd",
+            config_path=config,
+            methods=[],
+            include_signal_only_f0_preview=True,
+            preview_id=f"signal-only-{bleach_mode}",
+            guided_lowpass_hz=0.5,
+            guided_bleach_correction_mode=bleach_mode,
+        )
+        assert result["status"] == "success", result["errors"]
+        evidence = result["signal_only_f0_preview_evidence"]
+        assert evidence["valid"] is True
+        np.testing.assert_allclose(
+            evidence["signal_raw"], expected[:, 0], rtol=0.0, atol=0.0
+        )
+        evidence_by_mode[bleach_mode] = evidence
+
+    assert not np.allclose(evidence_by_mode["none"]["signal_raw"], raw_chunk.sig_raw[:, 0])
+    for key in ("signal_raw", "signal_only_f0_uncapped", "preview_dff"):
+        for bleach_mode in ("single_exponential", "double_exponential"):
+            np.testing.assert_allclose(
+                evidence_by_mode[bleach_mode][key],
+                evidence_by_mode["none"][key],
+                rtol=0.0,
+                atol=0.0,
+            )
+
+    in_memory = compute_guided_local_preview_dff_trace_in_memory(
+        source,
+        roi="CH1",
+        chunk_index=0,
+        adapter_chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        strategy_family="signal_only_f0",
+        strategy="signal_only_f0",
+        guided_lowpass_hz=0.5,
+        guided_bleach_correction_mode="double_exponential",
+    )
+    assert in_memory["valid"] is True
+    np.testing.assert_allclose(
+        in_memory["signal_raw"],
+        evidence_by_mode["none"]["signal_raw"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        in_memory["preview_dff"],
+        evidence_by_mode["none"]["preview_dff"],
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_on_demand_local_preview_service_is_no_write_and_strategy_exact(

@@ -324,14 +324,14 @@ def render_guided_correction_preview_visuals(
                 )
                 if method == "signal_only_f0":
                     panel_titles = [
-                        "Original Signal and Reference",
+                        "Correction Signal and Reference",
                         "Correction Reference",
                         "Corrected dF/F",
                     ]
                     trace_labels = [
-                        "Raw signal",
+                        "Signal used for correction",
                         "Raw reference",
-                        "Raw signal",
+                        "Signal used for correction",
                         "F0 baseline",
                         "Corrected dF/F",
                     ]
@@ -366,11 +366,7 @@ def render_guided_correction_preview_visuals(
                 axes[0].plot(
                     time_plot,
                     series["sig_raw"][::stride],
-                    label=(
-                        "Raw signal"
-                        if method == "signal_only_f0"
-                        else "Signal used for correction"
-                    ),
+                    label="Signal used for correction",
                     color=RAW_SIGNAL_COLOR,
                     linewidth=1.2,
                 )
@@ -393,7 +389,7 @@ def render_guided_correction_preview_visuals(
                     axes[1].plot(
                         time_plot,
                         series["sig_raw"][::stride],
-                        label="Raw signal",
+                        label="Signal used for correction",
                         color=RAW_SIGNAL_COLOR,
                         linewidth=1.2,
                     )
@@ -858,8 +854,13 @@ def compute_guided_local_preview_dff_trace_in_memory(
         if bleach_context is not None:
             record["bleach_correction_context"] = bleach_context
         if family == "signal_only_f0" and selected == "signal_only_f0":
+            signal_only_input, _ = preprocessing.lowpass_filter_with_meta(
+                np.asarray(record["sig_raw"], dtype=float).reshape(-1, 1),
+                float(record["fs_hz"]),
+                cfg,
+            )
             evidence = compute_guided_local_signal_only_f0_preview(
-                record["sig_raw"],
+                np.asarray(signal_only_input[:, 0], dtype=float),
                 record["time_sec"],
                 roi_id=str(roi),
             )
@@ -2662,9 +2663,14 @@ def run_guided_local_correction_preview(
 
     signal_only_f0_preview = None
     if include_signal_only_f0_preview:
+        signal_only_input, _ = preprocessing.lowpass_filter_with_meta(
+            np.asarray(record["sig_raw"], dtype=float).reshape(-1, 1),
+            float(record["fs_hz"]),
+            base_cfg,
+        )
         signal_only_f0_preview = (
             compute_guided_local_signal_only_f0_preview(
-                record["sig_raw"],
+                np.asarray(signal_only_input[:, 0], dtype=float),
                 record["time_sec"],
                 roi_id=str(roi),
             )

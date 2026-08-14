@@ -3273,13 +3273,11 @@ def fit_chunk_dynamic(
     returns; corrected filtered fields remain on the existing Chunk fields so
     the correction preview can display the exact inputs used by the fit.
     Signal-Only F0 is NOT dispatched from inside this function or this swapped
-    window, by design. Pipeline's native Signal-Only F0 assembly runs strictly
-    AFTER this function returns and chunk.sig_raw/uv_raw have already been
-    restored to their original, non-bleach-corrected values -- i.e.
-    Signal-Only F0 consumes genuinely raw, unmutated signal, never filtered
-    and never bleach-corrected. That input boundary is explicit in
-    Pipeline._compute_signal_only_f0_production and must not be changed by
-    this regression helper's temporary bleach mutation.
+    window, by design. Pipeline captures the ordinary low-pass signal before
+    entering this function and supplies that preserved input to its native
+    Signal-Only F0 assembly after this function returns. The explicit handoff
+    prevents this regression helper's temporary bleach mutation from becoming
+    Signal-Only F0 input.
     """
     channel_names = _resolve_full_channel_names(chunk)
     fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")

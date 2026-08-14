@@ -2501,6 +2501,9 @@ class Pipeline:
         
         chunk.uv_filt = uv_filt
         chunk.sig_filt = sig_filt
+        # Preserve the ordinary low-pass domain before dynamic dispatch can
+        # replace chunk.sig_filt with a bleach-corrected preview input.
+        signal_only_input = np.asarray(sig_filt, dtype=float).copy()
         
         # Warning aggregation (NaN Safety Policy 2)
         for m in [uv_meta, sig_meta]:
@@ -2636,6 +2639,7 @@ class Pipeline:
                              roi_index=roi_index,
                              roi_id=roi_name,
                              chunk_id=chunk_id,
+                             signal_input=signal_only_input,
                          )
                      )
                      chunk.delta_f[:, roi_index] = canonical_delta_f
@@ -2936,6 +2940,7 @@ class Pipeline:
         roi_index: int,
         roi_id: str,
         chunk_id: int,
+        signal_input: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, dict]:
         """Compute and validate one canonical native Signal-Only F0 trace.
 
@@ -2943,10 +2948,21 @@ class Pipeline:
         accepted standalone Signal-Only F0 formula. The delegated pure helper
         computes the candidate once; the diagnostic recorder reuses its
         returned metadata and baseline rather than invoking it a second time.
+        Production callers provide the ordinary low-pass signal captured
+        before dynamic/bleach dispatch. Direct callers use the available
+        filtered field, or raw signal only when no filtered field exists.
         """
+        if signal_input is None:
+            signal_source = (
+                chunk.sig_filt
+                if chunk.sig_filt is not None
+                else chunk.sig_raw
+            )
+        else:
+            signal_source = np.asarray(signal_input, dtype=float)
         try:
             result = compute_signal_only_f0_production(
-                chunk.sig_raw[:, roi_index],
+                signal_source[:, roi_index],
                 chunk.time_sec,
                 signal_state_config=self._signal_state_config(),
                 signal_only_f0_config=self._signal_only_f0_config(),
