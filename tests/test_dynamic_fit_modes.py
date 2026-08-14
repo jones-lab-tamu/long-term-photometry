@@ -440,6 +440,36 @@ def test_bleach_single_exponential_fits_signal_and_isosbestic_independently():
     assert abs(sig_tau - iso_tau) > 5.0
 
 
+def test_single_exponential_rejects_negative_amplitude_candidates():
+    fs = 10.0
+    time_sec = np.arange(400, dtype=float) / fs
+    increasing_trace = 100.0 - 20.0 * np.exp(-time_sec / 10.0)
+
+    result = regression_module._fit_single_exponential_with_offset_at_times(
+        increasing_trace,
+        time_sec,
+        fs,
+    )
+
+    assert result["fit_succeeded"] is False
+    assert result["fit_failure_reason"] == "lstsq_fit_failed"
+
+
+def test_single_exponential_accepts_nonnegative_positive_decay_amplitude():
+    fs = 10.0
+    time_sec = np.arange(400, dtype=float) / fs
+    decaying_trace = 100.0 + 20.0 * np.exp(-time_sec / 10.0)
+
+    result = regression_module._fit_single_exponential_with_offset_at_times(
+        decaying_trace,
+        time_sec,
+        fs,
+    )
+
+    assert result["fit_succeeded"] is True
+    assert result["amplitude"] >= 0.0
+
+
 def test_bleach_double_exponential_improves_two_timescale_fit_rmse_vs_single():
     n = 3600
     fs = 40.0

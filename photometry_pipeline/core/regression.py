@@ -390,6 +390,8 @@ def _fit_single_exponential_with_offset_at_times(
         rmse = float(np.sqrt(np.mean((y_fit - y_hat) ** 2)))
         if not (np.isfinite(amplitude) and np.isfinite(offset) and np.isfinite(rmse)):
             continue
+        if amplitude < 0.0:
+            continue
         if best is None or rmse < best["fit_rmse"]:
             best = {
                 "amplitude": amplitude,
