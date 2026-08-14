@@ -7306,11 +7306,13 @@ def test_status_strip_hidden_while_guided_idle_visible_in_full_control(window, q
     # now hidden too -- not just its children -- so no empty rounded
     # rectangle remains under the Tools menu.
     assert window._status_header_card.isHidden() is True
+    assert window._status_strip.isHidden() is True
 
     # Switching to Full Control must restore all of them, including the card.
     window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
     qapp.processEvents()
     assert window._status_header_card.isHidden() is False
+    assert window._status_strip.isHidden() is False
     for widget in strip_widgets:
         assert widget.isHidden() is False
 
@@ -7327,6 +7329,7 @@ def test_status_strip_stays_visible_during_active_full_control_run_even_on_guide
     qapp.processEvents()
 
     assert window._status_header_card.isHidden() is False
+    assert window._status_strip.isHidden() is False
     assert window._status_label.isHidden() is False
     assert window._progress_bar.isHidden() is False
     assert window._left_pane_toggle_btn.isHidden() is False
@@ -7355,6 +7358,7 @@ def test_status_strip_card_stays_visible_for_preview_badge_during_idle_guided(
     qapp.processEvents()
 
     assert window._status_header_card.isHidden() is False
+    assert window._status_strip.isHidden() is False
     assert window._preview_badge.isHidden() is False
     assert window._status_label.isHidden() is True
     assert window._progress_bar.isHidden() is True
@@ -7364,6 +7368,7 @@ def test_status_strip_card_stays_visible_for_preview_badge_during_idle_guided(
     window._preview_badge.hide()
     window._refresh_status_strip_visibility()
     assert window._status_header_card.isHidden() is True
+    assert window._status_strip.isHidden() is True
 
 
 def test_guided_run_live_status_panel_unaffected_by_status_strip_visibility(

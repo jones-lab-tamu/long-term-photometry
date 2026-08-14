@@ -3531,7 +3531,8 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(12)
-        main_layout.addWidget(self._build_status_strip(), 0)
+        self._status_strip = self._build_status_strip()
+        main_layout.addWidget(self._status_strip, 0)
         main_layout.addWidget(self._build_main_body(), 1)
         self._apply_shell_chrome_styles()
         self._apply_results_idle_placeholder()
@@ -3738,8 +3739,12 @@ class MainWindow(QMainWindow):
             preview_badge is not None and not preview_badge.isHidden()
         )
         card = getattr(self, "_status_header_card", None)
+        show_strip = not (idle_guided and not preview_badge_visible)
         if card is not None:
-            card.setVisible(not (idle_guided and not preview_badge_visible))
+            card.setVisible(show_strip)
+        strip = getattr(self, "_status_strip", None)
+        if strip is not None:
+            strip.setVisible(show_strip)
 
     def _build_full_control_body(self) -> QWidget:
         """Existing fixed major panes: upper-left controls, lower-left log, right results."""
