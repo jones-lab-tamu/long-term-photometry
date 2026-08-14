@@ -1139,6 +1139,9 @@ def test_live_progress_attaches_after_run_allocation_and_tracks_stages(
     assert window._guided_run_elapsed_timer is None
     assert window._guided_run_live_status_group.isHidden()
     assert window._guided_continuous_rwd_completed_run_dir == str(run_dir)
+    logged_lines = window._log_view.toPlainText().splitlines()
+    assert logged_lines.count("Guided Run started.") == 1
+    assert logged_lines.count("Guided Run completed successfully.") == 1
     assert handler_thread_ids == [gui_thread_id]
     assert worker_signal_thread_ids
     assert worker_signal_thread_ids[0] != gui_thread_id

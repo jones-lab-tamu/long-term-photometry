@@ -18114,6 +18114,7 @@ class MainWindow(QMainWindow):
             )
             self._refresh_guided_run_readiness_display()
             return
+        self._append_log("Guided Run completed successfully.")
         self._guided_continuous_rwd_completed_run_dir = run_dir
         self._current_run_dir = run_dir
         self._refresh_guided_mode_display()
@@ -19382,6 +19383,7 @@ class MainWindow(QMainWindow):
             )
         )
         thread.finished.connect(thread.deleteLater)
+        self._append_log("Guided Run started.")
         thread.start()
 
     def _on_guided_run_execution_succeeded(self, worker, result) -> None:
@@ -19584,6 +19586,11 @@ class MainWindow(QMainWindow):
     def _finish_guided_backend_execution_with_result(self, result) -> None:
         """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
+        if (
+            getattr(result, "status", "")
+            == "wrapper_completed_needs_review_loading"
+        ):
+            self._append_log("Guided Run completed successfully.")
         blocking_issues = getattr(result, "blocking_issues", None) or ()
         format_handoff_refused = (
             getattr(result, "status", "") == "wrapper_failed"

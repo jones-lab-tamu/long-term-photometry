@@ -318,6 +318,7 @@ def test_ready_click_calls_backend_seam_once_with_real_request(
 
     monkeypatch.setattr(backend, "execute_guided_backend_run", execute)
     _set_ready(window, startup_request)
+    window._log_view.clear()
     window._guided_run_btn.click()
     # Immediately after click: control has returned, worker is dispatched.
     assert window._guided_backend_execution_active is True
@@ -329,6 +330,9 @@ def test_ready_click_calls_backend_seam_once_with_real_request(
     assert window._guided_run_readiness_label.text() == "Guided Run has started."
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_backend_execution_active is False
+    logged_lines = window._log_view.toPlainText().splitlines()
+    assert logged_lines.count("Guided Run started.") == 1
+    assert logged_lines.count("Guided Run completed successfully.") == 0
 
 
 def test_run_click_starts_worker_and_returns_control_before_completion(
@@ -431,6 +435,7 @@ def test_click_refuses_if_readiness_becomes_stale_after_enablement(
         "execute_guided_backend_run",
         lambda **_kwargs: pytest.fail("backend called for stale readiness"),
     )
+    window._log_view.clear()
     window._guided_run_btn.click()
     assert window._guided_run_readiness.status == "validation_stale"
     assert window._guided_run_btn.isEnabled() is False
@@ -438,6 +443,7 @@ def test_click_refuses_if_readiness_becomes_stale_after_enablement(
     # Stale revision is caught before any worker is launched.
     assert window._guided_backend_execution_active is False
     assert window._guided_run_execution_thread is None
+    assert "Guided Run started." not in window._log_view.toPlainText()
 
 
 @pytest.mark.parametrize(
@@ -566,6 +572,7 @@ def test_wrapper_failure_surfaces_actionable_scientist_message(
         lambda *, request, runner=None: result,
     )
     _set_ready(window, startup_request)
+    window._log_view.clear()
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     detail = window._guided_run_execution_details_label.text()
@@ -584,6 +591,7 @@ def test_wrapper_failure_surfaces_actionable_scientist_message(
     assert "guided_manifest_parser_contract_mismatch" in logged
     assert "wrapper_returncode=1" in logged
     assert status in logged
+    assert logged.count("Guided Run completed successfully.") == 0
 
 
 def test_csv_format_handoff_refusal_is_visible_in_guided_run(
@@ -794,6 +802,7 @@ def test_completed_result_does_not_auto_load_or_claim_success(
         lambda *_args, **_kwargs: pytest.fail("Review auto-loaded"),
     )
     _set_ready(window, startup_request)
+    window._log_view.clear()
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
     assert completed.requires_completed_run_loader_validation is True
@@ -806,6 +815,9 @@ def test_completed_result_does_not_auto_load_or_claim_success(
     # visible regardless of setVisible(True); isEnabled() is unaffected by
     # that and reflects the same "ready" gate.)
     assert window._guided_load_completed_run_for_review_btn.isEnabled() is True
+    logged_lines = window._log_view.toPlainText().splitlines()
+    assert logged_lines.count("Guided Run started.") == 1
+    assert logged_lines.count("Guided Run completed successfully.") == 1
     # Thread/worker cleanup must leave no dangling reference.
     assert window._guided_run_execution_worker is None
 
