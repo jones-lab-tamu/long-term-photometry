@@ -3527,6 +3527,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("appShellRoot")
         self.setCentralWidget(central)
+        self._log_window = self._build_application_log_window()
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(12)
@@ -3660,6 +3661,38 @@ class MainWindow(QMainWindow):
             lambda _idx: self._refresh_status_strip_visibility()
         )
         return tabs
+
+    def _build_application_log_window(self) -> QDialog:
+        """Build the single reusable application-log window."""
+        window = QDialog(self)
+        window.setObjectName("applicationLogWindow")
+        window.setWindowTitle("Application Log")
+        window.setModal(False)
+        window.setWindowModality(Qt.NonModal)
+        window.setAttribute(Qt.WA_DeleteOnClose, False)
+        window.resize(760, 460)
+
+        layout = QVBoxLayout(window)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        self._log_view = QPlainTextEdit(window)
+        self._log_view.setObjectName("applicationLogView")
+        self._log_view.setReadOnly(True)
+        self._log_view.setFont(QFont("Consolas", 9))
+        self._log_view.setMaximumBlockCount(10000)
+        self._log_view.setMinimumHeight(180)
+        layout.addWidget(self._log_view)
+        return window
+
+    def _show_application_log(self) -> None:
+        """Show and focus the one reusable application-log window."""
+        window = self._log_window
+        if window.isMinimized():
+            window.showNormal()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self._log_view.setFocus()
 
     _STATUS_STRIP_FULL_CONTROL_ONLY_WIDGETS = (
         "_status_label",
@@ -3841,8 +3874,7 @@ class MainWindow(QMainWindow):
 
         intro = QLabel(
             "Guided Workflow walks you through setup, evidence-backed choices, "
-            "checking your setup, and running supported analyses. Some advanced "
-            "or unsupported configurations may still need Full Control."
+            "checking your setup, and running supported analyses."
         )
         intro.setWordWrap(True)
         intro.setObjectName("guidedWorkflowStageNotice")
@@ -3859,6 +3891,12 @@ class MainWindow(QMainWindow):
             self._guided_workflow_stepper.addItem(item)
         self._guided_workflow_stepper.setCurrentRow(0)
         stepper_layout.addWidget(self._guided_workflow_stepper, 1)
+
+        self._guided_view_log_btn = QPushButton("View Log")
+        self._guided_view_log_btn.setObjectName("guidedViewLogButton")
+        self._guided_view_log_btn.setToolTip("Open the application log.")
+        self._guided_view_log_btn.clicked.connect(self._show_application_log)
+        stepper_layout.addWidget(self._guided_view_log_btn)
 
         self._guided_workflow_stack = QStackedWidget()
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
@@ -26466,16 +26504,9 @@ class MainWindow(QMainWindow):
         controls_scroll.setObjectName("workflowControlsScroll")
 
         log_group = self._build_log_panel()
-        self._log_group = log_group
 
         layout.addWidget(controls_scroll, 1)
         layout.addWidget(log_group, 0)
-        self._sync_live_log_disclosure_layout(
-            expanded=bool(
-                hasattr(self, "_live_log_disclosure_btn")
-                and self._live_log_disclosure_btn.isChecked()
-            )
-        )
         return pane
 
     def _refresh_left_column_width_clamp(self) -> None:
@@ -27698,74 +27729,19 @@ class MainWindow(QMainWindow):
         group = QGroupBox("Live Log")
         group.setObjectName("liveLogSection")
         group.setProperty("workflowSection", True)
+        group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        group.setMaximumHeight(120)
         layout = QVBoxLayout(group)
         layout.setSpacing(6)
 
-        disclosure_row = QHBoxLayout()
-        self._live_log_disclosure_btn = QToolButton()
-        self._live_log_disclosure_btn.setText("Log output")
-        self._live_log_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._live_log_disclosure_btn.setArrowType(Qt.RightArrow)
-        self._live_log_disclosure_btn.setCheckable(True)
-        self._live_log_disclosure_btn.setChecked(False)
-        self._live_log_disclosure_btn.setAutoRaise(True)
-        self._live_log_disclosure_btn.setToolTip(
-            "Expand to inspect accumulated run output and diagnostics."
+        hint = QLabel(
+            "Open View Log from Guided Workflow to inspect accumulated run output."
         )
-        self._live_log_disclosure_btn.toggled.connect(self._on_live_log_disclosure_toggled)
-        disclosure_row.addWidget(self._live_log_disclosure_btn)
-        disclosure_row.addStretch()
-        layout.addLayout(disclosure_row)
-
-        self._live_log_collapsed_hint = QLabel(
-            "Hidden during normal use. Expand to inspect run output."
-        )
-        self._live_log_collapsed_hint.setWordWrap(True)
-        self._live_log_collapsed_hint.setStyleSheet("font-size: 11px; color: #5f6b7a;")
-        layout.addWidget(self._live_log_collapsed_hint)
-
-        self._live_log_content_container = QWidget()
-        content_layout = QVBoxLayout(self._live_log_content_container)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
-        layout.addWidget(self._live_log_content_container)
-
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setFont(QFont("Consolas", 9))
-        self._log_view.setMaximumBlockCount(10000)
-        self._log_view.setMinimumHeight(180)
-        content_layout.addWidget(self._log_view)
-        self._on_live_log_disclosure_toggled(False)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size: 11px; color: #5f6b7a;")
+        layout.addWidget(hint)
 
         return group
-
-    def _sync_live_log_disclosure_layout(self, *, expanded: bool) -> None:
-        left_layout = getattr(self, "_left_pane_layout", None)
-        if left_layout is not None:
-            left_layout.setStretch(2, 3 if expanded else 1)
-            left_layout.setStretch(3, 2 if expanded else 0)
-            left_layout.invalidate()
-            left_layout.activate()
-        log_group = getattr(self, "_log_group", None)
-        if log_group is not None:
-            if expanded:
-                log_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-                log_group.setMaximumHeight(16777215)
-            else:
-                log_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-                log_group.setMaximumHeight(120)
-
-    def _on_live_log_disclosure_toggled(self, expanded: bool) -> None:
-        if hasattr(self, "_live_log_content_container"):
-            self._live_log_content_container.setVisible(expanded)
-        if hasattr(self, "_live_log_collapsed_hint"):
-            self._live_log_collapsed_hint.setVisible(not expanded)
-        if hasattr(self, "_live_log_disclosure_btn"):
-            self._live_log_disclosure_btn.setArrowType(
-                Qt.DownArrow if expanded else Qt.RightArrow
-            )
-        self._sync_live_log_disclosure_layout(expanded=expanded)
 
     def _refresh_results_workspace_summary(self) -> None:
         if not hasattr(self, "_results_summary_title_label"):

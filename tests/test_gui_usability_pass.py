@@ -8,7 +8,7 @@ import yaml
 from PySide6.QtCore import Qt, QPoint, QSettings
 from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter, QToolButton
+from PySide6.QtWidgets import QApplication, QSizePolicy, QDialog, QGroupBox, QScrollArea, QSplitter, QToolButton
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -941,55 +941,69 @@ def test_sessions_per_hour_warning_is_contextual_and_wrapped(window, qapp):
     assert window._sph_edit.parentWidget() is window._sph_field_container
 
 
-def test_live_log_disclosure_defaults_collapsed(window, qapp):
+def test_application_log_viewer_is_mainwindow_owned(window, qapp):
     window.show()
     qapp.processEvents()
 
-    assert hasattr(window, "_live_log_disclosure_btn")
-    assert hasattr(window, "_live_log_content_container")
-    assert hasattr(window, "_live_log_collapsed_hint")
-    assert hasattr(window, "_log_view")
-    assert not window._live_log_disclosure_btn.isChecked()
-    assert not window._live_log_content_container.isVisibleTo(window)
-    assert window._live_log_collapsed_hint.isVisibleTo(window)
+    assert isinstance(window._log_window, QDialog)
+    assert window._log_window.parent() is window
+    assert window._log_view.parentWidget() is window._log_window
+    assert window._log_view.isReadOnly()
+    assert window._log_view.maximumBlockCount() == 10000
+    assert not window._log_window.isVisible()
 
 
-def test_live_log_disclosure_toggle_and_log_content_persists(window, qapp):
+def test_view_log_reuses_window_and_preserves_log_content(window, qapp):
     window.show()
     qapp.processEvents()
 
     window._log_view.clear()
-    window._live_log_disclosure_btn.setChecked(False)
+    window._append_log("line from shared log")
+    log_window = window._log_window
+    window._guided_view_log_btn.click()
     qapp.processEvents()
-    assert not window._live_log_content_container.isVisibleTo(window)
+    assert log_window.isVisible()
+    assert "line from shared log" in window._log_view.toPlainText()
 
-    window._append_log("line while collapsed")
-    assert "line while collapsed" in window._log_view.toPlainText()
-
-    window._live_log_disclosure_btn.setChecked(True)
+    window._guided_view_log_btn.click()
     qapp.processEvents()
-    assert window._live_log_content_container.isVisibleTo(window)
-    assert "line while collapsed" in window._log_view.toPlainText()
+    assert window._log_window is log_window
+    assert len(
+        [
+            child
+            for child in window.findChildren(QDialog)
+            if child.objectName() == "applicationLogWindow"
+        ]
+    ) == 1
 
-    window._append_log("line while expanded")
-    window._live_log_disclosure_btn.setChecked(False)
+    log_window.close()
     qapp.processEvents()
-    window._live_log_disclosure_btn.setChecked(True)
+    assert not log_window.isVisible()
+    window._guided_view_log_btn.click()
     qapp.processEvents()
-    log_text = window._log_view.toPlainText()
-    assert "line while collapsed" in log_text
-    assert "line while expanded" in log_text
+    assert log_window.isVisible()
+    assert "line from shared log" in window._log_view.toPlainText()
 
 
-def test_live_log_disclosure_keeps_workflow_sections_accessible(window, qapp):
+def test_guided_logging_reaches_application_log_viewer(window):
+    window._log_view.clear()
+
+    window._on_guided_start_open_results_failed("representative Guided failure")
+
+    assert "representative Guided failure" in window._log_view.toPlainText()
+
+
+def test_full_control_log_placeholder_keeps_workflow_sections_accessible(window, qapp):
+    window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
     window.show()
     qapp.processEvents()
 
-    window._live_log_disclosure_btn.setChecked(False)
-    qapp.processEvents()
     assert window._run_config_group.isVisibleTo(window)
     assert window._plotting_group.isVisibleTo(window)
     assert window._advanced_group.isVisibleTo(window)
+    live_log = window.findChild(QGroupBox, "liveLogSection")
+    assert live_log is not None
+    assert live_log.isVisibleTo(window)
 
 
 def _left_column_width_snapshot(window):
