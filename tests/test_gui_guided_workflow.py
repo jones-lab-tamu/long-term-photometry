@@ -647,10 +647,22 @@ GUIDED_CARD_TO_DYNAMIC_MODE = {
 }
 
 
-def test_guided_workflow_and_full_control_tabs_are_accessible(window):
-    assert _tab_labels(window) == ["Guided Workflow", "Full Control"]
+def test_guided_workflow_is_visible_and_full_control_remains_constructed(window):
+    tabs = window._workflow_mode_tabs
+    visible_tab_labels = [
+        tabs.tabText(index)
+        for index in range(tabs.count())
+        if tabs.tabBar().isTabVisible(index)
+    ]
+    assert visible_tab_labels == ["Guided Workflow"]
+    full_control_index = tabs.indexOf(window._full_control_tab)
+    assert full_control_index >= 0
+    assert not tabs.tabBar().isTabVisible(full_control_index)
+    assert tabs.currentWidget() is window._guided_workflow_tab
     assert window._guided_workflow_tab.objectName() == "guidedWorkflowShell"
     assert window._full_control_tab.objectName() == "fullControlShell"
+    assert window._run_config_group is not None
+    assert window._mode_combo is not None
 
 
 def test_guided_workflow_stepper_has_expected_steps(window):
@@ -5765,10 +5777,10 @@ def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wordin
     # could not perform real validation/runs at all.
     assert "Production runs and applied-dF/F routing still use Full Control" not in visible_text
     assert "not yet wired" not in visible_text
-    # Honest replacement orientation copy: Guided Mode can validate and run
-    # supported setups, while some configurations may still need Full Control.
+    # Guided is now the sole scientist-facing workflow, so its visible copy
+    # must not direct users toward a retired navigation entry.
     assert "running supported analyses" in visible_text
-    assert "may still need Full Control" in visible_text
+    assert "Full Control" not in visible_text
 
 
 def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch):

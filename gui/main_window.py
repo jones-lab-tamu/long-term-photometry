@@ -3655,8 +3655,10 @@ class MainWindow(QMainWindow):
         self._workflow_mode_tabs = tabs
         self._full_control_tab = self._build_full_control_body()
         self._guided_workflow_tab = self._build_guided_workflow_shell()
-        tabs.addTab(self._guided_workflow_tab, "Guided Workflow")
-        tabs.addTab(self._full_control_tab, "Full Control")
+        guided_index = tabs.addTab(self._guided_workflow_tab, "Guided Workflow")
+        full_control_index = tabs.addTab(self._full_control_tab, "Full Control")
+        tabs.setTabVisible(full_control_index, False)
+        tabs.setCurrentIndex(guided_index)
         tabs.currentChanged.connect(
             lambda _idx: self._refresh_status_strip_visibility()
         )
@@ -15733,8 +15735,7 @@ class MainWindow(QMainWindow):
                     "dynamic-fit correction strategy across included ROIs, "
                     "and this plan currently has multiple dynamic-fit "
                     "modes. Choose the same dynamic-fit strategy for all "
-                    "included ROIs to run from Guided Mode, or use Full "
-                    "Control for mixed per-ROI strategies."
+                    "included ROIs to run from Guided Mode."
                 )
             elif (
                 "all_signal_only_f0_backend_validation_not_enabled"
@@ -15764,8 +15765,7 @@ class MainWindow(QMainWindow):
                 availability = (
                     f"{GUIDED_REVIEW_RUN_READINESS_HEADING}: This plan is complete, but "
                     "Guided Run does not yet support this configuration. "
-                    "Review the readiness details below, or use Full "
-                    "Control for this analysis."
+                    "Review the readiness details below."
                 )
         else:
             completeness = "Plan completeness: Needs attention"
@@ -15938,8 +15938,7 @@ class MainWindow(QMainWindow):
                 "correction strategy across included ROIs, and this plan "
                 "has multiple dynamic-fit modes. Choose the same "
                 "dynamic-fit strategy for all included ROIs to run from "
-                "Guided Mode, or use Full Control for mixed per-ROI "
-                "strategies."
+                "Guided Mode."
             )
         elif (
             "all_signal_only_f0_backend_validation_not_enabled"
@@ -15962,7 +15961,7 @@ class MainWindow(QMainWindow):
             next_text = (
                 "This plan is complete, but Guided Run does not yet "
                 "support this configuration. Review the readiness details "
-                "below, or use Full Control for this analysis."
+                "below."
             )
         self._guided_review_next_step_label.setText(next_text)
         dataset_contract_action_btn = getattr(
