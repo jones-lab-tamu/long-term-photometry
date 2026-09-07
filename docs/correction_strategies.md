@@ -68,13 +68,13 @@ The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_b
 
 The baseline-only reference candidate is a diagnostic comparison trace computed from configurable ultra-low-pass smoothing of the reference structure. The default requested smoothing window is 300 s, but the requested and actual per-chunk smoothing windows are recorded in `baseline_reference_candidate_by_chunk.csv` and `.json`. If the requested window is too large for a chunk it is adjusted and reported; if the actual window is a large fraction of the chunk, the output should be interpreted cautiously. The `baseline_ref_lowpass_cutoff_hz` field records the baseline-scale boundary used for diagnostics, but this implementation uses reflected-window smoothing rather than an exact frequency-domain low-pass filter. It is intended to test whether the reference channel supports slow baseline correction without allowing the fitted reference to follow response-scale biological events.
 
-This candidate is useful for evaluating chunks where full dynamic isosbestic regression may be questionable, especially chunks with negative or mixed reference coupling, broad sensor responses, or fitted references that contain substantial response-scale structure. In this implementation, the candidate is written for review and comparison only; it does not change the applied correction, dF/F calculation, or event detection.
+This candidate is useful for evaluating chunks where full reference-based regression may be questionable, especially chunks with negative or mixed reference coupling, broad sensor responses, or fitted references that contain substantial response-scale structure. In this implementation, the candidate is written for review and comparison only; it does not change the applied correction, dF/F calculation, or event detection.
 
 The phasic output writes candidate metrics under `qc/baseline_reference_candidate_by_chunk.csv` and `qc/baseline_reference_candidate_by_chunk.json` when fitted references are available.
 
-## Dynamic-vs-baseline candidate comparison
+## Reference-vs-baseline candidate comparison
 
-The dynamic-vs-baseline comparison class is a diagnostic triage field. It combines existing dynamic-fit QC severity with baseline-candidate QC metrics to indicate whether dynamic fitting, baseline-only reference use, both, or neither appear viable for a chunk. This field does not select or apply a correction mode; it is intended to make review of candidate behavior more systematic.
+The reference-vs-baseline comparison class is a diagnostic triage field. It combines existing reference-fit QC severity with baseline-candidate QC metrics to indicate whether reference-based correction, baseline-only reference use, both, or neither appear viable for a chunk. This field does not select or apply a correction mode; it is intended to make review of candidate behavior more systematic.
 
 Contextual flags, such as response-scale-rich fitted references or negative/mixed coupling, are not treated as automatic failures. The comparison outputs are diagnostic only and do not change dF/F calculation, event detection, or applied correction behavior.
 
@@ -82,11 +82,11 @@ A baseline candidate is considered cleanly viable only when it is available, not
 
 ## Diagnostic correction policy proposals
 
-The correction policy proposal layer converts dynamic-fit QC, baseline-candidate QC, and baseline fit relationship diagnostics into policy-specific triage fields. These fields indicate what the software would propose under conservative, balanced, or liberal review settings. They are provenance outputs only and do not determine the correction used for dF/F, event detection, or feature extraction.
+The correction policy proposal layer converts reference-fit QC, baseline-candidate QC, and baseline fit relationship diagnostics into policy-specific triage fields. These fields indicate what the software would propose under conservative, balanced, or liberal review settings. They are provenance outputs only and do not determine the correction used for dF/F, event detection, or feature extraction.
 
 Policy proposals separate correction-mode proposals from review-burden management. `review_required` means mandatory manual review. `review_queue_candidate` means the chunk is useful for representative audit or a review queue but is not necessarily mandatory. `warning_level` separates logged diagnostic severity from manual review burden. This distinction is important for long-duration recordings, where reviewing every contextual chunk would defeat the purpose of automated analysis.
 
-Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean dynamic-isosbestic cases, logs many contextual cases as warning/audit candidates without mandatory review, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
+Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean reference-based correction cases, logs many contextual cases as warning/audit candidates without mandatory review, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
 
 The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Signal-derived F0 diagnostics are used instead when considering fallback proposals.
 
@@ -94,7 +94,7 @@ The legacy baseline-reference candidate remains available as a diagnostic trace,
 
 `signal_only_f0_candidate` is a proposed correction mode only. It is not an applied correction mode and does not change dF/F calculation, event detection, feature extraction, HDF5 applied traces, or plotting outputs.
 
-The proposal can appear when dynamic/reference correction is not clean enough and signal-only F0 diagnostics indicate a sufficiently supported fallback candidate. The candidate uses the signal channel only and never uses the isosbestic/reference channel. High-state, edge-high-state, or partial-high-state context makes the proposal contextual and cautionary; it is not treated as a clean high-confidence fallback. Signal-only F0 candidates that are unavailable, hard-inspect, low-confidence under stricter policies, or insufficiently anchored are not proposed.
+The proposal can appear when reference-based correction is not clean enough and signal-only F0 diagnostics indicate a sufficiently supported fallback candidate. The candidate uses the signal channel only and never uses the isosbestic/reference channel. High-state, edge-high-state, or partial-high-state context makes the proposal contextual and cautionary; it is not treated as a clean high-confidence fallback. Signal-only F0 candidates that are unavailable, hard-inspect, low-confidence under stricter policies, or insufficiently anchored are not proposed.
 
 The old `baseline_reference_candidate` remains a legacy diagnostic trace and is not reintroduced as a policy fallback.
 
@@ -115,15 +115,15 @@ These diagnostics are provenance outputs only. They do not alter correction, dF/
 The signal-only F0 candidate described in this diagnostic section is a
 lower-envelope estimate computed from the signal channel alone. It does not use
 the isosbestic/reference channel, and generating the candidate for preview or
-QC does not itself replace applied dynamic isosbestic correction. A separate,
+QC does not itself replace applied reference-based correction. A separate,
 explicitly authorized Signal-Only F0 production strategy on the supported
 routes above uses the signal-derived production baseline for that ROI.
 
-The candidate uses configurable rolling lower-quantile and smoothing windows to estimate a conservative baseline-like F0 trace from the signal. Its QC fields report support, lower-state coverage, relationship to the observed signal, above-signal fraction before and after conservative capping, tracking score, robust ranges, viability, confidence, and diagnostic flags. Signal-state diagnostics provide contextual flags for sustained, edge, or partial high-state behavior, but signal-only F0 candidate generation is not restricted to locked-high cases; ordinary chunks with untrustworthy dynamic reference correction can also be evaluated.
+The candidate uses configurable rolling lower-quantile and smoothing windows to estimate a conservative baseline-like F0 trace from the signal. Its QC fields report support, lower-state coverage, relationship to the observed signal, above-signal fraction before and after conservative capping, tracking score, robust ranges, viability, confidence, and diagnostic flags. Signal-state diagnostics provide contextual flags for sustained, edge, or partial high-state behavior, but signal-only F0 candidate generation is not restricted to locked-high cases; ordinary chunks with untrustworthy reference-based correction can also be evaluated.
 
 This first-pass implementation uses scalar signal-state flags as contextual QC and can apply a contextual cap to avoid letting the diagnostic F0 candidate chase high-state plateaus. It does not perform epoch-level high-state exclusion or downweighting because high-state masks are not yet exported as provenance.
 
-This output is intended to evaluate whether a signal-derived fallback could be appropriate when dynamic isosbestic correction is untrustworthy or conceptually contraindicated. It does not alter correction, dF/F calculation, event detection, feature extraction, or HDF5 applied traces. The correction-policy proposal layer may propose `signal_only_f0_candidate` from these diagnostics, but that proposal still does not apply signal-only correction.
+This output is intended to evaluate whether a signal-derived fallback could be appropriate when reference-based correction is untrustworthy or conceptually contraindicated. It does not alter correction, dF/F calculation, event detection, feature extraction, or HDF5 applied traces. The correction-policy proposal layer may propose `signal_only_f0_candidate` from these diagnostics, but that proposal still does not apply signal-only correction.
 
 When available during normal phasic analysis, the diagnostic trace is stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/signal_only_f0_candidate`. Scalar metrics are written to `qc/baseline_reference_candidate_by_chunk.csv`, `qc/baseline_reference_candidate_by_chunk.json`, and the `signal_only_f0_candidate_summary` block in `qc/qc_summary.json`.
 
@@ -139,9 +139,9 @@ This updates only `qc/baseline_reference_candidate_by_chunk.csv`, `qc/baseline_r
 
 ## Reference candidate comparison plots
 
-Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between dynamic-reference subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.
+Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between reference-based subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.
 
-The metadata box includes QC severity, comparison class, flags, smoothing window, and whether the baseline candidate came from stored HDF5 or recomputation. These plots are intended for review of chunks flagged by dynamic-fit QC or reference-candidate comparison. They do not select or apply a correction mode, and they do not change dF/F calculation or event detection.
+The metadata box includes QC severity, comparison class, flags, smoothing window, and whether the baseline candidate came from stored HDF5 or recomputation. These plots are intended for review of chunks flagged by reference-fit QC or reference-candidate comparison. They do not select or apply a correction mode, and they do not change dF/F calculation or event detection.
 
 When available, baseline-reference candidate traces are stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/baseline_ref_candidate` for diagnostic provenance. The comparison plotting tool uses this stored trace when present. For older runs without stored candidate traces, the plotting tool can recompute the candidate from recorded metadata. This storage is diagnostic-only and does not affect correction, dF/F calculation, or event detection.
 
