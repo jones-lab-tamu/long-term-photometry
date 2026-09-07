@@ -52,9 +52,9 @@ Bleach correction metadata and diagnostics are written into run outputs and corr
 
 `baseline_subtract_before_fit` applies to rolling fit modes. It can reduce slow baseline influence on local fit estimation. It does not replace baseline/F0 handling used for dF/F calculation.
 
-## Dynamic-fit validity diagnostics
+## Reference-fit validity diagnostics
 
-Dynamic-fit validity diagnostics are per-chunk QC metrics that do not change correction behavior. They describe model-assumption concerns, not biological truth. They help identify chunks where the fitted reference is flat, uninformative, negative or mixed-sign in its coupling, or unusually rich in response-scale structure.
+Reference-fit validity diagnostics are per-chunk QC metrics that do not change correction behavior. They describe model-assumption concerns, not biological truth. They help identify chunks where the fitted reference is flat, uninformative, negative or mixed-sign in its coupling, or unusually rich in response-scale structure.
 
 Response-scale-rich fitted references are contextual QC flags. They do not automatically indicate a failed correction because legitimate shared artifact or reference structure can occur on similar timescales. They become more concerning when combined with negative or mixed coupling, low fitted-reference range, flat or uninformative fitted references, or visual evidence that the fitted reference follows biological signal rather than reference artifact.
 
@@ -62,7 +62,7 @@ Negative or mixed reference coupling is also a contextual QC flag. It indicates 
 
 Flat/uninformative fitted references and low fitted-reference range are stronger warning signs because they indicate the fitted reference is not contributing meaningful correction structure. These hard flags mark chunks as needing inspection. Flags indicate chunks needing inspection, not automatic exclusion or automatic correction-mode selection.
 
-The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_by_chunk.csv` and `qc/dynamic_fit_qc_by_chunk.json` when fitted references are available. Later workflows may use these metrics to compare full dynamic reference correction with baseline-only reference correction.
+The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_by_chunk.csv` and `qc/dynamic_fit_qc_by_chunk.json` when fitted references are available. Later workflows may use these metrics to compare full reference-based correction with baseline-only reference correction.
 
 ## Baseline-only reference candidate diagnostics
 
