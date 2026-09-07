@@ -655,7 +655,7 @@ For long-recording windows and result presentation, see
 [Continuous Recordings](continuous_recordings.md).
 
 For correction concepts and diagnostic interpretation, see
-[Correction and Dynamic Fitting](correction_and_dynamic_fit.md).
+[Correction Strategies](correction_strategies.md).
 
 For event-detection behavior and terminology, see
 [Event Detection](event_detection.md).

@@ -13,7 +13,7 @@ BUNDLED_CONFIG = BUNDLED_DATASET / "tutorial_config.yaml"
 DOC_PATHS = [
     REPO_ROOT / "docs" / "guided_scientist_guide.md",
     REPO_ROOT / "docs" / "input_formats.md",
-    REPO_ROOT / "docs" / "correction_and_dynamic_fit.md",
+    REPO_ROOT / "docs" / "correction_strategies.md",
     REPO_ROOT / "docs" / "event_detection.md",
     REPO_ROOT / "docs" / "continuous_recordings.md",
     REPO_ROOT / "docs" / "batch_processing.md",
@@ -22,7 +22,7 @@ DOC_PATHS = [
 README_LINKS = [
     "docs/guided_scientist_guide.md",
     "docs/input_formats.md",
-    "docs/correction_and_dynamic_fit.md",
+    "docs/correction_strategies.md",
     "docs/event_detection.md",
     "docs/continuous_recordings.md",
 ]
@@ -271,7 +271,7 @@ def test_guided_scientist_guide_covers_current_visible_workflow():
     for rel in (
         "input_formats.md",
         "continuous_recordings.md",
-        "correction_and_dynamic_fit.md",
+        "correction_strategies.md",
         "event_detection.md",
     ):
         assert f"]({rel})" in guide
@@ -382,7 +382,7 @@ def test_bundled_synthetic_dataset_full_run_outputs_match_pipeline_contract(tmp_
 
 
 def test_docs_preserve_scope_and_safety_claims():
-    correction = (REPO_ROOT / "docs" / "correction_and_dynamic_fit.md").read_text(encoding="utf-8").lower()
+    correction = (REPO_ROOT / "docs" / "correction_strategies.md").read_text(encoding="utf-8").lower()
     continuous = (REPO_ROOT / "docs" / "continuous_recordings.md").read_text(encoding="utf-8").lower()
     batch = (REPO_ROOT / "docs" / "batch_processing.md").read_text(encoding="utf-8").lower()
     guide = (REPO_ROOT / "docs" / "guided_scientist_guide.md").read_text(encoding="utf-8").lower()

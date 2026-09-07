@@ -337,5 +337,5 @@ For current format and analysis details:
 
 - [Supported input formats](docs/input_formats.md)
 - [Continuous recordings](docs/continuous_recordings.md)
-- [Correction and dynamic fitting](docs/correction_and_dynamic_fit.md)
+- [Correction strategies](docs/correction_strategies.md)
 - [Event detection](docs/event_detection.md)

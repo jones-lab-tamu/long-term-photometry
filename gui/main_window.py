@@ -15928,7 +15928,7 @@ class MainWindow(QMainWindow):
                     notes = (
                         "Uses signal-only baseline"
                         if choice.selected_strategy == "signal_only_f0"
-                        else "Dynamic fit"
+                        else "Correction strategy"
                     )
                 else:
                     evidence_status = "Needs confirmation"

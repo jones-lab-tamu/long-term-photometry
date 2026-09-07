@@ -846,6 +846,7 @@ def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
     assert readiness.plan_complete_for_handoff is True
     assert "Global Linear Regression" in correction_text
     assert "Signal-Only F0" in correction_text
+    assert "Correction strategy" in correction_text
     assert "Confirmed, current" in correction_text
 
     all_signal = _complete_new_analysis_plan_for_gui(

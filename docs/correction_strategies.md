@@ -1,4 +1,4 @@
-# Correction and Dynamic Fitting
+# Correction Strategies
 
 Isosbestic/reference correction is part of the standard phasic preprocessing workflow. The advanced controls exist to inspect and tune how correction is performed; they do not mean correction is optional for normal phasic analysis.
 
@@ -17,9 +17,14 @@ production authorization and into Pipeline. The proposal and policy sections
 below describe diagnostic or future evidence; they do not add hidden correction
 routes or silently choose the correction used by a run.
 
-## Dynamic fit modes
+## Reference-based correction modes
 
-Configured by `dynamic_fit_mode`:
+`dynamic_fit_mode` is a retained legacy/internal configuration key. The
+scientist-facing application refers to the overall choice as the correction
+strategy.
+
+For reference-based correction strategies, `dynamic_fit_mode` specifies the
+reference-fitting mode:
 - `rolling_filtered_to_raw`: rolling local regression fit using filtered inputs and reconstructing into raw signal units.
 - `rolling_filtered_to_filtered`: rolling local regression in filtered space.
 - `global_linear_regression`: one global linear signal/reference fit per chunk.
